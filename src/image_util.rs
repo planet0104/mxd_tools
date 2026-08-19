@@ -10,13 +10,19 @@ pub fn to_gray(img: &RgbImage) -> Vec<u8> {
 }
 
 pub fn resize_gray(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
-    let mut out = vec![0u8; (dw * dh) as usize];
-    for y in 0..dh {
-        for x in 0..dw {
-            let sx = x * sw / dw;
-            let sy = y * sh / dh;
-            out[(y * dw + x) as usize] = src[(sy * sw + sx) as usize];
-        }
+    if sw == dw && sh == dh {
+        return src.to_vec();
+    }
+    let img = image::GrayImage::from_raw(sw, sh, src.to_vec()).expect("gray size");
+    image::imageops::resize(&img, dw, dh, image::imageops::FilterType::Triangle).into_raw()
+}
+
+pub fn crop_gray(src: &[u8], sw: u32, x: u32, y: u32, w: u32, h: u32) -> Vec<u8> {
+    let mut out = vec![0u8; (w * h) as usize];
+    for row in 0..h {
+        let s = ((y + row) * sw + x) as usize;
+        let d = (row * w) as usize;
+        out[d..d + w as usize].copy_from_slice(&src[s..s + w as usize]);
     }
     out
 }

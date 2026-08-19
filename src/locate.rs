@@ -1,8 +1,8 @@
 use image::RgbImage;
 
 use crate::image_util::{
-    crop_rgb, find_player_yellow, mark_cross, mask_yellow_in_place, match_template_ccoeff_normed,
-    resize_gray, to_gray,
+    crop_gray, crop_rgb, find_player_yellow, mark_cross, mask_yellow_in_place,
+    match_template_ccoeff_normed, resize_gray, to_gray,
 };
 use crate::map_api::{fetch_canvas, fetch_full_map, resolve_map_id, save_map};
 use crate::ocr::read_map_names;
@@ -14,12 +14,18 @@ pub const VIEW_Y: u32 = 72;
 pub const VIEW_W: u32 = 210;
 pub const VIEW_H: u32 = 134;
 
+const INSET_L: u32 = 4;
+const INSET_R: u32 = 4;
+const INSET_T: u32 = 0;
+const INSET_B: u32 = 4;
+
 #[derive(Debug, Clone)]
 pub struct Align {
     pub mode: &'static str,
     pub score: f64,
     pub loc: (u32, u32),
     pub scale: (f64, f64),
+    pub view_origin: (f64, f64),
 }
 
 #[derive(Debug, Clone)]
@@ -44,6 +50,12 @@ pub struct LocateResult {
     pub align: Align,
 }
 
+fn consider(best: &mut Option<Align>, cand: Align) {
+    if best.as_ref().is_none_or(|b| cand.score > b.score) {
+        *best = Some(cand);
+    }
+}
+
 pub fn view_to_canvas(view: &RgbImage, canvas: &RgbImage) -> Result<Align, String> {
     let mut view_m = view.clone();
     mask_yellow_in_place(&mut view_m);
@@ -54,52 +66,83 @@ pub fn view_to_canvas(view: &RgbImage, canvas: &RgbImage) -> Result<Align, Strin
     let cw = canvas.width();
     let ch = canvas.height();
 
-    let mut best: Option<Align> = None;
+    // 只用视口内侧，避开左右端空白和底边黑边；不判断当前是否滚到两端。
+    let ix = INSET_L.min(vw.saturating_sub(16));
+    let iy = INSET_T.min(vh.saturating_sub(16));
+    let iw = vw.saturating_sub(ix + INSET_R).max(16);
+    let ih = vh.saturating_sub(iy + INSET_B).max(16);
+    let inner = crop_gray(&gray_v, vw, ix, iy, iw, ih);
+    let origin = (ix as f64, iy as f64);
 
-    let th = vh.min(ch);
-    let tw = vw.min(cw);
-    let tpl: Vec<u8> = (0..th)
-        .flat_map(|y| {
-            let start = (y * vw) as usize;
-            gray_v[start..start + tw as usize].to_vec()
-        })
-        .collect();
-    if let Some((score, x, y)) = match_template_ccoeff_normed(&gray_c, cw, ch, &tpl, tw, th) {
-        best = Some(Align {
-            mode: "partial",
-            score,
-            loc: (x, y),
-            scale: (1.0, 1.0),
-        });
-    }
+    let mut best = None;
 
-    if cw <= vw && ch <= vh {
-        if let Some((score, x, y)) =
-            match_template_ccoeff_normed(&gray_v, vw, vh, &gray_c, cw, ch)
+    if iw <= cw && ih <= ch {
+        if let Some((score, x, y)) = match_template_ccoeff_normed(&gray_c, cw, ch, &inner, iw, ih)
         {
-            if best.as_ref().map(|b| score > b.score).unwrap_or(true) {
-                best = Some(Align {
-                    mode: "full",
+            consider(
+                &mut best,
+                Align {
+                    mode: "view",
                     score,
                     loc: (x, y),
                     scale: (1.0, 1.0),
-                });
-            }
+                    view_origin: origin,
+                },
+            );
         }
     }
 
-    let scale = (vw as f64 / cw as f64).min(vh as f64 / ch as f64);
-    let nw = ((cw as f64 * scale).round() as u32).max(8);
-    let nh = ((ch as f64 * scale).round() as u32).max(8);
-    let small = resize_gray(&gray_c, cw, ch, nw, nh);
-    if let Some((score, x, y)) = match_template_ccoeff_normed(&gray_v, vw, vh, &small, nw, nh) {
-        if best.as_ref().map(|b| score > b.score).unwrap_or(true) {
-            best = Some(Align {
-                mode: "full",
-                score,
-                loc: (x, y),
-                scale: (scale, scale),
-            });
+    let nw = ((iw as f64 * ch as f64 / ih as f64).round() as u32).max(8);
+    if nw <= cw {
+        let scaled = resize_gray(&inner, iw, ih, nw, ch);
+        if let Some((score, x, y)) =
+            match_template_ccoeff_normed(&gray_c, cw, ch, &scaled, nw, ch)
+        {
+            consider(
+                &mut best,
+                Align {
+                    mode: "hscroll",
+                    score,
+                    loc: (x, y),
+                    scale: (nw as f64 / iw as f64, ch as f64 / ih as f64),
+                    view_origin: origin,
+                },
+            );
+        }
+    }
+
+    let nh = ((ih as f64 * cw as f64 / iw as f64).round() as u32).max(8);
+    if nh <= ch {
+        let scaled = resize_gray(&inner, iw, ih, cw, nh);
+        if let Some((score, x, y)) =
+            match_template_ccoeff_normed(&gray_c, cw, ch, &scaled, cw, nh)
+        {
+            consider(
+                &mut best,
+                Align {
+                    mode: "vscroll",
+                    score,
+                    loc: (x, y),
+                    scale: (cw as f64 / iw as f64, nh as f64 / ih as f64),
+                    view_origin: origin,
+                },
+            );
+        }
+    }
+
+    if cw <= iw && ch <= ih {
+        if let Some((score, x, y)) = match_template_ccoeff_normed(&inner, iw, ih, &gray_c, cw, ch)
+        {
+            consider(
+                &mut best,
+                Align {
+                    mode: "canvas",
+                    score,
+                    loc: (x, y),
+                    scale: (1.0, 1.0),
+                    view_origin: origin,
+                },
+            );
         }
     }
 
@@ -109,10 +152,11 @@ pub fn view_to_canvas(view: &RgbImage, canvas: &RgbImage) -> Result<Align, Strin
 pub fn player_on_canvas(px: f64, py: f64, align: &Align, cw: u32, ch: u32) -> (f64, f64) {
     let (ox, oy) = align.loc;
     let (sx, sy) = align.scale;
-    let (cx, cy) = if align.mode == "partial" {
-        (ox as f64 + px, oy as f64 + py)
+    let (ix, iy) = align.view_origin;
+    let (cx, cy) = if align.mode == "canvas" {
+        ((px - ix - ox as f64) / sx, (py - iy - oy as f64) / sy)
     } else {
-        ((px - ox as f64) / sx, (py - oy as f64) / sy)
+        (ox as f64 + (px - ix) * sx, oy as f64 + (py - iy) * sy)
     };
     (
         cx.clamp(0.0, (cw - 1) as f64),
