@@ -1,0 +1,7 @@
+/target/
+/maps/
+/minimap_shots/
+/tmp/
+/models/
+*.pdb
+/driver/vmulti/VMulti.Driver
