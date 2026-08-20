@@ -12,3 +12,4 @@ __pycache__/
 
 atlases_from_game
 parts_from_game
+**/generated/
