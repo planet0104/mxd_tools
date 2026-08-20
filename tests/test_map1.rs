@@ -1,6 +1,6 @@
 //! 遍历 `test_cases/test_map*`：
-//! - 断言可用用例标注文件做校验
-//! - 导出图只用小地图截图作输入，全程 Rust OCR/定位/下载/标注，写入 `tmp/<用例名>/`
+//! - 用标注文件中的地图名解析 ID（不再 OCR）
+//! - 导出图只用小地图截图作输入，定位/下载/标注写入 `tmp/<用例名>/`
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -9,7 +9,6 @@ use image::RgbImage;
 use mxd_tools::image_util::{crop_rgb, find_player_yellow, mark_cross};
 use mxd_tools::locate::{locate_from_images, LocateResult, VIEW_H, VIEW_W, VIEW_X, VIEW_Y};
 use mxd_tools::map_api::{fetch_canvas, fetch_full_map, resolve_map_id};
-use mxd_tools::ocr::read_map_names;
 use mxd_tools::paths::safe_filename;
 
 fn cases_root() -> PathBuf {
@@ -132,14 +131,17 @@ fn load_expected_full_map_ratio(dir: &Path) -> (f64, f64) {
     (xy[0], xy[1])
 }
 
-fn rust_locate_from_shot_only(shot: &RgbImage) -> (LocateResult, RgbImage) {
-    let (street, name) = read_map_names(shot).expect("Rust OCR 失败");
+fn rust_locate_from_shot_and_names(
+    shot: &RgbImage,
+    street: &str,
+    name: &str,
+) -> (LocateResult, RgbImage) {
     let query = format!("{street}-{name}");
     let map_id = resolve_map_id(&query)
         .unwrap_or_else(|| panic!("解析地图 ID 失败 query={query} street={street} name={name}"));
     let canvas = fetch_canvas(map_id).expect("下载小地图画布失败");
     let full = fetch_full_map(map_id).expect("下载完整地图失败");
-    let result = locate_from_images(shot, &canvas, &full, &street, &name, Some(map_id))
+    let result = locate_from_images(shot, &canvas, &full, street, name, Some(map_id))
         .expect("Rust 定位失败");
     (result, full)
 }
@@ -218,23 +220,22 @@ fn assert_yellow(case_name: &str) {
     );
 }
 
-fn assert_ocr(case_name: &str) {
+fn assert_resolve_names(case_name: &str) {
     let dir = fixtures_src(case_name);
-    let (want_street, want_name) = load_expected_names(&dir);
-    let shot = load_shot(&dir);
-    let (street, name) = read_map_names(&shot).expect("OCR 应识别两行地图名");
-    assert_eq!(street, want_street, "{case_name} 一级地图");
-    assert_eq!(name, want_name, "{case_name} 二级地图");
+    let (street, name) = load_expected_names(&dir);
+    let query = format!("{street}-{name}");
+    let map_id = resolve_map_id(&query).unwrap_or_else(|| panic!("{case_name} 应能解析 {query}"));
+    assert!(map_id > 0, "{case_name} 地图 ID 无效");
 }
 
 fn assert_locate_and_export(case_name: &str) {
     let dir = fixtures_src(case_name);
     let shot = load_shot(&dir);
-    let (result, full) = rust_locate_from_shot_only(&shot);
+    let (want_street, want_name) = load_expected_names(&dir);
+    let (result, full) = rust_locate_from_shot_and_names(&shot, &want_street, &want_name);
     let out = export_observe_artifacts(case_name, &shot, &full, &result);
     assert!(out.is_dir());
 
-    let (want_street, want_name) = load_expected_names(&dir);
     assert_eq!(result.street, want_street, "{case_name} 一级地图");
     assert_eq!(result.name, want_name, "{case_name} 二级地图");
     assert!(
@@ -277,8 +278,8 @@ fn test_map1_player_yellow_matches_annotation() {
 }
 
 #[test]
-fn test_map1_ocr_map_names() {
-    assert_ocr("test_map1");
+fn test_map1_resolve_map_names() {
+    assert_resolve_names("test_map1");
 }
 
 #[test]
@@ -292,8 +293,8 @@ fn test_map2_player_yellow_matches_annotation() {
 }
 
 #[test]
-fn test_map2_ocr_map_names() {
-    assert_ocr("test_map2");
+fn test_map2_resolve_map_names() {
+    assert_resolve_names("test_map2");
 }
 
 #[test]

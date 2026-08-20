@@ -1,0 +1,97 @@
+{
+  "mapId": 50001,
+  "padId": "000050001",
+  "name": {
+    "name": "The Field West of Southperry",
+    "streetName": "Maple Road",
+    "id": 50001
+  },
+  "render": "map_50001_render.png",
+  "renderSource": "https://maplestory.io/api/GMS/83/map/50001/render",
+  "renderNote": "GMS/83 英文木牌；CMS 对本图无 /render",
+  "wzjson": "json_573635e18aaf09bb78ca27c2eeb6cdef.bundle :: Assets/WzAssets/Json/Map/Map/Map0/000050001.wzjson",
+  "layout": {
+    "pathCount": 3650,
+    "leafCount": 3107,
+    "numLeafCount": 2518,
+    "info": {
+      "version": 93,
+      "cloud": 10,
+      "town": 0,
+      "mobRate": 0.0,
+      "returnMap": 60000,
+      "forcedReturn": 999999999,
+      "hideMinimap": 0,
+      "moveLimit": 0,
+      "swim": 0,
+      "fieldLimit": 4,
+      "VRTop": -780,
+      "VRLeft": 138,
+      "VRBottom": 543,
+      "VRRight": 2018
+    },
+    "miniMap": {
+      "width": 2005,
+      "height": 1154,
+      "centerX": -68,
+      "centerY": 510,
+      "magnification": 4,
+      "mag": 4
+    },
+    "portals": {
+      "0": {
+        "pt": 0,
+        "x": 324,
+        "y": 179,
+        "tm": 999999999
+      },
+      "1": {
+        "pt": 2,
+        "x": 228,
+        "y": 361,
+        "tm": 50000,
+        "hideTooltip": 0,
+        "delay": 0
+      },
+      "2": {
+        "pt": 2,
+        "x": 1907,
+        "y": 360,
+        "tm": 60000,
+        "hideTooltip": 0,
+        "delay": 0
+      },
+      "3": {
+        "pt": 2,
+        "x": 1275,
+        "y": -178,
+        "tm": 1000001
+      },
+      "4": {
+        "pt": 2,
+        "x": 1750,
+        "y": -178,
+        "tm": 1000002
+      },
+      "5": {
+        "pt": 9,
+        "x": 322,
+        "y": 325,
+        "tm": 999999999,
+        "delay": 1000,
+        "hideTooltip": 0,
+        "onlyOnce": 1
+      },
+      "6": {
+        "pt": 9,
+        "x": 1818,
+        "y": 325,
+        "tm": 999999999,
+        "delay": 1000,
+        "hideTooltip": 0,
+        "onlyOnce": 1
+      }
+    },
+    "note": "整型叶子（VR/portal/miniMap 等）已与二进制对齐；tile/obj 的字符串叶子与坐标完整拼图仍需继续解析类型流与图集。"
+  }
+}

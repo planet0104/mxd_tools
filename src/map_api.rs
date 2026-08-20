@@ -45,7 +45,8 @@ fn http_json(url: &str) -> Result<Value, String> {
 }
 
 fn parse_map_id(text: &str) -> Option<u64> {
-    let re = Regex::new(r"(?:Map/)?(\d{7,9})").ok()?;
+    // 经典图号从 5 位起（如 10000、50001），也有 7～9 位（如 2000000）
+    let re = Regex::new(r"(?:Map/)?(\d{5,9})").ok()?;
     let cleaned = text.replace(',', "");
     re.captures(&cleaned)
         .and_then(|c| c.get(1))
@@ -180,6 +181,67 @@ pub fn fetch_canvas(map_id: u64) -> Result<RgbImage, String> {
     let url = MINIMAP_URL.replace("{map_id}", &map_id.to_string());
     let (ctype, data) = http_bytes(&url)?;
     decode_png(&data, &ctype)
+}
+
+/// 查询 maplestory.io 上的街名 / 地图名（英文）。
+pub fn fetch_map_name(map_id: u64) -> Option<(String, String)> {
+    let url = NAME_URL.replace("{map_id}", &map_id.to_string());
+    let info = http_json(&url).ok()?;
+    let street = info
+        .get("streetName")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let name = info
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if street.is_empty() && name.is_empty() {
+        None
+    } else {
+        Some((street, name))
+    }
+}
+
+/// 下载官方小地图画布 + 完整渲染图到目录，文件名 `map_{id}_minimap.png` / `map_{id}_render.png`。
+pub fn download_map_pngs(map_id: u64, out_dir: &Path) -> Result<(PathBuf, PathBuf), String> {
+    std::fs::create_dir_all(out_dir).map_err(|e| e.to_string())?;
+    let mini_url = MINIMAP_URL.replace("{map_id}", &map_id.to_string());
+    let full_url = RENDER_URL.replace("{map_id}", &map_id.to_string());
+    let (ctype_m, data_m) = http_bytes(&mini_url)?;
+    let (ctype_f, data_f) = http_bytes(&full_url)?;
+    if !ctype_m.to_lowercase().contains("png") && !data_m.starts_with(b"\x89PNG") {
+        return Err(format!("小地图接口未返回 PNG：{ctype_m}"));
+    }
+    if !ctype_f.to_lowercase().contains("png") && !data_f.starts_with(b"\x89PNG") {
+        return Err(format!("完整图接口未返回 PNG：{ctype_f}"));
+    }
+    let mini_path = out_dir.join(format!("map_{map_id}_minimap.png"));
+    let full_path = out_dir.join(format!("map_{map_id}_render.png"));
+    std::fs::write(&mini_path, &data_m).map_err(|e| e.to_string())?;
+    std::fs::write(&full_path, &data_f).map_err(|e| e.to_string())?;
+    Ok((mini_path, full_path))
+}
+
+/// 按地图名或 ID 解析，并下载小地图 + 完整图到 `maps/<安全名>/`。
+pub fn extract_map_by_name(
+    name: &str,
+    maps_root: &Path,
+) -> Result<(u64, PathBuf, PathBuf, String), String> {
+    let query = name.trim();
+    if query.is_empty() {
+        return Err("地图名为空".into());
+    }
+    let map_id = resolve_map_id(query).ok_or_else(|| {
+        format!("找不到地图：{query}（可填中文名如「彩虹岛-南港西郊平原」，或数字 ID 如 50001）")
+    })?;
+    let label = map_label(map_id, query);
+    let folder = maps_root.join(safe_filename(query));
+    let (mini, full) = download_map_pngs(map_id, &folder)?;
+    Ok((map_id, mini, full, label))
 }
 
 pub fn save_map(name: &str, out_dir: &Path) -> Result<(u64, PathBuf, String), String> {

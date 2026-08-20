@@ -1,0 +1,26 @@
+{
+  "mapId": 50001,
+  "padId": "000050001",
+  "miniMap": {
+    "width": 2005,
+    "height": 1154,
+    "centerX": -68,
+    "centerY": 510,
+    "magnification": 4,
+    "_offset": 126748
+  },
+  "atlas": "map_50001_atlas.png",
+  "minimap": "map_50001_minimap.png",
+  "sources": {
+    "wzjson": "json_573635e18aaf09bb78ca27c2eeb6cdef.bundle :: Assets/WzAssets/Json/Map/Map/Map0/000050001.wzjson",
+    "atlas": "spritesheet_fa1998bbc1509b70dd7f9eec403889fa.bundle :: Assets/WzAssets/SpriteSheet/CN/Map/Map/Map0/000050001_0.png",
+    "wzspritesheet": "Assets/WzAssets/SpriteSheet/CN/Map/Map/Map0/000050001.wzspritesheet",
+    "rect_bl": [
+      0,
+      0,
+      125,
+      72
+    ]
+  },
+  "note": "像素来自客户端 CN SpriteSheet；WZJS 提供 width/height/center/mag"
+}

@@ -1,0 +1,9 @@
+﻿{
+  "mapId": 50001,
+  "padId": "000050001",
+  "size": [2040, 1483],
+  "layoutSource": "https://maplestory.io/api/wz/GMS/83/Map/Map/Map0/000050001.img",
+  "spritePolicy": "Tile/Back/Obj=GMS/83；signboard=客户端 CN 图集（轮廓匹配中文帧）",
+  "output": "map_50001_render_cn.png",
+  "note": "已从 maps/ 备份恢复（11:57 正确版本）；12:04 被错误 CMS 拼图覆盖过"
+}

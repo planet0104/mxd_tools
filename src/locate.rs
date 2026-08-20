@@ -4,10 +4,9 @@ use crate::image_util::{
     crop_gray, crop_rgb, find_player_yellow, mark_cross, mask_yellow_in_place,
     match_template_ccoeff_normed, resize_gray, to_gray,
 };
-use crate::map_api::{fetch_canvas, fetch_full_map, resolve_map_id, save_map};
-use crate::ocr::read_map_names;
+use crate::map_api::{fetch_canvas, fetch_full_map, resolve_map_id};
 use crate::paths::{maps_dir, safe_filename};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub const VIEW_X: u32 = 6;
 pub const VIEW_Y: u32 = 72;
@@ -200,33 +199,31 @@ pub fn locate_from_images(
     })
 }
 
-/// 自动截取游戏进程小地图 → OCR → 下载完整地图。
-pub fn save_from_minimap(root: &Path) -> Result<(String, String, u64, PathBuf), String> {
-    #[cfg(windows)]
-    {
-        let img = crate::capture::capture_minimap_image()?;
-        let (street, name) = read_map_names(&img)?;
-        let query = format!("{street}-{name}");
-        let out_dir = maps_dir(root);
-        let (map_id, path, _label) = save_map(&query, &out_dir)?;
-        Ok((street, name, map_id, path))
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = root;
-        Err("仅支持 Windows".into())
+fn split_query_names(query: &str) -> (String, String) {
+    let parts: Vec<&str> = query
+        .split(|c| matches!(c, '-' | ':' | '：' | '/' | '｜' | '|'))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    match parts.as_slice() {
+        [street, name, ..] => ((*street).to_string(), (*name).to_string()),
+        [only] => (String::new(), (*only).to_string()),
+        _ => (String::new(), query.trim().to_string()),
     }
 }
 
-/// 自动截取游戏进程小地图 → OCR → 网络对齐 → 标注玩家位置。
-pub fn locate_player(root: &Path) -> Result<String, String> {
+/// 截取游戏进程小地图 + 手动地图名 → 网络对齐 → 标注玩家位置。
+pub fn locate_player(root: &Path, map_query: &str) -> Result<String, String> {
     #[cfg(windows)]
     {
-        let shot_im = crate::capture::capture_minimap_image()?;
-        let (street, name) = read_map_names(&shot_im)?;
-        let query = format!("{street}-{name}");
-        let map_id = resolve_map_id(&query).ok_or_else(|| format!("找不到地图：{query}"))?;
+        let query = map_query.trim();
+        if query.is_empty() {
+            return Err("请先填写地图名或地图 ID".into());
+        }
+        let (street, name) = split_query_names(query);
+        let map_id = resolve_map_id(query).ok_or_else(|| format!("找不到地图：{query}"))?;
 
+        let shot_im = crate::capture::capture_minimap_image()?;
         let canvas = fetch_canvas(map_id)?;
         let full = fetch_full_map(map_id)?;
         let result = locate_from_images(&shot_im, &canvas, &full, &street, &name, Some(map_id))?;
@@ -262,7 +259,7 @@ pub fn locate_player(root: &Path) -> Result<String, String> {
     }
     #[cfg(not(windows))]
     {
-        let _ = root;
+        let _ = (root, map_query);
         Err("仅支持 Windows".into())
     }
 }

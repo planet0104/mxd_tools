@@ -8,11 +8,9 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
 use eframe::egui;
-use mxd_tools::capture;
 use mxd_tools::locate;
 use mxd_tools::map_api;
-use mxd_tools::ocr;
-use mxd_tools::paths::{maps_dir, minimap_shots_dir, workspace_root};
+use mxd_tools::paths::{maps_dir, workspace_root};
 
 /// 加载系统自带中文字体，避免 egui 默认字体缺字显示为方框/乱码。
 fn setup_cjk_fonts(ctx: &egui::Context) {
@@ -66,16 +64,12 @@ fn setup_cjk_fonts(ctx: &egui::Context) {
 }
 
 enum JobKind {
-    CaptureAndOcr,
-    SaveMap,
-    SaveFromMinimap,
+    ExtractMap,
     Locate,
 }
 
 enum JobResult {
     Log(String),
-    /// OCR / 识别得到的地图名，写入输入框
-    MapName(String),
     Done,
 }
 
@@ -94,7 +88,7 @@ impl App {
         Self {
             root: workspace_root(),
             map_name: String::new(),
-            log: "就绪。先点「截取小地图并识别」，OCR 结果会填入下方地图名。\n".into(),
+            log: "就绪。填写地图名或地图 ID，再点「提取小地图与完整图」。\n例：彩虹岛-南港西郊平原 或 50001\n".into(),
             busy: false,
             tx: Some(tx),
             rx,
@@ -123,31 +117,18 @@ impl App {
         self.append_log("任务开始…");
         thread::spawn(move || {
             match kind {
-                JobKind::CaptureAndOcr => {
-                    match capture_and_ocr(&root) {
-                        Ok((path, query, street, name)) => {
-                            let _ = tx.send(JobResult::MapName(query.clone()));
-                            let _ = tx.send(JobResult::Log(format!(
-                                "已截取 {}\nOCR：一级地图 {street} / 二级地图 {name}\n已填入地图名：{query}",
-                                path.display()
-                            )));
-                        }
-                        Err(e) => {
-                            let _ = tx.send(JobResult::Log(format!("失败：{e}")));
-                        }
-                    }
-                }
-                JobKind::SaveMap => {
+                JobKind::ExtractMap => {
                     if map_name.trim().is_empty() {
                         let _ = tx.send(JobResult::Log(
-                            "失败：地图名为空，请先「截取小地图并识别」或手动填写".into(),
+                            "失败：请先填写地图名或地图 ID".into(),
                         ));
                     } else {
-                        match map_api::save_map(&map_name, &maps_dir(&root)) {
-                            Ok((id, path, label)) => {
+                        match map_api::extract_map_by_name(&map_name, &maps_dir(&root)) {
+                            Ok((id, mini, full, label)) => {
                                 let _ = tx.send(JobResult::Log(format!(
-                                    "地图ID {id}\n已保存 {}\n{label}",
-                                    path.display()
+                                    "地图ID {id}\n{label}\n小地图 {}\n完整图 {}",
+                                    mini.display(),
+                                    full.display()
                                 )));
                             }
                             Err(e) => {
@@ -156,27 +137,9 @@ impl App {
                         }
                     }
                 }
-                JobKind::SaveFromMinimap => {
-                    match locate::save_from_minimap(&root) {
-                        Ok((street, name, id, path)) => {
-                            let query = format!("{street}-{name}");
-                            let _ = tx.send(JobResult::MapName(query));
-                            let _ = tx.send(JobResult::Log(format!(
-                                "一级地图 {street}\n二级地图 {name}\n地图ID {id}\n已保存 {}",
-                                path.display()
-                            )));
-                        }
-                        Err(e) => {
-                            let _ = tx.send(JobResult::Log(format!("失败：{e}")));
-                        }
-                    }
-                }
                 JobKind::Locate => {
-                    match locate::locate_player(&root) {
+                    match locate::locate_player(&root, &map_name) {
                         Ok(msg) => {
-                            if let Some(query) = parse_map_query_from_locate_log(&msg) {
-                                let _ = tx.send(JobResult::MapName(query));
-                            }
                             let _ = tx.send(JobResult::Log(msg));
                         }
                         Err(e) => {
@@ -193,9 +156,6 @@ impl App {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 JobResult::Log(s) => self.append_log(s),
-                JobResult::MapName(name) => {
-                    self.map_name = name;
-                }
                 JobResult::Done => {
                     self.busy = false;
                     self.append_log("任务结束");
@@ -226,33 +186,6 @@ impl App {
     }
 }
 
-fn capture_and_ocr(root: &Path) -> Result<(PathBuf, String, String, String), String> {
-    let path = capture::capture_minimap(&minimap_shots_dir(root))?;
-    let img = image::open(&path)
-        .map_err(|e| e.to_string())?
-        .to_rgb8();
-    let (street, name) = ocr::read_map_names(&img)?;
-    let query = format!("{street}-{name}");
-    Ok((path, query, street, name))
-}
-
-fn parse_map_query_from_locate_log(msg: &str) -> Option<String> {
-    let mut street = None;
-    let mut name = None;
-    for line in msg.lines() {
-        if let Some(rest) = line.strip_prefix("一级地图 ") {
-            street = Some(rest.trim().to_string());
-        }
-        if let Some(rest) = line.strip_prefix("二级地图 ") {
-            name = Some(rest.trim().to_string());
-        }
-    }
-    match (street, name) {
-        (Some(s), Some(n)) => Some(format!("{s}-{n}")),
-        _ => None,
-    }
-}
-
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.poll_jobs();
@@ -266,7 +199,7 @@ impl eframe::App for App {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("冒险岛经典版工具");
             ui.label(format!("输出目录：{}", self.root.display()));
-            ui.label("自动查找正在运行的 Maplestory_Classic.exe 截图识别");
+            ui.label("手动填写地图名（或数字 ID），从 maplestory.io 提取小地图与完整图。");
 
             #[cfg(windows)]
             {
@@ -286,37 +219,30 @@ impl eframe::App for App {
 
             ui.separator();
 
-            ui.add_enabled_ui(!self.busy, |ui| {
-                if ui
-                    .button("截取小地图并识别")
-                    .on_hover_text("从游戏截取左上角小地图，OCR 后填入下方地图名")
-                    .clicked()
-                {
-                    self.spawn_job(JobKind::CaptureAndOcr);
-                }
-            });
-
-            ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.label("地图名");
                 ui.add(
                     egui::TextEdit::singleline(&mut self.map_name)
-                        .desired_width(280.0)
-                        .hint_text("截取识别后自动填充，也可手动修改"),
+                        .desired_width(320.0)
+                        .hint_text("例：彩虹岛-南港西郊平原 或 50001"),
                 );
             });
-            ui.label("识别结果可用于「下载完整地图」；也可手动改名后再下载。");
 
             ui.add_space(8.0);
             ui.horizontal_wrapped(|ui| {
                 ui.add_enabled_ui(!self.busy, |ui| {
-                    if ui.button("下载完整地图").clicked() {
-                        self.spawn_job(JobKind::SaveMap);
+                    if ui
+                        .button("提取小地图与完整图")
+                        .on_hover_text("解析地图名 → 下载 minimap.png 与 render.png")
+                        .clicked()
+                    {
+                        self.spawn_job(JobKind::ExtractMap);
                     }
-                    if ui.button("从小地图下载").clicked() {
-                        self.spawn_job(JobKind::SaveFromMinimap);
-                    }
-                    if ui.button("定位玩家").clicked() {
+                    if ui
+                        .button("定位玩家")
+                        .on_hover_text("需已填写地图名；截取游戏小地图黄点并标注到完整图")
+                        .clicked()
+                    {
                         self.spawn_job(JobKind::Locate);
                     }
                 });
