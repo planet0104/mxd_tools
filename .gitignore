@@ -6,7 +6,9 @@
 *.pdb
 /driver/vmulti/VMulti.Driver
 
-
 __pycache__/
 *.pyc
 
+
+atlases_from_game
+parts_from_game
