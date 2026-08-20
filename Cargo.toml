@@ -8,6 +8,13 @@ chrono = "0.4"
 eframe = "0.31"
 egui = "0.31"
 image = { version = "0.25", default-features = false, features = ["png"] }
+opencv = { version = "0.100", default-features = false, features = [
+    "imgproc",
+    "imgcodecs",
+    "features2d",
+    "calib3d",
+    "flann",
+] }
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
@@ -26,3 +33,12 @@ windows = { version = "0.61", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+# 用 cargo-vcpkg / 手动 vcpkg 安装静态 OpenCV 时参考：
+#   triplet = x64-windows-static
+[package.metadata.vcpkg]
+git = "https://github.com/microsoft/vcpkg"
+rev = "2024.12.16"
+
+[package.metadata.vcpkg.target]
+x86_64-pc-windows-msvc = { triplet = "x64-windows-static", dependencies = ["opencv4"] }

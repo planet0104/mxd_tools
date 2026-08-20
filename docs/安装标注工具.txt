@@ -1,0 +1,28 @@
+labelme标注工具安装
+https://zhuanlan.zhihu.com/p/1915053697047704076
+
+
+1.创建隔离环境并指定python3.9
+
+conda create -n labelme python=3.9
+conda activate labelme  # 激活环境
+
+一路选是, 不建议使用低版本的python，会遇到一些包的兼容性问题。
+2.安装labelme
+
+pip install labelme -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+使用pip安装，并指定清华镜像加速。
+3.升级brotli
+
+上面安装好labelme后，直接执行labelme会遇到报错：
+
+AttributeError: module 'brotli' has no attribute 'error'
+
+解决办法是升级brotli
+
+pip install --upgrade brotli
+
+之后就可以成功使用labelme了
+
+labelme

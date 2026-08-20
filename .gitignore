@@ -6,8 +6,6 @@
 *.pdb
 /driver/vmulti/VMulti.Driver
 
-/screen_caps/
-
 
 __pycache__/
 *.pyc

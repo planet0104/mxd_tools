@@ -10,16 +10,19 @@ use std::thread;
 use eframe::egui;
 use mxd_tools::locate;
 use mxd_tools::map_api;
-use mxd_tools::paths::{maps_dir, workspace_root};
+use mxd_tools::minimap_match::{
+    resolve_caps_dir, resolve_map_assets, validate_screen_caps_dir,
+};
+use mxd_tools::paths::{maps_dir, safe_filename, workspace_root};
 
 /// 加载系统自带中文字体，避免 egui 默认字体缺字显示为方框/乱码。
 fn setup_cjk_fonts(ctx: &egui::Context) {
     let candidates: &[(&str, u32)] = &[
-        (r"C:\Windows\Fonts\msyh.ttc", 0),   // 微软雅黑
+        (r"C:\Windows\Fonts\msyh.ttc", 0),
         (r"C:\Windows\Fonts\msyhbd.ttc", 0),
-        (r"C:\Windows\Fonts\simhei.ttf", 0), // 黑体
-        (r"C:\Windows\Fonts\simsun.ttc", 0), // 宋体
-        (r"C:\Windows\Fonts\msjh.ttc", 0),   // 微软正黑（部分系统）
+        (r"C:\Windows\Fonts\simhei.ttf", 0),
+        (r"C:\Windows\Fonts\simsun.ttc", 0),
+        (r"C:\Windows\Fonts\msjh.ttc", 0),
     ];
 
     let mut chosen: Option<(Vec<u8>, u32, String)> = None;
@@ -65,7 +68,8 @@ fn setup_cjk_fonts(ctx: &egui::Context) {
 
 enum JobKind {
     ExtractMap,
-    Locate,
+    LocateLive,
+    ValidateCaps,
 }
 
 enum JobResult {
@@ -76,6 +80,7 @@ enum JobResult {
 struct App {
     root: PathBuf,
     map_name: String,
+    caps_dir: String,
     log: String,
     busy: bool,
     tx: Option<Sender<JobResult>>,
@@ -87,12 +92,29 @@ impl App {
         let (tx, rx) = mpsc::channel();
         Self {
             root: workspace_root(),
-            map_name: String::new(),
-            log: "就绪。填写地图名或地图 ID，再点「提取小地图与完整图」。\n例：彩虹岛-南港西郊平原 或 50001\n".into(),
+            map_name: "彩虹岛-南港西郊平原".into(),
+            caps_dir: String::new(),
+            log: "就绪。地图名可填中文或数字 ID。\n\
+· 提取小地图与完整图：从网络下载资源\n\
+· 定位玩家：截取正在运行的游戏窗口小地图\n\
+· 验证截图定位：OpenCV（静态链接）批量匹配 screen_caps，对齐 Python 脚本\n"
+                .into(),
             busy: false,
             tx: Some(tx),
             rx,
         }
+    }
+
+    fn caps_dir_resolved(&self) -> PathBuf {
+        let trimmed = self.caps_dir.trim();
+        if !trimmed.is_empty() {
+            let p = PathBuf::from(trimmed);
+            if p.is_absolute() {
+                return p;
+            }
+            return self.root.join(p);
+        }
+        resolve_caps_dir(&self.root, &self.map_name)
     }
 
     fn append_log(&mut self, text: impl AsRef<str>) {
@@ -113,6 +135,7 @@ impl App {
         let tx = tx0.clone();
         let root = self.root.clone();
         let map_name = self.map_name.clone();
+        let caps_dir = self.caps_dir_resolved();
         self.busy = true;
         self.append_log("任务开始…");
         thread::spawn(move || {
@@ -137,13 +160,58 @@ impl App {
                         }
                     }
                 }
-                JobKind::Locate => {
+                JobKind::LocateLive => {
                     match locate::locate_player(&root, &map_name) {
                         Ok(msg) => {
                             let _ = tx.send(JobResult::Log(msg));
                         }
                         Err(e) => {
                             let _ = tx.send(JobResult::Log(format!("失败：{e}")));
+                        }
+                    }
+                }
+                JobKind::ValidateCaps => {
+                    if map_name.trim().is_empty() {
+                        let _ = tx.send(JobResult::Log(
+                            "失败：请先填写地图名或地图 ID（用于解析资源）".into(),
+                        ));
+                    } else {
+                        let result = (|| -> Result<String, String> {
+                            let map_id = map_api::resolve_map_id(&map_name)
+                                .ok_or_else(|| format!("找不到地图：{map_name}"))?;
+                            let (mini, full) =
+                                resolve_map_assets(&root, &map_name, map_id)?;
+                            if !caps_dir.is_dir() {
+                                return Err(format!(
+                                    "截图目录不存在：{}\n可把完整窗口截图放到 screen_caps/{}",
+                                    caps_dir.display(),
+                                    safe_filename(map_name.trim())
+                                ));
+                            }
+                            let out = root.join("tmp").join("screen_cap_locate");
+                            let _ = tx.send(JobResult::Log(format!(
+                                "caps {}\nminimap {}\nfull {}\nout {}",
+                                caps_dir.display(),
+                                mini.display(),
+                                full.display(),
+                                out.display()
+                            )));
+                            let sum = validate_screen_caps_dir(
+                                &caps_dir,
+                                &mini,
+                                &full,
+                                &out,
+                                Some(map_id),
+                            )?;
+                            Ok(sum.lines.join("\n"))
+                        })();
+                        match result {
+                            Ok(msg) => {
+                                let _ = tx.send(JobResult::Log(msg));
+                            }
+                            Err(e) => {
+                                let _ = tx.send(JobResult::Log(format!("失败：{e}")));
+                            }
                         }
                     }
                 }
@@ -198,27 +266,22 @@ impl eframe::App for App {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("冒险岛经典版工具");
-            ui.label(format!("输出目录：{}", self.root.display()));
-            ui.label("手动填写地图名（或数字 ID），从 maplestory.io 提取小地图与完整图。");
+            ui.label(format!("工作目录：{}", self.root.display()));
 
             #[cfg(windows)]
             {
                 let mut no_steal = no_activate::enabled();
                 if ui
                     .checkbox(&mut no_steal, "点击不夺取焦点（类似屏幕键盘）")
-                    .on_hover_text("开启后点本窗口按钮不会抢走其他程序焦点，便于向目标窗口发键")
+                    .on_hover_text("开启后点本窗口按钮不会抢走其他程序焦点")
                     .changed()
                 {
                     no_activate::set_enabled(no_steal);
                     no_activate::sync_from_handle(frame);
                 }
-                if no_steal {
-                    ui.label("先点击目标窗口（如记事本），再点下方按键即可输入到该窗口。");
-                }
             }
 
             ui.separator();
-
             ui.horizontal(|ui| {
                 ui.label("地图名");
                 ui.add(
@@ -227,40 +290,57 @@ impl eframe::App for App {
                         .hint_text("例：彩虹岛-南港西郊平原 或 50001"),
                 );
             });
+            ui.horizontal(|ui| {
+                ui.label("截图目录");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.caps_dir)
+                        .desired_width(420.0)
+                        .hint_text("留空则用 screen_caps/<地图名>"),
+                );
+            });
+            ui.label(format!("将使用：{}", self.caps_dir_resolved().display()));
 
             ui.add_space(8.0);
             ui.horizontal_wrapped(|ui| {
                 ui.add_enabled_ui(!self.busy, |ui| {
                     if ui
                         .button("提取小地图与完整图")
-                        .on_hover_text("解析地图名 → 下载 minimap.png 与 render.png")
+                        .on_hover_text("网络下载 minimap + render 到 maps/")
                         .clicked()
                     {
                         self.spawn_job(JobKind::ExtractMap);
                     }
                     if ui
-                        .button("定位玩家")
-                        .on_hover_text("需已填写地图名；截取游戏小地图黄点并标注到完整图")
+                        .button("定位玩家（实时截图）")
+                        .on_hover_text("需游戏在运行；截客户区小地图并标注")
                         .clicked()
                     {
-                        self.spawn_job(JobKind::Locate);
+                        self.spawn_job(JobKind::LocateLive);
+                    }
+                    if ui
+                        .button("验证截图定位（OpenCV）")
+                        .on_hover_text(
+                            "静态链接 OpenCV：批量匹配 screen_caps，淡蓝空心菱形标注到 tmp/screen_cap_locate",
+                        )
+                        .clicked()
+                    {
+                        self.spawn_job(JobKind::ValidateCaps);
                     }
                 });
             });
 
             if self.busy {
-                ui.label("执行中…");
+                ui.label("执行中…（截图匹配可能需数十秒）");
             }
 
             #[cfg(windows)]
             {
                 ui.separator();
                 ui.heading("键盘输入测试");
-                ui.label("使用 SendInput 向当前前台窗口注入按键（无需驱动 / 测试模式）。");
-                ui.label("测试按键（请先让目标窗口获得焦点）：");
+                ui.label("SendInput 注入到当前前台窗口。");
                 ui.horizontal_wrapped(|ui| {
                     use keyboard_input::Key;
-                    let keys = [
+                    for key in [
                         Key::A,
                         Key::W,
                         Key::S,
@@ -269,8 +349,7 @@ impl eframe::App for App {
                         Key::Enter,
                         Key::Esc,
                         Key::Tab,
-                    ];
-                    for key in keys {
+                    ] {
                         if ui.button(key.label()).clicked() {
                             self.send_key(&[], key);
                         }
@@ -303,12 +382,12 @@ impl eframe::App for App {
             ui.label("日志");
             egui::ScrollArea::vertical()
                 .stick_to_bottom(true)
-                .max_height(360.0)
+                .max_height(320.0)
                 .show(ui, |ui| {
                     ui.add(
                         egui::TextEdit::multiline(&mut self.log)
                             .desired_width(f32::INFINITY)
-                            .desired_rows(18)
+                            .desired_rows(16)
                             .font(egui::TextStyle::Monospace),
                     );
                 });
@@ -319,7 +398,7 @@ impl eframe::App for App {
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([760.0, 720.0])
+            .with_inner_size([820.0, 760.0])
             .with_title("冒险岛经典版工具"),
         ..Default::default()
     };

@@ -1,0 +1,17 @@
+# 静态链接 OpenCV（Windows MSVC）
+# 先运行: powershell -File scripts/setup_opencv_static.ps1
+# 成功后本文件由脚本写入实际路径；也可手动改下面路径。
+
+[env]
+# 构建 opencv crate 需要 libclang
+LIBCLANG_PATH = { value = 'C:\Program Files\LLVM\bin', force = true }
+
+# vcpkg 静态包安装根（默认用户目录）
+OPENCV_INCLUDE_PATHS = { value = 'C:\Users\glsa-\vcpkg\installed\x64-windows-static\include\opencv4', force = true }
+OPENCV_LINK_PATHS = { value = 'C:\Users\glsa-\vcpkg\installed\x64-windows-static\lib', force = true }
+# 模块名随 OpenCV 版本可能带后缀 4；装完后用 scripts/list_opencv_libs.ps1 核对
+OPENCV_LINK_LIBS = { value = "opencv_imgcodecs4,opencv_features2d4,opencv_calib3d4,opencv_flann4,opencv_imgproc4,opencv_core4,libpng16,jpeg,tiff,lzma,libwebp,libwebpmux,libwebpdecoder,libwebpdemux,libsharpyuv,zs", force = true }
+OPENCV_MSVC_CRT = { value = "static", force = true }
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
