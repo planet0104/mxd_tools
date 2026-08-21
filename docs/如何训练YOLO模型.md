@@ -65,14 +65,17 @@ models/yolo_nangang_best.pt   # 方便拷贝的别名
 
 ## 简单推理试一下
 
-小字号 + 半透明标签底（推荐看误检）：
+输出 **原图 + labelme JSON**（可用 labelme 打开），并附带 `*_styled.jpg` 预览：
 
 ```powershell
 python .\scripts\predict_yolo.py `
-  --model models/yolo_nangang_e5000_best.pt `
-  --source screen_caps/彩虹岛-南港西郊平原/ScreenShot_2026-08-20_095130_246.png `
-  --font-size 13 --bg-alpha 0.4
+  --model models/yolo_nangang_e1500_best.pt `
+  --source screen_caps/彩虹岛-南港西郊平原 `
+  --out runs/detect/yolo_nangang_e1500_labelme `
+  --font-size 11 --bg-alpha 0.35
 ```
+
+单张同理，把 `--source` 换成 png 路径即可。`--no-styled` 可只写原图+json。
 
 也可用 ultralytics 自带（字偏大、底不透明）：
 

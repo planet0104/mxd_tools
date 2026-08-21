@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""从怀旧服客户端 Addressables 抽出怪物帧图 / 传送门精灵图 / 玩家立绘。
+"""从怀旧服客户端 Addressables 抽出怪物帧图 / 传送门精灵图 / 玩家立绘 / 掉落物图标。
 
 依赖: pip install UnityPy Pillow numpy opencv-python
 
@@ -10,6 +10,8 @@
   python scripts/extract_sprites.py --player 默认女新手 男战士
   python scripts/extract_sprites.py --player --player-parts
   python scripts/extract_sprites.py --map 50001
+  python scripts/extract_sprites.py --drops
+  python scripts/extract_sprites.py --drops 2000000 1302000
 """
 
 from __future__ import annotations
@@ -99,6 +101,70 @@ PLAYER_PRESETS: dict[str, dict] = {
         "desc": "灰T恤 + 七分裤 + 三角刃 / Black Metro",
     },
 }
+
+# 击杀掉落常见图标（南港/新手区）：像素来自客户端图集，命名参考 IO
+# category: 金币 / 药水 / 其他 / 武器 / 装备
+DROP_ITEMS: list[tuple[int, str, str]] = [
+    # 药水 / 食物
+    (2000000, "红色药水", "药水"),
+    (2000001, "橙色药水", "药水"),
+    (2000002, "白色药水", "药水"),
+    (2000003, "蓝色药水", "药水"),
+    (2000004, "活力神水", "药水"),
+    (2000005, "魔法神水", "药水"),
+    (2000006, "体力恢复药", "药水"),
+    (2000007, "魔力恢复药", "药水"),
+    (2010000, "苹果", "药水"),
+    (2010002, "鸡蛋", "药水"),
+    (2010003, "桔子", "药水"),
+    (2010004, "柠檬", "药水"),
+    (2010005, "巧克力", "药水"),
+    # 材料 / etc（蜗牛、蘑菇、树怪常见）
+    (4000000, "蓝蜗牛壳", "其他"),
+    (4000001, "花蘑菇盖", "其他"),
+    (4000003, "树枝", "其他"),
+    (4000011, "蘑菇芽", "其他"),
+    (4000012, "绿蘑菇盖", "其他"),
+    (4000018, "木柴", "其他"),
+    (4000019, "蜗牛壳", "其他"),
+    (4000004, "橙蘑菇盖", "其他"),
+    # 武器
+    (1302000, "单手剑", "武器"),
+    (1312000, "斧", "武器"),
+    (1322000, "锤", "武器"),
+    (1332000, "短刀", "武器"),
+    (1372000, "短杖", "武器"),
+    (1382000, "长杖", "武器"),
+    (1452000, "弓", "武器"),
+    (1462000, "弩", "武器"),
+    (1472000, "拳套", "武器"),
+    # 装备
+    (1002000, "绿帽", "装备"),
+    (1040002, "白背心", "装备"),
+    (1041002, "白抹胸", "装备"),
+    (1060002, "蓝短裤", "装备"),
+    (1061002, "红短裙", "装备"),
+    (1072001, "红胶鞋", "装备"),
+    (1082002, "皮革手套", "装备"),
+    (1092005, "木盾", "装备"),
+]
+
+EQUIP_CATEGORY = {
+    100: "Cap",
+    101: "Cap",
+    102: "Accessory",
+    103: "Accessory",
+    104: "Coat",
+    105: "Longcoat",
+    106: "Pants",
+    107: "Shoes",
+    108: "Glove",
+    109: "Shield",
+    110: "Cape",
+    111: "Ring",
+}
+for _w in range(130, 150):
+    EQUIP_CATEGORY[_w] = "Weapon"
 
 
 def mxd_tools_root() -> Path:
@@ -547,8 +613,234 @@ def extract_player(
     return out_dir
 
 
+def find_bundle_with_needle(w_dir: Path, needle: bytes, glob_pat: str = "spritesheet_*.bundle") -> Path:
+    for bundle in sorted(w_dir.glob(glob_pat)):
+        if needle in bundle.read_bytes():
+            return bundle
+    raise FileNotFoundError(f"找不到含 {needle!r} 的 bundle")
+
+
+def find_atlas_in_sheets(w_dir: Path, key: str) -> tuple[Path, Image.Image]:
+    """在 spritesheet_*.bundle 的 AssetBundle 容器里查找图集键。"""
+    for bundle in sorted(w_dir.glob("spritesheet_*.bundle")):
+        try:
+            _, objs, container = load_bundle_container(bundle)
+        except Exception:
+            continue
+        if key not in container:
+            continue
+        tex = objs[container[key].asset.path_id].read()
+        return bundle, tex.image.convert("RGBA")
+    raise FileNotFoundError(f"找不到图集键: {key}")
+
+
+def item_atlas_key(item_id: int) -> str:
+    """客户端 SpriteSheet 中该物品图标所在图集相对路径后缀。"""
+    pad = f"{item_id:08d}"
+    if pad.startswith("02"):
+        return f"Assets/WzAssets/SpriteSheet/CN/Item/Consume/{pad[:4]}_0.png"
+    if pad.startswith("04"):
+        return f"Assets/WzAssets/SpriteSheet/CN/Item/Etc/{pad[:4]}_0.png"
+    if pad.startswith("09"):
+        return f"Assets/WzAssets/SpriteSheet/CN/Item/Special/{pad[:4]}_0.png"
+    code = int(pad[1:4])
+    cat = EQUIP_CATEGORY.get(code)
+    if not cat:
+        raise ValueError(f"未知装备大类 item={item_id} code={code}")
+    return f"Assets/WzAssets/SpriteSheet/CN/Character/{cat}/{pad}_0.png"
+
+
+def download_item_icon(item_id: int, prefer_raw: bool = True) -> Image.Image:
+    for kind in (("iconRaw", "icon") if prefer_raw else ("icon", "iconRaw")):
+        try:
+            data = http_get(f"{IO_BASE}/item/{item_id}/{kind}")
+            if data[:8] == b"\x89PNG\r\n\x1a\n":
+                return Image.open(io.BytesIO(data)).convert("RGBA")
+        except Exception:
+            continue
+    raise FileNotFoundError(f"IO 无图标: item {item_id}")
+
+
+def fetch_item_cn_name(item_id: int, fallback: str) -> str:
+    try:
+        meta = json.loads(http_get(f"{IO_BASE}/item/{item_id}").decode())
+        en = (meta.get("name") or "").strip()
+        return fallback or en or str(item_id)
+    except Exception:
+        return fallback or str(item_id)
+
+
+def match_icon_on_atlas(
+    atlas: Image.Image, icon: Image.Image, min_score: float = 0.92
+) -> tuple[Image.Image, float] | None:
+    bb = icon.getbbox()
+    if not bb:
+        return None
+    ref = icon.crop(bb)
+    rgba = np.array(atlas)
+    rgb = rgba[:, :, :3].copy()
+    rgb[rgba[:, :, 3] < 10] = 0
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+
+    ref_rgba = np.array(ref)
+    ref_rgb = ref_rgba[:, :, :3].copy()
+    ref_rgb[ref_rgba[:, :, 3] < 10] = 0
+    ref_gray = cv2.cvtColor(ref_rgb, cv2.COLOR_RGB2GRAY)
+    rh, rw = ref_gray.shape
+    if rh > gray.shape[0] or rw > gray.shape[1]:
+        return None
+    res = cv2.matchTemplate(gray, ref_gray, cv2.TM_CCOEFF_NORMED)
+    _minv, maxv, _minl, maxl = cv2.minMaxLoc(res)
+    if float(maxv) < min_score:
+        return None
+    x, y = int(maxl[0]), int(maxl[1])
+    crop = atlas.crop((x, y, x + rw, y + rh))
+    cbb = crop.getbbox()
+    if cbb:
+        crop = crop.crop(cbb)
+    return crop, float(maxv)
+
+
+def split_atlas_sprites(atlas: Image.Image, min_area: int = 40) -> list[Image.Image]:
+    """按非透明连通域切出图集中的独立精灵（用于金币 0900）。"""
+    arr = np.array(atlas.convert("RGBA"))
+    mask = arr[:, :, 3] > 10
+    h, w = mask.shape
+    visited = np.zeros_like(mask, dtype=bool)
+    sprites: list[Image.Image] = []
+    for y in range(h):
+        for x in range(w):
+            if not mask[y, x] or visited[y, x]:
+                continue
+            stack = [(x, y)]
+            visited[y, x] = True
+            xs: list[int] = []
+            ys: list[int] = []
+            while stack:
+                cx, cy = stack.pop()
+                xs.append(cx)
+                ys.append(cy)
+                for nx, ny in (
+                    (cx - 1, cy),
+                    (cx + 1, cy),
+                    (cx, cy - 1),
+                    (cx, cy + 1),
+                ):
+                    if 0 <= nx < w and 0 <= ny < h and mask[ny, nx] and not visited[ny, nx]:
+                        visited[ny, nx] = True
+                        stack.append((nx, ny))
+            x1, x2 = min(xs), max(xs) + 1
+            y1, y2 = min(ys), max(ys) + 1
+            if (x2 - x1) * (y2 - y1) < min_area:
+                continue
+            crop = Image.fromarray(arr[y1:y2, x1:x2].copy())
+            cbb = crop.getbbox()
+            if cbb:
+                crop = crop.crop(cbb)
+            sprites.append(crop)
+    sprites.sort(key=lambda im: (-im.size[1] * im.size[0], im.size[0]))
+    return sprites
+
+
+def extract_meso_drops(out_root: Path, game_root: Path) -> Path:
+    w_dir = aa_w(game_root)
+    key = "Assets/WzAssets/SpriteSheet/CN/Item/Special/0900_0.png"
+    bundle, atlas = find_atlas_in_sheets(w_dir, key)
+    out_dir = out_root / "drops" / "金币"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    atlas.save(out_dir / "_atlas_0900_from_game.png")
+    sprites = split_atlas_sprites(atlas)
+    for i, spr in enumerate(sprites):
+        spr.save(out_dir / f"meso_{i:02d}.png")
+    readme = (
+        "金币（地上掉落）\n"
+        f"像素来源: {bundle.name} -> {key}\n"
+        f"独立精灵: {len(sprites)}（含硬币/钱袋等帧）\n"
+        "说明: 击杀掉落的金币动画帧来自 Item/Special/0900\n"
+    )
+    (out_dir / "README.txt").write_text(readme, encoding="utf-8")
+    print(f"  -> {out_dir}  meso_frames={len(sprites)}")
+    return out_dir
+
+
+def extract_drop_item(
+    item_id: int,
+    cn_name: str,
+    category: str,
+    out_root: Path,
+    game_root: Path,
+    atlas_cache: dict[str, Image.Image],
+) -> Path | None:
+    w_dir = aa_w(game_root)
+    key = item_atlas_key(item_id)
+    if key not in atlas_cache:
+        try:
+            _bundle, atlas = find_atlas_in_sheets(w_dir, key)
+            atlas_cache[key] = atlas
+        except FileNotFoundError:
+            print(f"  SKIP {item_id} 找不到图集 {key}")
+            return None
+    atlas = atlas_cache[key]
+    try:
+        icon = download_item_icon(item_id)
+    except Exception as e:
+        print(f"  SKIP {item_id} IO 图标失败: {e}")
+        return None
+    matched = match_icon_on_atlas(atlas, icon)
+    if not matched:
+        print(f"  SKIP {item_id} {cn_name} 图集未匹配到 icon")
+        return None
+    crop, score = matched
+    name = fetch_item_cn_name(item_id, cn_name)
+    out_dir = out_root / "drops" / category
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{item_id}_{name}.png"
+    crop.save(out_path)
+    print(f"  -> {out_path.name}  score={score:.3f}")
+    return out_path
+
+
+def extract_drops(
+    out_root: Path,
+    game_root: Path,
+    item_ids: list[int] | None = None,
+) -> Path:
+    drops_root = out_root / "drops"
+    drops_root.mkdir(parents=True, exist_ok=True)
+    print("抽取金币 Special/0900 ...")
+    extract_meso_drops(out_root, game_root)
+
+    catalog = {i: (n, c) for i, n, c in DROP_ITEMS}
+    if item_ids:
+        wanted = []
+        for iid in item_ids:
+            if iid in catalog:
+                wanted.append((iid, *catalog[iid]))
+            else:
+                wanted.append((iid, str(iid), "其他"))
+    else:
+        wanted = list(DROP_ITEMS)
+
+    atlas_cache: dict[str, Image.Image] = {}
+    ok = 0
+    for iid, cn, cat in wanted:
+        print(f"抽取掉落 {iid} [{cat}] {cn} ...")
+        if extract_drop_item(iid, cn, cat, out_root, game_root, atlas_cache):
+            ok += 1
+
+    readme = (
+        "击杀掉落物图标\n"
+        "像素来自客户端 Item/Character SpriteSheet；命名参考 maplestory.io GMS/83\n"
+        "子目录: 金币 / 药水 / 其他 / 武器 / 装备\n"
+        f"本次成功: {ok}/{len(wanted)} + 金币图集拆帧\n"
+        "说明: 地上掉落物外观与背包 icon/iconRaw 一致（金币为 Special/0900 动画帧）\n"
+    )
+    (drops_root / "README.txt").write_text(readme, encoding="utf-8")
+    return drops_root
+
+
 def main():
-    ap = argparse.ArgumentParser(description="从怀旧服客户端抽取怪物/传送门/玩家精灵图")
+    ap = argparse.ArgumentParser(description="从怀旧服客户端抽取怪物/传送门/玩家/掉落物精灵图")
     ap.add_argument("--mob", type=int, action="append", default=[], help="怪物 ID，可多次")
     ap.add_argument("--map", type=int, default=0, help="地图 ID，自动收集该图全部 mob")
     ap.add_argument("--portals", action="store_true", help="导出传送门 pv / ph")
@@ -564,6 +856,13 @@ def main():
         "--player-parts",
         action="store_true",
         help="额外从客户端图集 NCC 裁切脸/发/衣等部件（较慢）",
+    )
+    ap.add_argument(
+        "--drops",
+        nargs="*",
+        default=None,
+        metavar="ITEM_ID",
+        help="抽取掉落物图标（金币+药水/装备等）。无参数=默认清单；可跟物品 ID",
     )
     ap.add_argument(
         "--out",
@@ -594,8 +893,13 @@ def main():
     seen = set()
     mob_ids = [m for m in mob_ids if not (m in seen or seen.add(m))]
 
-    if not mob_ids and not args.portals and args.player is None:
-        ap.error("请指定 --mob / --map / --portals / --player")
+    if (
+        not mob_ids
+        and not args.portals
+        and args.player is None
+        and args.drops is None
+    ):
+        ap.error("请指定 --mob / --map / --portals / --player / --drops")
 
     for mid in mob_ids:
         print(f"抽取怪物 {mid} ...")
@@ -612,6 +916,11 @@ def main():
             extract_player(
                 name, out_root, cache_dir, game_root, with_parts=args.player_parts
             )
+
+    if args.drops is not None:
+        ids = [int(x) for x in args.drops] if args.drops else None
+        print("抽取掉落物 ...")
+        extract_drops(out_root, game_root, ids)
 
     print("完成")
 

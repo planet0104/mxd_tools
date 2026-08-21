@@ -6,6 +6,8 @@
 *.pdb
 /driver/vmulti/VMulti.Driver
 
+/runs/detect/yolo_nangang_e*
+
 __pycache__/
 *.pyc
 

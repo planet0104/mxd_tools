@@ -1,15 +1,23 @@
 #!/usr/bin/env python3
-"""YOLO 推理并保存标注图：小字号 + 半透明文字底，便于看清误检。
+"""YOLO 推理：保存原图 + labelme JSON（便于 labelme 查看）+ 可选可视化预览。
 
 用法:
   python scripts/predict_yolo.py \\
-    --model models/yolo_nangang_e5000_best.pt \\
+    --model models/yolo_nangang_e1500_best.pt \\
     --source screen_caps/彩虹岛-南港西郊平原/ScreenShot_2026-08-20_095130_246.png
+
+  # 整目录批量
+  python scripts/predict_yolo.py \\
+    --model models/yolo_nangang_e1500_best.pt \\
+    --source screen_caps/彩虹岛-南港西郊平原 \\
+    --out runs/detect/yolo_nangang_e1500_labelme
 """
 
 from __future__ import annotations
 
 import argparse
+import json
+import shutil
 from pathlib import Path
 
 import cv2
@@ -42,7 +50,6 @@ def find_cjk_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
 
 
 def class_color(i: int) -> tuple[int, int, int]:
-    # BGR 常见调色（与 ultralytics 类似的区分色）
     palette = [
         (255, 56, 56),
         (255, 157, 151),
@@ -82,14 +89,12 @@ def draw_detections(
     """画框：细线 + 小字 + 半透明标签底。"""
     out = bgr.copy()
     font = find_cjk_font(font_size)
-    # 先画框
     for (x1, y1, x2, y2), cid, conf in zip(xyxy, cls_ids, confs):
         color = class_color(int(cid))
         p1 = (int(x1), int(y1))
         p2 = (int(x2), int(y2))
         cv2.rectangle(out, p1, p2, color, line_width, cv2.LINE_AA)
 
-    # 标签用 PIL 半透明底
     rgba = cv2.cvtColor(out, cv2.COLOR_BGR2RGBA)
     base = Image.fromarray(rgba)
     overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
@@ -99,7 +104,6 @@ def draw_detections(
 
     for (x1, y1, x2, y2), cid, conf in zip(xyxy, cls_ids, confs):
         color = class_color(int(cid))
-        # PIL 用 RGB
         rgb = (color[2], color[1], color[0])
         label = f"{names[int(cid)]} {conf:.2f}"
         bbox = font.getbbox(label)
@@ -124,12 +128,140 @@ def draw_detections(
     return cv2.cvtColor(np.asarray(composed.convert("RGB")), cv2.COLOR_RGB2BGR)
 
 
+def save_labelme_json(
+    path: Path,
+    image_name: str,
+    width: int,
+    height: int,
+    xyxy: np.ndarray,
+    cls_ids: np.ndarray,
+    confs: np.ndarray,
+    names: dict,
+) -> None:
+    shapes = []
+    for (x1, y1, x2, y2), cid, conf in zip(xyxy, cls_ids, confs):
+        label = str(names.get(int(cid), cid))
+        shapes.append(
+            {
+                "label": label,
+                "points": [[float(x1), float(y1)], [float(x2), float(y2)]],
+                "group_id": None,
+                "description": f"conf={float(conf):.4f}",
+                "shape_type": "rectangle",
+                "flags": {},
+                "mask": None,
+            }
+        )
+    data = {
+        "version": "5.10.1",
+        "flags": {},
+        "shapes": shapes,
+        "imagePath": image_name,
+        "imageData": None,
+        "imageHeight": int(height),
+        "imageWidth": int(width),
+    }
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def collect_sources(source: Path) -> list[Path]:
+    if source.is_file():
+        return [source]
+    if source.is_dir():
+        imgs = sorted(
+            list(source.glob("*.png"))
+            + list(source.glob("*.jpg"))
+            + list(source.glob("*.jpeg"))
+            + list(source.glob("*.bmp"))
+            + list(source.glob("*.webp"))
+        )
+        if not imgs:
+            raise SystemExit(f"目录下没有图片: {source}")
+        return imgs
+    raise SystemExit(f"找不到图片或目录: {source}")
+
+
+def predict_one(
+    model,
+    source: Path,
+    out_dir: Path,
+    *,
+    conf: float,
+    imgsz: int,
+    device: str,
+    font_size: int,
+    line_width: int,
+    bg_alpha: float,
+    save_styled: bool,
+) -> None:
+    results = model.predict(
+        source=str(source),
+        conf=conf,
+        imgsz=imgsz,
+        device=device,
+        verbose=False,
+    )
+    r0 = results[0]
+    im = r0.orig_img
+    h, w = im.shape[:2]
+
+    # 原图：尽量保持 png，便于 labelme
+    img_name = f"{source.stem}.png"
+    img_path = out_dir / img_name
+    json_path = out_dir / f"{source.stem}.json"
+
+    if source.suffix.lower() == ".png":
+        shutil.copy2(source, img_path)
+    else:
+        # BGR -> 写 png
+        cv2.imwrite(str(img_path), im)
+
+    if r0.boxes is None or len(r0.boxes) == 0:
+        xyxy = np.zeros((0, 4), dtype=np.float32)
+        cls_ids = np.zeros((0,), dtype=int)
+        confs = np.zeros((0,), dtype=np.float32)
+    else:
+        xyxy = r0.boxes.xyxy.cpu().numpy()
+        cls_ids = r0.boxes.cls.cpu().numpy().astype(int)
+        confs = r0.boxes.conf.cpu().numpy()
+
+    save_labelme_json(
+        json_path, img_name, w, h, xyxy, cls_ids, confs, r0.names
+    )
+
+    styled_path = None
+    if save_styled and len(cls_ids) > 0:
+        annotated = draw_detections(
+            im,
+            xyxy,
+            cls_ids,
+            confs,
+            r0.names,
+            font_size=font_size,
+            line_width=line_width,
+            bg_alpha=bg_alpha,
+        )
+        styled_path = out_dir / f"{source.stem}_styled.jpg"
+        cv2.imwrite(str(styled_path), annotated)
+    elif save_styled:
+        styled_path = out_dir / f"{source.stem}_styled.jpg"
+        cv2.imwrite(str(styled_path), im)
+
+    print(
+        f"{source.name}: detections={len(cls_ids)} "
+        f"-> {img_path.name} + {json_path.name}"
+        + (f" + {styled_path.name}" if styled_path else "")
+    )
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser(description="YOLO 推理（小字号半透明标签）")
+    ap = argparse.ArgumentParser(
+        description="YOLO 推理 → 原图 + labelme JSON（+ 可选可视化）"
+    )
     ap.add_argument(
         "--model",
         type=Path,
-        default=Path("models/yolo_nangang_e5000_best.pt"),
+        default=Path("models/yolo_nangang_e1500_best.pt"),
     )
     ap.add_argument(
         "--source",
@@ -137,14 +269,25 @@ def main() -> int:
         default=Path(
             "screen_caps/彩虹岛-南港西郊平原/ScreenShot_2026-08-20_095130_246.png"
         ),
+        help="单张图片或目录",
     )
-    ap.add_argument("--out", type=Path, default=None, help="输出图片路径")
+    ap.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="输出目录（默认 runs/detect/predict_labelme）",
+    )
     ap.add_argument("--conf", type=float, default=0.25)
     ap.add_argument("--imgsz", type=int, default=640)
     ap.add_argument("--device", type=str, default="0")
-    ap.add_argument("--font-size", type=int, default=14, help="标签字号（默认 14，比 ultralytics 默认更小）")
+    ap.add_argument("--font-size", type=int, default=14)
     ap.add_argument("--line-width", type=int, default=2)
-    ap.add_argument("--bg-alpha", type=float, default=0.45, help="文字底透明度 0~1")
+    ap.add_argument("--bg-alpha", type=float, default=0.45)
+    ap.add_argument(
+        "--no-styled",
+        action="store_true",
+        help="不生成 *_styled.jpg 预览图（仍写原图+json）",
+    )
     args = ap.parse_args()
 
     from ultralytics import YOLO
@@ -152,59 +295,35 @@ def main() -> int:
     model_path = resolve(args.model)
     source = resolve(args.source)
     if not model_path.is_file():
-        # 兜底
-        alt = mxd_tools_root() / "models/yolo_nangang_e5000/weights/best.pt"
+        alt = mxd_tools_root() / "models/yolo_nangang_e1500/weights/best.pt"
         if alt.is_file():
             model_path = alt
         else:
             raise SystemExit(f"找不到模型: {model_path}")
-    if not source.is_file():
-        raise SystemExit(f"找不到图片: {source}")
 
-    out = args.out
-    if out is None:
-        out = (
-            mxd_tools_root()
-            / "runs"
-            / "detect"
-            / "predict_styled"
-            / f"{source.stem}_styled.jpg"
-        )
-    else:
-        out = resolve(out)
-    out.parent.mkdir(parents=True, exist_ok=True)
+    sources = collect_sources(source)
+    out_dir = resolve(args.out) if args.out else (
+        mxd_tools_root() / "runs" / "detect" / "predict_labelme"
+    )
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     model = YOLO(str(model_path))
-    results = model.predict(
-        source=str(source),
-        conf=args.conf,
-        imgsz=args.imgsz,
-        device=args.device,
-        verbose=False,
-    )
-    r0 = results[0]
-    im = r0.orig_img.copy()
-    if r0.boxes is None or len(r0.boxes) == 0:
-        cv2.imwrite(str(out), im)
-        print(f"无检测框，已原样保存: {out}")
-        return 0
-
-    xyxy = r0.boxes.xyxy.cpu().numpy()
-    cls_ids = r0.boxes.cls.cpu().numpy().astype(int)
-    confs = r0.boxes.conf.cpu().numpy()
-    annotated = draw_detections(
-        im,
-        xyxy,
-        cls_ids,
-        confs,
-        r0.names,
-        font_size=args.font_size,
-        line_width=args.line_width,
-        bg_alpha=args.bg_alpha,
-    )
-    cv2.imwrite(str(out), annotated)
-    print(f"detections={len(cls_ids)} font={args.font_size} bg_alpha={args.bg_alpha}")
-    print(f"saved: {out}")
+    print(f"model: {model_path}")
+    print(f"out:   {out_dir}")
+    for src in sources:
+        predict_one(
+            model,
+            src,
+            out_dir,
+            conf=args.conf,
+            imgsz=args.imgsz,
+            device=args.device,
+            font_size=args.font_size,
+            line_width=args.line_width,
+            bg_alpha=args.bg_alpha,
+            save_styled=not args.no_styled,
+        )
+    print(f"完成 {len(sources)} 张。用 labelme 打开目录: {out_dir}")
     return 0
 
 
