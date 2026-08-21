@@ -3,8 +3,9 @@
 
 流程：
 1. 读取已标注地板/梯子/绳子的完整大图（labelme）
-2. 生成多张「完整大图副本」：随机贴入口/出口、花蘑菇、蓝蜗牛、玩家
-3. 从每张大图按游戏窗口比例随机裁切 → 最终 YOLO 数据集
+2. 生成多张「完整大图副本」：随机贴入口/出口、怪物、玩家
+3. 从每张大图按游戏窗口比例随机裁切
+4. 按比例在部分窗口上贴 UI（小地图/任务窗/浮动按钮/面板/键盘）→ 最终 YOLO 数据集
 
 用法:
   python scripts/auto_annotate_dataset.py \\
@@ -12,7 +13,7 @@
 
   python scripts/auto_annotate_dataset.py \\
     --dataset dataset/彩虹岛-南港西郊平原 \\
-    --full-maps 40 --crops-per-map 12 --seed 42
+    --full-maps 50 --crops-per-map 14 --ui-ratio 0.65 --seed 42
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ import argparse
 import json
 import random
 import shutil
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -35,14 +36,33 @@ CLASS_NAMES = [
     "出口",
     "花蘑菇",
     "蓝蜗牛",
+    "树怪",
     "玩家",
+    "小地图",
+    "任务窗",
+    "浮动按钮",
+    "面板",
+    "键盘",
 ]
 CLASS_TO_ID = {n: i for i, n in enumerate(CLASS_NAMES)}
 
 # 可用动画帧前缀（每次贴图从对应目录随机抽一帧；排除死亡/图集）
 MOB_KEEP_PREFIX = ("stand", "move", "jump", "skill", "hit")
 PLAYER_KEEP_PREFIX = ("stand", "walk", "jump", "alert")
+PLAYER_CLIMB_PREFIX = ("ladder", "rope")
 PORTAL_KEEP_PREFIX = ("pv",)
+
+# 精灵互遮：任一框被另一框盖住超过该比例则拒绝摆放（最多 60% 遮挡）
+MAX_SPRITE_OCCLUSION = 0.60
+
+# 窗口 UI 资源文件名 → 标注类名
+UI_ASSET_FILES = {
+    "小地图": "小地图_UI.png",
+    "任务窗": "任务窗_UI.png",
+    "浮动按钮": "浮动按钮_UI.png",
+    "面板": "面板_UI.png",
+    "键盘": "键盘_UI.png",
+}
 
 
 @dataclass
@@ -75,28 +95,30 @@ class Box:
     def area(self) -> float:
         return max(0.0, self.width()) * max(0.0, self.height())
 
-    def iou(self, other: "Box") -> float:
+    def intersection_area(self, other: "Box") -> float:
         ax1, ay1, ax2, ay2 = self.as_xyxy()
         bx1, by1, bx2, by2 = other.as_xyxy()
         ix1, iy1 = max(ax1, bx1), max(ay1, by1)
         ix2, iy2 = min(ax2, bx2), min(ay2, by2)
-        iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
-        inter = iw * ih
+        return max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+
+    def iou(self, other: "Box") -> float:
+        inter = self.intersection_area(other)
         if inter <= 0:
             return 0.0
         union = self.area() + other.area() - inter
         return inter / union if union > 0 else 0.0
 
+    def coverage_of(self, other: "Box") -> float:
+        """self 覆盖 other 的面积比例（0~1）。"""
+        oa = other.area()
+        if oa <= 0:
+            return 0.0
+        return self.intersection_area(other) / oa
+
     def contains_box(self, other: "Box", coverage: float = 0.92) -> bool:
         """other 被 self 覆盖的面积比例是否过高。"""
-        ax1, ay1, ax2, ay2 = self.as_xyxy()
-        bx1, by1, bx2, by2 = other.as_xyxy()
-        ix1, iy1 = max(ax1, bx1), max(ay1, by1)
-        ix2, iy2 = min(ax2, bx2), min(ay2, by2)
-        iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
-        inter = iw * ih
-        oa = other.area()
-        return oa > 0 and (inter / oa) >= coverage
+        return self.coverage_of(other) >= coverage
 
     def to_labelme_shape(self) -> dict:
         if self.points and self.shape_type == "polygon":
@@ -211,6 +233,161 @@ def paste_sprite(canvas: Image.Image, sprite: Image.Image, x: int, y: int) -> No
     canvas.alpha_composite(sprite, (x, y))
 
 
+def clean_ui_edge_bg(img: Image.Image, tol: int = 26) -> Image.Image:
+    """从四边洪水填充相近色，去掉截图残留背景（UI 本体尽量保留）。"""
+    arr = img.convert("RGBA").load()
+    w, h = img.size
+    out = img.convert("RGBA").copy()
+    px = out.load()
+    visited = [[False] * w for _ in range(h)]
+    seeds: list[tuple[int, int]] = []
+    for x in range(w):
+        seeds.append((x, 0))
+        seeds.append((x, h - 1))
+    for y in range(h):
+        seeds.append((0, y))
+        seeds.append((w - 1, y))
+
+    def similar(c0, c1) -> bool:
+        return (
+            abs(c0[0] - c1[0]) <= tol
+            and abs(c0[1] - c1[1]) <= tol
+            and abs(c0[2] - c1[2]) <= tol
+        )
+
+    for sx, sy in seeds:
+        if visited[sy][sx]:
+            continue
+        seed = arr[sx, sy]
+        q: deque[tuple[int, int]] = deque([(sx, sy)])
+        visited[sy][sx] = True
+        while q:
+            x, y = q.popleft()
+            px[x, y] = (seed[0], seed[1], seed[2], 0)
+            for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
+                if 0 <= nx < w and 0 <= ny < h and not visited[ny][nx]:
+                    if similar(arr[nx, ny], seed):
+                        visited[ny][nx] = True
+                        q.append((nx, ny))
+    return out
+
+
+def load_ui_sprites(assets: Path) -> dict[str, Image.Image]:
+    ui_dir = assets / "ui"
+    out: dict[str, Image.Image] = {}
+    for label, fname in UI_ASSET_FILES.items():
+        path = ui_dir / fname
+        if not path.is_file():
+            raise FileNotFoundError(f"缺少 UI 资源: {path}")
+        out[label] = clean_ui_edge_bg(load_rgba(path))
+    return out
+
+
+def scale_ui_set(
+    ui: dict[str, Image.Image], window_w: int, window_h: int
+) -> dict[str, Image.Image]:
+    """面板过宽或总高度不够时，整套 UI 等比缩小。"""
+    panel = ui["面板"]
+    keyboard = ui["键盘"]
+    minimap = ui["小地图"]
+    quest = ui["任务窗"]
+    scale = 1.0
+    # 面板左右各留 8px
+    if panel.width + 16 > window_w:
+        scale = min(scale, (window_w - 16) / panel.width)
+    # 底部：面板 + 键盘 + 顶边小地图/任务窗余量
+    need_h = panel.height + keyboard.height + 8
+    if need_h > window_h * 0.55:
+        scale = min(scale, (window_h * 0.55) / need_h)
+    # 顶部：小地图 / 任务窗不挤爆
+    top_need = max(minimap.height, quest.height) + 16
+    if top_need > window_h * 0.45:
+        scale = min(scale, (window_h * 0.45) / top_need)
+    if scale >= 0.999:
+        return ui
+    scaled: dict[str, Image.Image] = {}
+    for k, im in ui.items():
+        nw = max(1, int(round(im.width * scale)))
+        nh = max(1, int(round(im.height * scale)))
+        scaled[k] = im.resize((nw, nh), Image.Resampling.LANCZOS)
+    return scaled
+
+
+def paste_window_ui(
+    crop: Image.Image,
+    ui_raw: dict[str, Image.Image],
+    rng: random.Random,
+) -> tuple[Image.Image, list[Box]]:
+    """按固定布局把 UI 贴到窗口裁切图上（不贴在大地图上）。"""
+    ww, wh = crop.size
+    ui = scale_ui_set(ui_raw, ww, wh)
+    canvas = crop.convert("RGBA")
+    boxes: list[Box] = []
+    margin = 6
+
+    # 小地图：左上
+    mm = ui["小地图"]
+    mx, my = margin, margin
+    paste_sprite(canvas, mm, mx, my)
+    boxes.append(
+        Box("小地图", float(mx), float(my), float(mx + mm.width), float(my + mm.height))
+    )
+
+    # 任务窗：右上附近（轻微抖动）
+    q = ui["任务窗"]
+    qx = ww - q.width - margin - rng.randint(0, 12)
+    qy = margin + rng.randint(0, 10)
+    qx = max(margin, min(qx, ww - q.width - 1))
+    qy = max(0, min(qy, wh - q.height - 1))
+    paste_sprite(canvas, q, qx, qy)
+    boxes.append(
+        Box("任务窗", float(qx), float(qy), float(qx + q.width), float(qy + q.height))
+    )
+
+    # 浮动按钮：左侧竖直居中
+    fb = ui["浮动按钮"]
+    fx = margin
+    fy = max(margin, (wh - fb.height) // 2)
+    paste_sprite(canvas, fb, fx, fy)
+    boxes.append(
+        Box(
+            "浮动按钮",
+            float(fx),
+            float(fy),
+            float(fx + fb.width),
+            float(fy + fb.height),
+        )
+    )
+
+    # 面板：底部居中
+    panel = ui["面板"]
+    px = max(0, (ww - panel.width) // 2)
+    py = wh - panel.height
+    paste_sprite(canvas, panel, px, py)
+    boxes.append(
+        Box(
+            "面板",
+            float(px),
+            float(py),
+            float(px + panel.width),
+            float(py + panel.height),
+        )
+    )
+
+    # 键盘：面板上方靠右紧贴，不遮挡面板
+    kb = ui["键盘"]
+    kx = px + panel.width - kb.width
+    ky = py - kb.height
+    kx = max(0, min(kx, ww - kb.width))
+    ky = max(0, ky)
+    paste_sprite(canvas, kb, kx, ky)
+    boxes.append(
+        Box("键盘", float(kx), float(ky), float(kx + kb.width), float(ky + kb.height))
+    )
+
+    return canvas.convert("RGB"), boxes
+
+
 def place_sprite_box(
     canvas: Image.Image,
     scene: Scene,
@@ -222,12 +399,24 @@ def place_sprite_box(
     map_w: int,
     map_h: int,
     blocked: list[tuple[float, float, float, float]] | None = None,
+    occlude: list[Box] | None = None,
+    max_occlusion: float = MAX_SPRITE_OCCLUSION,
     allow_flip: bool = True,
     into_mobs: list[Box] | None = None,
 ) -> Box | None:
     spr, desc = pick_sprite(frame_paths, rng, allow_flip=allow_flip)
     sw, sh = spr.size
-    pos = try_place_on_floor(floor, sw, sh, map_w, map_h, rng, blocked=blocked)
+    pos = try_place_on_floor(
+        floor,
+        sw,
+        sh,
+        map_w,
+        map_h,
+        rng,
+        blocked=blocked,
+        occlude=occlude,
+        max_occlusion=max_occlusion,
+    )
     if not pos:
         return None
     x, y = pos
@@ -252,6 +441,18 @@ def aabb_overlap(a: tuple[float, float, float, float], b: tuple[float, float, fl
     return not (ax2 <= bx1 or bx2 <= ax1 or ay2 <= by1 or by2 <= ay1)
 
 
+def occlusion_too_high(
+    cand: Box,
+    others: list[Box],
+    max_occlusion: float = MAX_SPRITE_OCCLUSION,
+) -> bool:
+    """任一方向遮挡超过阈值则 True（新盖旧 或 旧盖新）。"""
+    for o in others:
+        if cand.coverage_of(o) > max_occlusion or o.coverage_of(cand) > max_occlusion:
+            return True
+    return False
+
+
 def try_place_on_floor(
     floor: Box,
     sw: int,
@@ -260,7 +461,9 @@ def try_place_on_floor(
     map_h: int,
     rng: random.Random,
     blocked: list[tuple[float, float, float, float]] | None = None,
-    max_tries: int = 40,
+    occlude: list[Box] | None = None,
+    max_occlusion: float = MAX_SPRITE_OCCLUSION,
+    max_tries: int = 80,
 ) -> tuple[int, int] | None:
     """脚底落在地板顶边附近；返回左上角。"""
     fx1, fy1, fx2, fy2 = floor.as_xyxy()
@@ -276,6 +479,53 @@ def try_place_on_floor(
         box = (float(x), float(y), float(x + sw), float(y + sh))
         if blocked and any(aabb_overlap(box, b) for b in blocked):
             continue
+        if occlude:
+            cand = Box("_", float(x), float(y), float(x + sw), float(y + sh))
+            if occlusion_too_high(cand, occlude, max_occlusion):
+                continue
+        return x, y
+    return None
+
+
+def try_place_on_vertical(
+    vert: Box,
+    sw: int,
+    sh: int,
+    map_w: int,
+    map_h: int,
+    rng: random.Random,
+    occlude: list[Box] | None = None,
+    max_occlusion: float = MAX_SPRITE_OCCLUSION,
+    max_tries: int = 80,
+) -> tuple[int, int] | None:
+    """把玩家贴到绳子/梯子上，水平居中并保证与竖向结构有重叠。"""
+    vx1, vy1, vx2, vy2 = vert.as_xyxy()
+    vh = vy2 - vy1
+    vw = vx2 - vx1
+    if vh < sh * 0.3:
+        return None
+    for _ in range(max_tries):
+        cx = (vx1 + vx2) / 2.0 + rng.uniform(-max(2.0, vw * 0.35), max(2.0, vw * 0.35))
+        x = int(round(cx - sw / 2.0))
+        y_lo = int(vy1 - sh * 0.12)
+        y_hi = int(vy2 - sh * 0.35)
+        if y_hi < y_lo:
+            y_lo = int(vy1)
+            y_hi = int(max(vy1, vy2 - sh * 0.4))
+        y = rng.randint(y_lo, max(y_lo, y_hi))
+        if x < 0 or y < 0 or x + sw > map_w or y + sh > map_h:
+            continue
+        ox1 = max(float(x), vx1)
+        oy1 = max(float(y), vy1)
+        ox2 = min(float(x + sw), vx2)
+        oy2 = min(float(y + sh), vy2)
+        inter = max(0.0, ox2 - ox1) * max(0.0, oy2 - oy1)
+        if inter < sw * sh * 0.06:
+            continue
+        if occlude:
+            cand = Box("_", float(x), float(y), float(x + sw), float(y + sh))
+            if occlusion_too_high(cand, occlude, max_occlusion):
+                continue
         return x, y
     return None
 
@@ -293,7 +543,9 @@ def build_full_scene(
     portals_n: tuple[int, int] = (3, 5),
     mushrooms_per_large: tuple[int, int] = (1, 2),
     snails_per_large: tuple[int, int] = (3, 4),
+    stumps_per_large: tuple[int, int] = (2, 3),
     players_n: tuple[int, int] = (5, 6),
+    climbers_n: tuple[int, int] = (2, 4),
 ) -> Scene:
     canvas = base_img.copy()
     mw, mh = canvas.size
@@ -328,12 +580,13 @@ def build_full_scene(
             map_w=mw,
             map_h=mh,
             blocked=portal_boxes,
+            occlude=scene.sprite_boxes,
             allow_flip=False,
         )
         if box:
             portal_boxes.append(box.as_xyxy())
 
-    # 2) 花蘑菇 / 蓝蜗牛：每次随机帧 + 随机朝向
+    # 2) 怪：先大后小，且新精灵与已贴精灵互遮不超过 MAX_SPRITE_OCCLUSION
     for floor in large_floors:
         for _ in range(rng.randint(*mushrooms_per_large)):
             place_sprite_box(
@@ -345,6 +598,20 @@ def build_full_scene(
                 rng,
                 map_w=mw,
                 map_h=mh,
+                occlude=scene.sprite_boxes,
+                into_mobs=mob_boxes,
+            )
+        for _ in range(rng.randint(*stumps_per_large)):
+            place_sprite_box(
+                canvas,
+                scene,
+                "树怪",
+                sprites["树怪"],
+                floor,
+                rng,
+                map_w=mw,
+                map_h=mh,
+                occlude=scene.sprite_boxes,
                 into_mobs=mob_boxes,
             )
         for _ in range(rng.randint(*snails_per_large)):
@@ -357,6 +624,7 @@ def build_full_scene(
                 rng,
                 map_w=mw,
                 map_h=mh,
+                occlude=scene.sprite_boxes,
                 into_mobs=mob_boxes,
             )
 
@@ -364,28 +632,39 @@ def build_full_scene(
     for floor in small_floors:
         if rng.random() > 0.45:
             continue
+        label = rng.choice(["蓝蜗牛", "树怪"])
         place_sprite_box(
             canvas,
             scene,
-            "蓝蜗牛",
-            sprites["蓝蜗牛"],
+            label,
+            sprites[label],
             floor,
             rng,
             map_w=mw,
             map_h=mh,
+            occlude=scene.sprite_boxes,
             into_mobs=mob_boxes,
         )
 
-    # 3) 玩家：后贴（上层），5~6 个；不整框盖住怪物
+    # 3) 玩家：后贴（上层）；与已有精灵互遮不超过阈值
     n_players = rng.randint(*players_n)
     placed_players = 0
     attempts = 0
-    while placed_players < n_players and attempts < n_players * 30:
+    while placed_players < n_players and attempts < n_players * 40:
         attempts += 1
         floor = rng.choice(floors)
         spr, desc = pick_sprite(sprites["玩家"], rng, allow_flip=True)
         sw, sh = spr.size
-        pos = try_place_on_floor(floor, sw, sh, mw, mh, rng, blocked=portal_boxes)
+        pos = try_place_on_floor(
+            floor,
+            sw,
+            sh,
+            mw,
+            mh,
+            rng,
+            blocked=portal_boxes,
+            occlude=scene.sprite_boxes,
+        )
         if not pos:
             continue
         x, y = pos
@@ -397,11 +676,46 @@ def build_full_scene(
             float(y + sh),
             description=desc,
         )
-        if any(cand.contains_box(m) for m in mob_boxes):
-            continue
         paste_sprite(canvas, spr, x, y)
         scene.sprite_boxes.append(cand)
         placed_players += 1
+
+    # 4) 攀爬玩家：贴在绳子/梯子上（优先背部 ladder/rope 帧，否则用正面帧）
+    verticals = [b for b in base_boxes if b.label in ("绳子", "梯子")]
+    climb_pool = sprites.get("玩家攀爬") or []
+    if not climb_pool:
+        climb_pool = sprites["玩家"]
+    n_climb = min(rng.randint(*climbers_n), len(verticals)) if verticals else 0
+    verts_shuffled = list(verticals)
+    rng.shuffle(verts_shuffled)
+    placed_climb = 0
+    for vert in verts_shuffled:
+        if placed_climb >= n_climb:
+            break
+        # 绳子优先用 rope 帧，梯子优先 ladder；没有则整池随机
+        prefer = "rope" if vert.label == "绳子" else "ladder"
+        preferred = [p for p in climb_pool if p.name.lower().startswith(prefer)]
+        pool = preferred or climb_pool
+        spr, desc = pick_sprite(pool, rng, allow_flip=False)
+        sw, sh = spr.size
+        pos = try_place_on_vertical(
+            vert, sw, sh, mw, mh, rng, occlude=scene.sprite_boxes
+        )
+        if not pos:
+            continue
+        x, y = pos
+        paste_sprite(canvas, spr, x, y)
+        scene.sprite_boxes.append(
+            Box(
+                "玩家",
+                float(x),
+                float(y),
+                float(x + sw),
+                float(y + sh),
+                description=f"{desc} climb_on={vert.label}",
+            )
+        )
+        placed_climb += 1
 
     return scene
 
@@ -515,24 +829,35 @@ def load_all_sprites(assets: Path) -> dict[str, list[Path]]:
 
     mushroom_dir = assets / "mobs" / "1210102_花蘑菇"
     snail_dir = assets / "mobs" / "100101_蓝蜗牛"
+    stump_dir = assets / "mobs" / "130100_树怪"
+    if not stump_dir.is_dir():
+        stump_dir = assets / "mobs" / "130100_木妖"
 
     player_frames: list[Path] = []
+    climb_frames: list[Path] = []
     player_root = assets / "player"
     if player_root.is_dir():
         for sub in sorted(player_root.iterdir()):
             if not sub.is_dir():
                 continue
             player_frames.extend(list_sprite_frames(sub, PLAYER_KEEP_PREFIX))
+            climb_frames.extend(list_sprite_frames(sub, PLAYER_CLIMB_PREFIX))
 
     sprites = {
         "portal": list_sprite_frames(portal_dir, PORTAL_KEEP_PREFIX),
         "花蘑菇": list_sprite_frames(mushroom_dir, MOB_KEEP_PREFIX),
         "蓝蜗牛": list_sprite_frames(snail_dir, MOB_KEEP_PREFIX),
+        "树怪": list_sprite_frames(stump_dir, MOB_KEEP_PREFIX),
         "玩家": player_frames,
+        "玩家攀爬": climb_frames,
     }
     for k, v in sprites.items():
+        if k == "玩家攀爬":
+            continue
         if not v:
             raise FileNotFoundError(f"精灵帧为空: {k}（检查 assets 目录）")
+    if not climb_frames:
+        print("提示: 无 ladder/rope 背部帧，攀爬贴图将回退为正面玩家帧")
     return sprites
 
 
@@ -590,18 +915,28 @@ def main() -> None:
         default=None,
         help="输出目录（默认 <dataset>/generated）",
     )
-    ap.add_argument("--full-maps", type=int, default=40, help="完整大图副本数量")
-    ap.add_argument("--crops-per-map", type=int, default=12, help="每张大图裁切窗口数")
+    ap.add_argument("--full-maps", type=int, default=50, help="完整大图副本数量")
+    ap.add_argument("--crops-per-map", type=int, default=14, help="每张大图裁切窗口数")
     ap.add_argument("--val-ratio", type=float, default=0.15, help="验证集比例")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--players-min", type=int, default=5)
     ap.add_argument("--players-max", type=int, default=6)
+    ap.add_argument("--climbers-min", type=int, default=2, help="每张大图攀爬玩家最少个数")
+    ap.add_argument("--climbers-max", type=int, default=4, help="每张大图攀爬玩家最多个数")
     ap.add_argument("--snails-per-large-min", type=int, default=3)
     ap.add_argument("--snails-per-large-max", type=int, default=4)
     ap.add_argument("--mushrooms-per-large-min", type=int, default=1)
     ap.add_argument("--mushrooms-per-large-max", type=int, default=2)
+    ap.add_argument("--stumps-per-large-min", type=int, default=2)
+    ap.add_argument("--stumps-per-large-max", type=int, default=3)
     ap.add_argument("--portals-min", type=int, default=3)
     ap.add_argument("--portals-max", type=int, default=5)
+    ap.add_argument(
+        "--ui-ratio",
+        type=float,
+        default=0.65,
+        help="带 UI 的窗口样本比例（其余为无 UI，默认 0.65）",
+    )
     ap.add_argument(
         "--keep-full-maps",
         action="store_true",
@@ -624,10 +959,12 @@ def main() -> None:
     img_path, json_path = find_base_pair(dataset_dir)
     base_img, base_boxes = load_labelme(json_path, img_path)
     sprites = load_all_sprites(assets)
+    ui_sprites = load_ui_sprites(assets)
     print(
         "帧库: "
         + ", ".join(f"{k}×{len(v)}" for k, v in sprites.items())
     )
+    print("UI: " + ", ".join(f"{k}={v.size}" for k, v in ui_sprites.items()))
     ref_w, ref_h = find_ref_shot_size(dataset_dir, tools)
     sizes = window_sizes(ref_w, ref_h)
 
@@ -646,12 +983,17 @@ def main() -> None:
     print(f"基底标注: {len(base_boxes)} | 参考窗口: {ref_w}x{ref_h}")
     print(
         f"密度: 玩家 {args.players_min}~{args.players_max}, "
+        f"攀爬 {args.climbers_min}~{args.climbers_max}, "
         f"大地板蜗牛 {args.snails_per_large_min}~{args.snails_per_large_max}, "
-        f"花蘑菇 {args.mushrooms_per_large_min}~{args.mushrooms_per_large_max}"
+        f"花蘑菇 {args.mushrooms_per_large_min}~{args.mushrooms_per_large_max}, "
+        f"树怪 {args.stumps_per_large_min}~{args.stumps_per_large_max}, "
+        f"UI比例 {args.ui_ratio:.0%}"
     )
 
     crop_records: list[tuple[Image.Image, list[Box], str]] = []
     stats = defaultdict(int)
+    n_with_ui = 0
+    n_without_ui = 0
 
     for mi in range(args.full_maps):
         scene = build_full_scene(
@@ -665,7 +1007,9 @@ def main() -> None:
                 args.mushrooms_per_large_max,
             ),
             snails_per_large=(args.snails_per_large_min, args.snails_per_large_max),
+            stumps_per_large=(args.stumps_per_large_min, args.stumps_per_large_max),
             players_n=(args.players_min, args.players_max),
+            climbers_n=(args.climbers_min, args.climbers_max),
         )
         for b in scene.sprite_boxes:
             stats[b.label] += 1
@@ -698,15 +1042,24 @@ def main() -> None:
                     cropped_boxes.append(cb)
             if not cropped_boxes:
                 continue
-            crop_name = f"{name}_c{ci:02d}_{ww}x{wh}"
+            use_ui = rng.random() < args.ui_ratio
+            if use_ui:
+                crop, ui_boxes = paste_window_ui(crop, ui_sprites, rng)
+                cropped_boxes.extend(ui_boxes)
+                crop_name = f"{name}_c{ci:02d}_{ww}x{wh}_ui"
+                n_with_ui += 1
+            else:
+                crop_name = f"{name}_c{ci:02d}_{ww}x{wh}"
+                n_without_ui += 1
             crop_records.append((crop, cropped_boxes, crop_name))
 
         print(
             f"  [{mi+1}/{args.full_maps}] sprites="
             + ", ".join(
                 f"{k}={sum(1 for b in scene.sprite_boxes if b.label==k)}"
-                for k in ("入口", "出口", "花蘑菇", "蓝蜗牛", "玩家")
+                for k in ("入口", "出口", "花蘑菇", "蓝蜗牛", "树怪", "玩家")
             )
+            + f", 攀爬={sum(1 for b in scene.sprite_boxes if b.label=='玩家' and 'climb_on=' in b.description)}"
         )
 
     rng.shuffle(crop_records)
@@ -744,6 +1097,8 @@ def main() -> None:
         f"  完整大图: {args.full_maps} → {full_dir}\n"
         f"  窗口样本: {len(crop_records)} "
         f"(train={len(crop_records)-n_val}, val={n_val}) → {yolo_dir}\n"
+        f"  UI: 有={n_with_ui}, 无={n_without_ui} "
+        f"(目标比例 {args.ui_ratio:.0%})\n"
         f"  大图精灵累计: {dict(stats)}\n"
         f"  data.yaml: {yolo_dir / 'data.yaml'}\n"
     )

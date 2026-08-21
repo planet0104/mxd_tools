@@ -36,7 +36,7 @@ UA = {"User-Agent": "Mozilla/5.0"}
 MOB_CN = {
     100100: "绿蜗牛",
     100101: "蓝蜗牛",
-    130100: "木妖",
+    130100: "树怪",
     130101: "红蜗牛",
     1210102: "花蘑菇",
 }
@@ -57,7 +57,15 @@ PORTAL_PH_KEYS = {
 }
 
 # 玩家预设：完整立绘由 IO Character 合成；可选从客户端裁部件（--player-parts）
-PLAYER_ANIMS = {"stand1": 4, "walk1": 4, "jump": 1, "alert": 3}
+# ladder/rope 为背部攀爬姿势（贴绳子/梯子用）；climb 在 IO 上常 400
+PLAYER_ANIMS = {
+    "stand1": 4,
+    "walk1": 4,
+    "jump": 1,
+    "alert": 3,
+    "ladder": 4,
+    "rope": 2,
+}
 
 PLAYER_PRESETS: dict[str, dict] = {
     "默认男新手": {
