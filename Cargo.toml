@@ -3,17 +3,31 @@ name = "mxd_tools"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+# 启用后尝试用 CUDA EP（需本机安装 ort 所要求的 CUDA/cuDNN；失败则回退 CPU）
+cuda = ["ort/cuda"]
+
 [dependencies]
+anyhow = "1"
 chrono = "0.4"
 eframe = "0.31"
 egui = "0.31"
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+ndarray = "0.16"
 opencv = { version = "0.100", default-features = false, features = [
     "imgproc",
     "imgcodecs",
     "features2d",
     "calib3d",
     "flann",
+] }
+ort = { version = "2.0.0-rc.10", default-features = false, features = [
+    "std",
+    "ndarray",
+    "download-binaries",
+    "copy-dylibs",
+    "tls-native",
 ] }
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
@@ -35,10 +49,10 @@ windows = { version = "0.61", features = [
 ] }
 
 # 用 cargo-vcpkg / 手动 vcpkg 安装静态 OpenCV 时参考：
-#   triplet = x64-windows-static
+#   triplet = x64-windows-static-md（与 ort 静态链接共用 /MD CRT）
 [package.metadata.vcpkg]
 git = "https://github.com/microsoft/vcpkg"
 rev = "2024.12.16"
 
 [package.metadata.vcpkg.target]
-x86_64-pc-windows-msvc = { triplet = "x64-windows-static", dependencies = ["opencv4"] }
+x86_64-pc-windows-msvc = { triplet = "x64-windows-static-md", dependencies = ["opencv4"] }

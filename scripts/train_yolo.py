@@ -115,8 +115,15 @@ def main() -> int:
         default="yolo_nangang",
         help="本次 run 名称",
     )
-    ap.add_argument("--workers", type=int, default=4)
-    ap.add_argument("--patience", type=int, default=30, help="早停耐心")
+    ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--patience", type=int, default=100, help="早停耐心")
+    ap.add_argument(
+        "--cache",
+        type=str,
+        default="ram",
+        choices=["", "ram", "disk"],
+        help="缓存图片加速读盘：ram / disk / 空=关闭（默认 ram）",
+    )
     ap.add_argument(
         "--resume",
         action="store_true",
@@ -178,11 +185,13 @@ def main() -> int:
     print(f"abs:    {abs_yaml}")
     print(f"train/val images: {n_train} / {n_val}")
     print(f"model:  {args.model}")
-    print(f"device: {device} | epochs={args.epochs} imgsz={args.imgsz} batch={args.batch}")
+    print(
+        f"device: {device} | epochs={args.epochs} imgsz={args.imgsz} "
+        f"batch={args.batch} workers={args.workers} cache={args.cache or 'off'}"
+    )
     print(f"out:    {run_dir}")
 
-    model = YOLO(args.model)
-    results = model.train(
+    train_kw: dict = dict(
         data=str(abs_yaml),
         epochs=args.epochs,
         imgsz=args.imgsz,
@@ -196,7 +205,13 @@ def main() -> int:
         resume=args.resume,
         plots=True,
         save=True,
+        amp=True,
     )
+    if args.cache:
+        train_kw["cache"] = args.cache
+
+    model = YOLO(args.model)
+    results = model.train(**train_kw)
 
     best = run_dir / "weights" / "best.pt"
     last = run_dir / "weights" / "last.pt"

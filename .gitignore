@@ -3,10 +3,12 @@
 /minimap_shots/
 /tmp/
 /models/
+/third_party/
 *.pdb
 /driver/vmulti/VMulti.Driver
 
 /runs/detect/yolo_nangang_e*
+/runs/detect/yolo_rust*
 
 __pycache__/
 *.pyc
