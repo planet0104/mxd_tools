@@ -340,6 +340,22 @@ def cut_frames_from_atlas(atlas: Image.Image, io_dir: Path, out_dir: Path) -> tu
     return len(placements), len(aliases)
 
 
+def extract_mob_io_only(io_dir: Path, out_dir: Path) -> tuple[int, int]:
+    """客户端无图集时，直接使用 maplestory.io download 的 PNG。"""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    n = 0
+    for ref in sorted(io_dir.glob("*.png")):
+        if ref.name.startswith("_"):
+            continue
+        img = Image.open(ref).convert("RGBA")
+        bb = img.getbbox()
+        if bb:
+            img = img.crop(bb)
+        img.save(out_dir / ref.name)
+        n += 1
+    return n, n
+
+
 def extract_mob(mob_id: int, out_root: Path, cache_dir: Path, game_root: Path) -> Path:
     w_dir = aa_w(game_root)
     en_name = ""
@@ -350,22 +366,28 @@ def extract_mob(mob_id: int, out_root: Path, cache_dir: Path, game_root: Path) -
     else:
         print(f"  复用 IO 缓存: {io_dir}")
 
-    bundle, key = find_mob_bundle(w_dir, mob_id)
-    atlas = load_atlas_png(bundle, key)
     cn = MOB_CN.get(mob_id, en_name or str(mob_id))
     out_dir = out_root / "mobs" / f"{mob_id}_{cn}"
-    n_unique, n_named = cut_frames_from_atlas(atlas, io_dir, out_dir)
     pad = pad_mob_id(mob_id)
+    try:
+        bundle, key = find_mob_bundle(w_dir, mob_id)
+        atlas = load_atlas_png(bundle, key)
+        n_unique, n_named = cut_frames_from_atlas(atlas, io_dir, out_dir)
+        pixel_src = f"{bundle.name} -> {key}"
+    except FileNotFoundError as exc:
+        print(f"  客户端无 Mob/{pad}_0.png，改用 IO 像素: {exc}")
+        n_unique, n_named = extract_mob_io_only(io_dir, out_dir)
+        pixel_src = "maplestory.io mob download（无客户端图集）"
     readme = (
         f"{cn}\n"
         f"怪物ID: {mob_id}（资源键 {pad}）\n"
         f"独立像素帧: {n_unique} / 命名帧: {n_named}\n"
-        f"像素来源: {bundle.name} -> {key}\n"
+        f"像素来源: {pixel_src}\n"
         f"命名参考: maplestory.io GMS/83 mob {mob_id}\n"
         f"说明: 部分动作帧会共用同一张图（命名数可大于独立像素数）\n"
     )
     (out_dir / "README.txt").write_text(readme, encoding="utf-8")
-    print(f"  -> {out_dir}  unique={n_unique} named={n_named} atlas={atlas.size}")
+    print(f"  -> {out_dir}  unique={n_unique} named={n_named}")
     return out_dir
 
 

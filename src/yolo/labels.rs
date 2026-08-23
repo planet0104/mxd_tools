@@ -1,5 +1,5 @@
-/// 与 dataset/.../generated/yolo/data.yaml 对齐（19 类）。
-pub const CLASS_NAMES: [&str; 19] = [
+/// 与 dataset/.../generated/yolo/data.yaml 对齐（21 类）。
+pub const CLASS_NAMES: [&str; 21] = [
     "地板",
     "梯子",
     "绳子",
@@ -7,6 +7,8 @@ pub const CLASS_NAMES: [&str; 19] = [
     "出口",
     "花蘑菇",
     "蓝蜗牛",
+    "绿蜗牛",
+    "红蜗牛",
     "树怪",
     "玩家",
     "金币",

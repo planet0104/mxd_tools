@@ -37,6 +37,8 @@ CLASS_NAMES = [
     "出口",
     "花蘑菇",
     "蓝蜗牛",
+    "绿蜗牛",
+    "红蜗牛",
     "树怪",
     "玩家",
     "金币",
@@ -52,6 +54,19 @@ CLASS_NAMES = [
 ]
 CLASS_TO_ID = {n: i for i, n in enumerate(CLASS_NAMES)}
 
+MOB_LABELS = ("花蘑菇", "蓝蜗牛", "绿蜗牛", "红蜗牛", "树怪")
+
+# assets/mobs 下目录名 → 标注类（按地图 50001 + 常见蜗牛）
+MOB_ASSET_DIRS: tuple[tuple[str, str], ...] = (
+    ("1210102_花蘑菇", "花蘑菇"),
+    ("100101_蓝蜗牛", "蓝蜗牛"),
+    ("100100_绿蜗牛", "绿蜗牛"),
+    ("130101_红蜗牛", "红蜗牛"),
+    ("130100_树怪", "树怪"),
+    ("130100_木妖", "树怪"),
+)
+DROP_LABELS = ("金币", "药水", "武器", "装备", "材料")
+
 # 可用动画帧前缀（每次贴图从对应目录随机抽一帧；排除死亡/图集）
 MOB_KEEP_PREFIX = ("stand", "move", "jump", "skill", "hit")
 PLAYER_KEEP_PREFIX = ("stand", "walk", "jump", "alert")
@@ -63,20 +78,23 @@ MAX_SPRITE_OCCLUSION = 0.30
 
 # 大地板模式权重：normal / sparse / drops_only（仅掉落）/ empty（几乎空）
 FLOOR_MODE_WEIGHTS = (
-    ("normal", 0.50),
-    ("sparse", 0.20),
-    ("drops_only", 0.20),
+    ("normal", 0.55),
+    ("sparse", 0.25),
+    ("drops_only", 0.10),
     ("empty", 0.10),
 )
 
-# 掉落物标签抽样权重（金币/药水更常见）
+# 掉落物标签抽样权重（装备/武器偏少，减轻小目标误检）
 DROP_LABEL_WEIGHTS = (
-    ("金币", 3),
-    ("药水", 3),
-    ("材料", 2),
+    ("金币", 5),
+    ("药水", 4),
+    ("材料", 3),
     ("武器", 1),
     ("装备", 1),
 )
+
+# 窗口内掉落框过小则跳过（像素）；小掉落难学且易与 UI/地面纹理混淆
+MIN_DROP_BOX_PX = 14
 
 # assets/drops 子目录 → 标注类名
 DROP_DIR_TO_LABEL = {
@@ -637,10 +655,12 @@ def build_full_scene(
     rng: random.Random,
     *,
     portals_n: tuple[int, int] = (1, 2),
-    mushrooms_per_large: tuple[int, int] = (1, 2),
-    snails_per_large: tuple[int, int] = (2, 3),
-    stumps_per_large: tuple[int, int] = (1, 2),
-    drops_per_large: tuple[int, int] = (3, 5),
+    mushrooms_per_large: tuple[int, int] = (2, 3),
+    blue_snails_per_large: tuple[int, int] = (2, 4),
+    green_snails_per_large: tuple[int, int] = (2, 4),
+    red_snails_per_large: tuple[int, int] = (1, 3),
+    stumps_per_large: tuple[int, int] = (2, 4),
+    drops_per_large: tuple[int, int] = (2, 4),
     players_n: tuple[int, int] = (3, 4),
     climbers_n: tuple[int, int] = (1, 2),
 ) -> Scene:
@@ -688,7 +708,9 @@ def build_full_scene(
         mode = pick_weighted(rng, FLOOR_MODE_WEIGHTS)
         n_mush = scale_count_range(rng, *mushrooms_per_large, mode)
         n_stump = scale_count_range(rng, *stumps_per_large, mode)
-        n_snail = scale_count_range(rng, *snails_per_large, mode)
+        n_blue = scale_count_range(rng, *blue_snails_per_large, mode)
+        n_green = scale_count_range(rng, *green_snails_per_large, mode)
+        n_red = scale_count_range(rng, *red_snails_per_large, mode)
         for _ in range(n_mush):
             place_sprite_box(
                 canvas,
@@ -715,12 +737,38 @@ def build_full_scene(
                 occlude=scene.sprite_boxes,
                 into_mobs=mob_boxes,
             )
-        for _ in range(n_snail):
+        for _ in range(n_blue):
             place_sprite_box(
                 canvas,
                 scene,
                 "蓝蜗牛",
                 sprites["蓝蜗牛"],
+                floor,
+                rng,
+                map_w=mw,
+                map_h=mh,
+                occlude=scene.sprite_boxes,
+                into_mobs=mob_boxes,
+            )
+        for _ in range(n_green):
+            place_sprite_box(
+                canvas,
+                scene,
+                "绿蜗牛",
+                sprites["绿蜗牛"],
+                floor,
+                rng,
+                map_w=mw,
+                map_h=mh,
+                occlude=scene.sprite_boxes,
+                into_mobs=mob_boxes,
+            )
+        for _ in range(n_red):
+            place_sprite_box(
+                canvas,
+                scene,
+                "红蜗牛",
+                sprites["红蜗牛"],
                 floor,
                 rng,
                 map_w=mw,
@@ -748,8 +796,8 @@ def build_full_scene(
                 map_h=mh,
                 n=rng.randint(1, 2),
             )
-        elif roll < 0.35:
-            label = rng.choice(["蓝蜗牛", "树怪"])
+        elif roll < 0.40:
+            label = rng.choice(MOB_LABELS)
             place_sprite_box(
                 canvas,
                 scene,
@@ -904,6 +952,8 @@ def box_to_yolo_line(box: Box, img_w: int, img_h: int) -> str | None:
     bh = y2 - y1
     if bw < 1 or bh < 1:
         return None
+    if box.label in DROP_LABELS and (bw < MIN_DROP_BOX_PX or bh < MIN_DROP_BOX_PX):
+        return None
     cx = (x1 + x2) / 2.0 / img_w
     cy = (y1 + y2) / 2.0 / img_h
     nw = bw / img_w
@@ -913,6 +963,55 @@ def box_to_yolo_line(box: Box, img_w: int, img_h: int) -> str | None:
     nw = min(max(nw, 0.0), 1.0)
     nh = min(max(nh, 0.0), 1.0)
     return f"{cid} {cx:.6f} {cy:.6f} {nw:.6f} {nh:.6f}"
+
+
+def dedupe_boxes(boxes: list[Box], iou_thr: float = 0.92) -> list[Box]:
+    """去掉几乎完全重叠的重复框（保留面积较大者）。"""
+    kept: list[Box] = []
+    for b in sorted(boxes, key=lambda x: -x.area()):
+        if any(b.iou(k) > iou_thr and b.label == k.label for k in kept):
+            continue
+        kept.append(b)
+    return kept
+
+
+def validate_crop_boxes(boxes: list[Box], img_w: int, img_h: int) -> list[str]:
+    issues: list[str] = []
+    for b in boxes:
+        if b.label not in CLASS_TO_ID:
+            issues.append(f"未知标签: {b.label}")
+            continue
+        x1, y1, x2, y2 = b.as_xyxy()
+        if x1 < -1 or y1 < -1 or x2 > img_w + 1 or y2 > img_h + 1:
+            issues.append(f"{b.label} 越界")
+        if b.label in MOB_LABELS and (b.width() < 8 or b.height() < 8):
+            issues.append(f"{b.label} 框过小")
+    # 同类极高 IoU 重复
+    for i, a in enumerate(boxes):
+        for j in range(i + 1, len(boxes)):
+            b = boxes[j]
+            if a.label == b.label and a.iou(b) > 0.95:
+                issues.append(f"重复框: {a.label}")
+                break
+    return issues
+
+
+def audit_yolo_dataset(yolo_dir: Path) -> dict[str, int]:
+    """统计各类窗口标注数，返回计数。"""
+    counts: dict[str, int] = defaultdict(int)
+    for split in ("train", "val"):
+        lbl_dir = yolo_dir / "labels" / split
+        if not lbl_dir.is_dir():
+            continue
+        for txt in lbl_dir.glob("*.txt"):
+            for line in txt.read_text(encoding="utf-8").splitlines():
+                parts = line.split()
+                if not parts:
+                    continue
+                cid = int(parts[0])
+                if 0 <= cid < len(CLASS_NAMES):
+                    counts[CLASS_NAMES[cid]] += 1
+    return dict(counts)
 
 
 def window_sizes(ref_w: int, ref_h: int) -> list[tuple[int, int]]:
@@ -954,12 +1053,6 @@ def load_all_sprites(assets: Path) -> dict[str, list[Path]]:
         cands = list((assets / "portals").glob("pv*"))
         portal_dir = cands[0] if cands else portal_dir
 
-    mushroom_dir = assets / "mobs" / "1210102_花蘑菇"
-    snail_dir = assets / "mobs" / "100101_蓝蜗牛"
-    stump_dir = assets / "mobs" / "130100_树怪"
-    if not stump_dir.is_dir():
-        stump_dir = assets / "mobs" / "130100_木妖"
-
     player_frames: list[Path] = []
     climb_frames: list[Path] = []
     player_root = assets / "player"
@@ -972,23 +1065,31 @@ def load_all_sprites(assets: Path) -> dict[str, list[Path]]:
 
     sprites: dict[str, list[Path]] = {
         "portal": list_sprite_frames(portal_dir, PORTAL_KEEP_PREFIX),
-        "花蘑菇": list_sprite_frames(mushroom_dir, MOB_KEEP_PREFIX),
-        "蓝蜗牛": list_sprite_frames(snail_dir, MOB_KEEP_PREFIX),
-        "树怪": list_sprite_frames(stump_dir, MOB_KEEP_PREFIX),
-        "玩家": player_frames,
-        "玩家攀爬": climb_frames,
     }
+    mobs_root = assets / "mobs"
+    for dirname, label in MOB_ASSET_DIRS:
+        if label in sprites and sprites[label]:
+            continue
+        folder = mobs_root / dirname
+        if not folder.is_dir():
+            continue
+        frames = list_sprite_frames(folder, MOB_KEEP_PREFIX)
+        if frames:
+            sprites[label] = frames
+    sprites["玩家"] = player_frames
+    sprites["玩家攀爬"] = climb_frames
 
     drops_root = assets / "drops"
     for dirname, label in DROP_DIR_TO_LABEL.items():
         frames = list_drop_frames(drops_root / dirname) if drops_root.is_dir() else []
         sprites[label] = frames
-
-    for k, v in sprites.items():
-        if k == "玩家攀爬":
-            continue
-        if not v:
+    for label in MOB_LABELS:
+        if not sprites.get(label):
+            raise FileNotFoundError(f"缺少怪物精灵: {label}（请先 extract_sprites --mob ...）")
+    for k in ("portal", "玩家", *DROP_LABELS):
+        if not sprites.get(k):
             raise FileNotFoundError(f"精灵帧为空: {k}（检查 assets 目录）")
+
     if not climb_frames:
         print("提示: 无 ladder/rope 背部帧，攀爬贴图将回退为正面玩家帧")
     return sprites
@@ -1056,14 +1157,18 @@ def main() -> None:
     ap.add_argument("--players-max", type=int, default=4)
     ap.add_argument("--climbers-min", type=int, default=1, help="每张大图攀爬玩家最少个数")
     ap.add_argument("--climbers-max", type=int, default=2, help="每张大图攀爬玩家最多个数")
-    ap.add_argument("--snails-per-large-min", type=int, default=2)
-    ap.add_argument("--snails-per-large-max", type=int, default=3)
-    ap.add_argument("--mushrooms-per-large-min", type=int, default=1)
-    ap.add_argument("--mushrooms-per-large-max", type=int, default=2)
-    ap.add_argument("--stumps-per-large-min", type=int, default=1)
-    ap.add_argument("--stumps-per-large-max", type=int, default=2)
-    ap.add_argument("--drops-per-large-min", type=int, default=3, help="正常/仅掉落地板掉落物数量下限")
-    ap.add_argument("--drops-per-large-max", type=int, default=5, help="正常/仅掉落地板掉落物数量上限")
+    ap.add_argument("--snails-per-large-min", type=int, default=2, help="蓝蜗牛/大地板下限（兼容旧参数名）")
+    ap.add_argument("--snails-per-large-max", type=int, default=4, help="蓝蜗牛/大地板上限")
+    ap.add_argument("--red-snails-per-large-min", type=int, default=1)
+    ap.add_argument("--red-snails-per-large-max", type=int, default=3)
+    ap.add_argument("--green-snails-per-large-min", type=int, default=2)
+    ap.add_argument("--green-snails-per-large-max", type=int, default=4)
+    ap.add_argument("--mushrooms-per-large-min", type=int, default=2)
+    ap.add_argument("--mushrooms-per-large-max", type=int, default=3)
+    ap.add_argument("--stumps-per-large-min", type=int, default=2)
+    ap.add_argument("--stumps-per-large-max", type=int, default=4)
+    ap.add_argument("--drops-per-large-min", type=int, default=2, help="正常/仅掉落地板掉落物数量下限")
+    ap.add_argument("--drops-per-large-max", type=int, default=4, help="正常/仅掉落地板掉落物数量上限")
     ap.add_argument("--portals-min", type=int, default=1)
     ap.add_argument("--portals-max", type=int, default=2)
     ap.add_argument(
@@ -1119,7 +1224,9 @@ def main() -> None:
     print(
         f"密度: 玩家 {args.players_min}~{args.players_max}, "
         f"攀爬 {args.climbers_min}~{args.climbers_max}, "
-        f"大地板蜗牛 {args.snails_per_large_min}~{args.snails_per_large_max}, "
+        f"蓝蜗牛 {args.snails_per_large_min}~{args.snails_per_large_max}, "
+        f"绿蜗牛 {args.green_snails_per_large_min}~{args.green_snails_per_large_max}, "
+        f"红蜗牛 {args.red_snails_per_large_min}~{args.red_snails_per_large_max}, "
         f"花蘑菇 {args.mushrooms_per_large_min}~{args.mushrooms_per_large_max}, "
         f"树怪 {args.stumps_per_large_min}~{args.stumps_per_large_max}, "
         f"掉落 {args.drops_per_large_min}~{args.drops_per_large_max}, "
@@ -1143,7 +1250,15 @@ def main() -> None:
                 args.mushrooms_per_large_min,
                 args.mushrooms_per_large_max,
             ),
-            snails_per_large=(args.snails_per_large_min, args.snails_per_large_max),
+            blue_snails_per_large=(args.snails_per_large_min, args.snails_per_large_max),
+            red_snails_per_large=(
+                args.red_snails_per_large_min,
+                args.red_snails_per_large_max,
+            ),
+            green_snails_per_large=(
+                args.green_snails_per_large_min,
+                args.green_snails_per_large_max,
+            ),
             stumps_per_large=(args.stumps_per_large_min, args.stumps_per_large_max),
             drops_per_large=(args.drops_per_large_min, args.drops_per_large_max),
             players_n=(args.players_min, args.players_max),
@@ -1180,6 +1295,10 @@ def main() -> None:
                     cropped_boxes.append(cb)
             if not cropped_boxes:
                 continue
+            cropped_boxes = dedupe_boxes(cropped_boxes)
+            issues = validate_crop_boxes(cropped_boxes, ww, wh)
+            if issues:
+                print(f"  WARN {crop_name}: " + "; ".join(issues[:3]))
             use_ui = rng.random() < args.ui_ratio
             if use_ui:
                 crop, ui_boxes = paste_window_ui(crop, ui_sprites, rng)
@@ -1200,6 +1319,8 @@ def main() -> None:
                     "出口",
                     "花蘑菇",
                     "蓝蜗牛",
+                    "绿蜗牛",
+                    "红蜗牛",
                     "树怪",
                     "金币",
                     "药水",
@@ -1242,6 +1363,12 @@ def main() -> None:
     classes_txt = yolo_dir / "classes.txt"
     classes_txt.write_text("\n".join(CLASS_NAMES) + "\n", encoding="utf-8")
 
+    class_counts = audit_yolo_dataset(yolo_dir)
+    print("窗口标注统计:")
+    for name in CLASS_NAMES:
+        if name in class_counts:
+            print(f"  {name}: {class_counts[name]}")
+
     summary = (
         f"完成\n"
         f"  完整大图: {args.full_maps} → {full_dir}\n"
@@ -1250,7 +1377,8 @@ def main() -> None:
         f"  UI: 有={n_with_ui}, 无={n_without_ui} "
         f"(目标比例 {args.ui_ratio:.0%})\n"
         f"  大图精灵累计: {dict(stats)}\n"
-        f"  data.yaml: {yolo_dir / 'data.yaml'}\n"
+        f"  窗口标注累计: {class_counts}\n"
+        f"  data.yaml: {yolo_dir / 'data.yaml'} ({len(CLASS_NAMES)} 类)\n"
     )
     (out_dir / "README.txt").write_text(summary, encoding="utf-8")
     print(summary)
