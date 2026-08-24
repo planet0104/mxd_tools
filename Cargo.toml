@@ -47,6 +47,12 @@ windows = { version = "0.61", features = [
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
+    "Foundation",
+    "Foundation_Collections",
+    "Globalization",
+    "Graphics_Imaging",
+    "Media_Ocr",
+    "Storage_Streams",
 ] }
 
 # 用 cargo-vcpkg / 手动 vcpkg 安装静态 OpenCV 时参考：

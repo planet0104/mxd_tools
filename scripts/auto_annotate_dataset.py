@@ -71,6 +71,9 @@ DROP_LABELS = ("金币", "药水", "武器", "装备", "材料")
 MOB_KEEP_PREFIX = ("stand", "move", "jump", "skill", "hit")
 PLAYER_KEEP_PREFIX = ("stand", "walk", "jump", "alert")
 PLAYER_CLIMB_PREFIX = ("ladder", "rope")
+PLAYER_COMBAT_PREFIX = ("swing", "stab", "shoot")
+# 持武器明显的战斗帧，优先用于 combat 贴图
+COMBAT_PREFER_PREFIX = ("swingpf", "swingtf", "stabtf", "swingof", "stabof")
 PORTAL_KEEP_PREFIX = ("pv",)
 
 # 精灵互遮：任一框被另一框盖住超过该比例则拒绝摆放（最多 30% 遮挡）
@@ -78,23 +81,25 @@ MAX_SPRITE_OCCLUSION = 0.30
 
 # 大地板模式权重：normal / sparse / drops_only（仅掉落）/ empty（几乎空）
 FLOOR_MODE_WEIGHTS = (
-    ("normal", 0.55),
-    ("sparse", 0.25),
-    ("drops_only", 0.10),
+    ("normal", 0.45),
+    ("sparse", 0.20),
+    ("drops_only", 0.25),
     ("empty", 0.10),
 )
 
-# 掉落物标签抽样权重（装备/武器偏少，减轻小目标误检）
+# 掉落物标签抽样权重
 DROP_LABEL_WEIGHTS = (
     ("金币", 5),
     ("药水", 4),
     ("材料", 3),
-    ("武器", 1),
-    ("装备", 1),
+    ("武器", 3),
+    ("装备", 3),
 )
 
 # 窗口内掉落框过小则跳过（像素）；小掉落难学且易与 UI/地面纹理混淆
 MIN_DROP_BOX_PX = 14
+# 掉落物贴图统一缩放到最长边约 30px，减少帧间尺度差
+DROP_TARGET_PX = 30
 
 # assets/drops 子目录 → 标注类名
 DROP_DIR_TO_LABEL = {
@@ -279,8 +284,26 @@ def pick_sprite(
     return spr, desc
 
 
+def sprite_paths_with_prefix(frame_paths: list[Path], prefix: str) -> list[Path]:
+    p = prefix.lower()
+    return [fp for fp in frame_paths if fp.name.lower().startswith(p)]
+
+
 def paste_sprite(canvas: Image.Image, sprite: Image.Image, x: int, y: int) -> None:
     canvas.alpha_composite(sprite, (x, y))
+
+
+def normalize_drop_sprite(spr: Image.Image, target: int = DROP_TARGET_PX) -> Image.Image:
+    """掉落物统一缩放到最长边约 target px，减少 meso 帧间尺度差。"""
+    w, h = spr.size
+    if w <= 0 or h <= 0:
+        return spr
+    scale = target / max(w, h)
+    if abs(scale - 1.0) < 0.05:
+        return spr
+    nw = max(MIN_DROP_BOX_PX, int(round(w * scale)))
+    nh = max(MIN_DROP_BOX_PX, int(round(h * scale)))
+    return spr.resize((nw, nh), Image.Resampling.LANCZOS)
 
 
 def clean_ui_edge_bg(img: Image.Image, tol: int = 26) -> Image.Image:
@@ -453,8 +476,12 @@ def place_sprite_box(
     max_occlusion: float = MAX_SPRITE_OCCLUSION,
     allow_flip: bool = True,
     into_mobs: list[Box] | None = None,
+    preloaded: tuple[Image.Image, str] | None = None,
 ) -> Box | None:
-    spr, desc = pick_sprite(frame_paths, rng, allow_flip=allow_flip)
+    if preloaded:
+        spr, desc = preloaded
+    else:
+        spr, desc = pick_sprite(frame_paths, rng, allow_flip=allow_flip)
     sw, sh = spr.size
     pos = try_place_on_floor(
         floor,
@@ -535,6 +562,49 @@ def try_place_on_floor(
                 continue
         return x, y
     return None
+
+
+def try_place_airborne(
+    floor: Box,
+    sw: int,
+    sh: int,
+    map_w: int,
+    map_h: int,
+    rng: random.Random,
+    blocked: list[tuple[float, float, float, float]] | None = None,
+    occlude: list[Box] | None = None,
+    max_occlusion: float = MAX_SPRITE_OCCLUSION,
+    lift_ratio: tuple[float, float] = (0.18, 0.55),
+    max_tries: int = 120,
+) -> tuple[int, int] | None:
+    """脚底高于地板顶边，模拟跳跃/空中（相对站立位置向上抬升）。"""
+    pos = try_place_on_floor(
+        floor,
+        sw,
+        sh,
+        map_w,
+        map_h,
+        rng,
+        blocked=blocked,
+        occlude=occlude,
+        max_occlusion=max_occlusion,
+        max_tries=max_tries,
+    )
+    if not pos:
+        return None
+    x, y = pos
+    lift = int(round(sh * rng.uniform(*lift_ratio)))
+    y = max(0, y - lift)
+    if y < 0 or x + sw > map_w or y + sh > map_h:
+        return None
+    box = (float(x), float(y), float(x + sw), float(y + sh))
+    if blocked and any(aabb_overlap(box, b) for b in blocked):
+        return None
+    if occlude:
+        cand = Box("_", float(x), float(y), float(x + sw), float(y + sh))
+        if occlusion_too_high(cand, occlude, max_occlusion):
+            return None
+    return x, y
 
 
 def try_place_on_vertical(
@@ -627,13 +697,28 @@ def place_drops_on_floor(
     map_w: int,
     map_h: int,
     n: int,
+    mode: str = "normal",
 ) -> None:
     labels = [k for k, _ in DROP_LABEL_WEIGHTS if sprites.get(k)]
     if not labels or n <= 0:
         return
     weighted = tuple((k, w) for k, w in DROP_LABEL_WEIGHTS if k in labels)
-    for _ in range(n):
-        label = pick_weighted(rng, weighted)
+    # drops_only 地板：保底 1 武器 + 1 装备
+    forced: list[str] = []
+    if mode == "drops_only":
+        for req in ("武器", "装备"):
+            if sprites.get(req):
+                forced.append(req)
+    labels_to_place: list[str] = list(forced)
+    for _ in range(max(0, n - len(forced))):
+        labels_to_place.append(pick_weighted(rng, weighted))
+    for label in labels_to_place:
+        spr, desc = pick_sprite(
+            sprites[label],
+            rng,
+            allow_flip=(label != "金币"),
+        )
+        spr = normalize_drop_sprite(spr)
         place_sprite_box(
             canvas,
             scene,
@@ -645,6 +730,7 @@ def place_drops_on_floor(
             map_h=map_h,
             occlude=scene.sprite_boxes,
             allow_flip=(label != "金币"),
+            preloaded=(spr, desc),
         )
 
 
@@ -660,9 +746,11 @@ def build_full_scene(
     green_snails_per_large: tuple[int, int] = (2, 4),
     red_snails_per_large: tuple[int, int] = (1, 3),
     stumps_per_large: tuple[int, int] = (2, 4),
-    drops_per_large: tuple[int, int] = (2, 4),
-    players_n: tuple[int, int] = (3, 4),
-    climbers_n: tuple[int, int] = (1, 2),
+    drops_per_large: tuple[int, int] = (4, 8),
+    players_n: tuple[int, int] = (6, 8),
+    climbers_n: tuple[int, int] = (2, 4),
+    airborne_n: tuple[int, int] = (2, 4),
+    combat_n: tuple[int, int] = (2, 4),
 ) -> Scene:
     canvas = base_img.copy()
     mw, mh = canvas.size
@@ -778,7 +866,8 @@ def build_full_scene(
             )
         n_drop = drops_count_for_mode(rng, mode, drops_per_large)
         place_drops_on_floor(
-            canvas, scene, sprites, floor, rng, map_w=mw, map_h=mh, n=n_drop
+            canvas, scene, sprites, floor, rng,
+            map_w=mw, map_h=mh, n=n_drop, mode=mode,
         )
 
     small_floors = [f for f in floors if f not in large_floors]
@@ -845,6 +934,43 @@ def build_full_scene(
         scene.sprite_boxes.append(cand)
         placed_players += 1
 
+    # 3b) 半空玩家：优先 jump 帧，脚底抬离地板（模拟起跳/空中）
+    jump_pool = sprite_paths_with_prefix(sprites["玩家"], "jump")
+    airborne_pool = jump_pool or sprites["玩家"]
+    n_airborne = rng.randint(*airborne_n)
+    placed_airborne = 0
+    attempts = 0
+    while placed_airborne < n_airborne and attempts < n_airborne * 40:
+        attempts += 1
+        floor = rng.choice(floors)
+        spr, desc = pick_sprite(airborne_pool, rng, allow_flip=True)
+        sw, sh = spr.size
+        pos = try_place_airborne(
+            floor,
+            sw,
+            sh,
+            mw,
+            mh,
+            rng,
+            blocked=portal_boxes,
+            occlude=scene.sprite_boxes,
+        )
+        if not pos:
+            continue
+        x, y = pos
+        paste_sprite(canvas, spr, x, y)
+        scene.sprite_boxes.append(
+            Box(
+                "玩家",
+                float(x),
+                float(y),
+                float(x + sw),
+                float(y + sh),
+                description=f"{desc} airborne=1",
+            )
+        )
+        placed_airborne += 1
+
     # 4) 攀爬玩家：贴在绳子/梯子上（优先背部 ladder/rope 帧，否则用正面帧）
     verticals = [b for b in base_boxes if b.label in ("绳子", "梯子")]
     climb_pool = sprites.get("玩家攀爬") or []
@@ -881,6 +1007,63 @@ def build_full_scene(
             )
         )
         placed_climb += 1
+
+    # 3c) 战斗姿态玩家：swing/stab/shoot，约一半半空
+    combat_pool = sprites.get("玩家战斗") or []
+    preferred_combat = [
+        p
+        for p in combat_pool
+        if any(p.name.lower().startswith(pref) for pref in COMBAT_PREFER_PREFIX)
+    ]
+    combat_pick_pool = preferred_combat or combat_pool
+    n_combat = rng.randint(*combat_n) if combat_pick_pool else 0
+    placed_combat = 0
+    attempts = 0
+    while placed_combat < n_combat and attempts < n_combat * 40:
+        attempts += 1
+        floor = rng.choice(floors)
+        spr, desc = pick_sprite(combat_pick_pool, rng, allow_flip=True)
+        sw, sh = spr.size
+        use_airborne = rng.random() < 0.5
+        if use_airborne:
+            pos = try_place_airborne(
+                floor,
+                sw,
+                sh,
+                mw,
+                mh,
+                rng,
+                blocked=portal_boxes,
+                occlude=scene.sprite_boxes,
+            )
+            tag = f"{desc} airborne=1 combat=1"
+        else:
+            pos = try_place_on_floor(
+                floor,
+                sw,
+                sh,
+                mw,
+                mh,
+                rng,
+                blocked=portal_boxes,
+                occlude=scene.sprite_boxes,
+            )
+            tag = f"{desc} combat=1"
+        if not pos:
+            continue
+        x, y = pos
+        paste_sprite(canvas, spr, x, y)
+        scene.sprite_boxes.append(
+            Box(
+                "玩家",
+                float(x),
+                float(y),
+                float(x + sw),
+                float(y + sh),
+                description=tag,
+            )
+        )
+        placed_combat += 1
 
     return scene
 
@@ -1042,6 +1225,12 @@ def list_drop_frames(folder: Path) -> list[Path]:
         name = p.name.lower()
         if name.startswith("_") or "atlas" in name:
             continue
+        try:
+            w, h = Image.open(p).size
+            if w < MIN_DROP_BOX_PX or h < MIN_DROP_BOX_PX:
+                continue
+        except OSError:
+            continue
         frames.append(p)
     return frames
 
@@ -1055,6 +1244,7 @@ def load_all_sprites(assets: Path) -> dict[str, list[Path]]:
 
     player_frames: list[Path] = []
     climb_frames: list[Path] = []
+    combat_frames: list[Path] = []
     player_root = assets / "player"
     if player_root.is_dir():
         for sub in sorted(player_root.iterdir()):
@@ -1062,6 +1252,7 @@ def load_all_sprites(assets: Path) -> dict[str, list[Path]]:
                 continue
             player_frames.extend(list_sprite_frames(sub, PLAYER_KEEP_PREFIX))
             climb_frames.extend(list_sprite_frames(sub, PLAYER_CLIMB_PREFIX))
+            combat_frames.extend(list_sprite_frames(sub, PLAYER_COMBAT_PREFIX))
 
     sprites: dict[str, list[Path]] = {
         "portal": list_sprite_frames(portal_dir, PORTAL_KEEP_PREFIX),
@@ -1078,6 +1269,7 @@ def load_all_sprites(assets: Path) -> dict[str, list[Path]]:
             sprites[label] = frames
     sprites["玩家"] = player_frames
     sprites["玩家攀爬"] = climb_frames
+    sprites["玩家战斗"] = combat_frames
 
     drops_root = assets / "drops"
     for dirname, label in DROP_DIR_TO_LABEL.items():
@@ -1092,6 +1284,8 @@ def load_all_sprites(assets: Path) -> dict[str, list[Path]]:
 
     if not climb_frames:
         print("提示: 无 ladder/rope 背部帧，攀爬贴图将回退为正面玩家帧")
+    if not combat_frames:
+        print("提示: 无 swing/stab/shoot 战斗帧，战斗玩家贴图将跳过")
     return sprites
 
 
@@ -1153,10 +1347,14 @@ def main() -> None:
     ap.add_argument("--crops-per-map", type=int, default=15, help="每张大图裁切窗口数")
     ap.add_argument("--val-ratio", type=float, default=0.15, help="验证集比例")
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--players-min", type=int, default=3)
-    ap.add_argument("--players-max", type=int, default=4)
-    ap.add_argument("--climbers-min", type=int, default=1, help="每张大图攀爬玩家最少个数")
-    ap.add_argument("--climbers-max", type=int, default=2, help="每张大图攀爬玩家最多个数")
+    ap.add_argument("--players-min", type=int, default=6)
+    ap.add_argument("--players-max", type=int, default=8)
+    ap.add_argument("--climbers-min", type=int, default=2, help="每张大图攀爬玩家最少个数")
+    ap.add_argument("--climbers-max", type=int, default=4, help="每张大图攀爬玩家最多个数")
+    ap.add_argument("--airborne-min", type=int, default=2, help="每张大图半空跳跃玩家最少个数")
+    ap.add_argument("--airborne-max", type=int, default=4, help="每张大图半空跳跃玩家最多个数")
+    ap.add_argument("--combat-min", type=int, default=2, help="每张大图战斗姿态玩家最少个数")
+    ap.add_argument("--combat-max", type=int, default=4, help="每张大图战斗姿态玩家最多个数")
     ap.add_argument("--snails-per-large-min", type=int, default=2, help="蓝蜗牛/大地板下限（兼容旧参数名）")
     ap.add_argument("--snails-per-large-max", type=int, default=4, help="蓝蜗牛/大地板上限")
     ap.add_argument("--red-snails-per-large-min", type=int, default=1)
@@ -1167,8 +1365,8 @@ def main() -> None:
     ap.add_argument("--mushrooms-per-large-max", type=int, default=3)
     ap.add_argument("--stumps-per-large-min", type=int, default=2)
     ap.add_argument("--stumps-per-large-max", type=int, default=4)
-    ap.add_argument("--drops-per-large-min", type=int, default=2, help="正常/仅掉落地板掉落物数量下限")
-    ap.add_argument("--drops-per-large-max", type=int, default=4, help="正常/仅掉落地板掉落物数量上限")
+    ap.add_argument("--drops-per-large-min", type=int, default=4, help="正常/仅掉落地板掉落物数量下限")
+    ap.add_argument("--drops-per-large-max", type=int, default=8, help="正常/仅掉落地板掉落物数量上限")
     ap.add_argument("--portals-min", type=int, default=1)
     ap.add_argument("--portals-max", type=int, default=2)
     ap.add_argument(
@@ -1223,6 +1421,8 @@ def main() -> None:
     print(f"基底标注: {len(base_boxes)} | 参考窗口: {ref_w}x{ref_h}")
     print(
         f"密度: 玩家 {args.players_min}~{args.players_max}, "
+        f"半空 {args.airborne_min}~{args.airborne_max}, "
+        f"战斗 {args.combat_min}~{args.combat_max}, "
         f"攀爬 {args.climbers_min}~{args.climbers_max}, "
         f"蓝蜗牛 {args.snails_per_large_min}~{args.snails_per_large_max}, "
         f"绿蜗牛 {args.green_snails_per_large_min}~{args.green_snails_per_large_max}, "
@@ -1263,6 +1463,8 @@ def main() -> None:
             drops_per_large=(args.drops_per_large_min, args.drops_per_large_max),
             players_n=(args.players_min, args.players_max),
             climbers_n=(args.climbers_min, args.climbers_max),
+            airborne_n=(args.airborne_min, args.airborne_max),
+            combat_n=(args.combat_min, args.combat_max),
         )
         for b in scene.sprite_boxes:
             stats[b.label] += 1
@@ -1331,6 +1533,8 @@ def main() -> None:
                 )
             )
             + f", 攀爬={sum(1 for b in scene.sprite_boxes if b.label=='玩家' and 'climb_on=' in b.description)}"
+            + f", 半空={sum(1 for b in scene.sprite_boxes if b.label=='玩家' and 'airborne=1' in b.description)}"
+            + f", 战斗={sum(1 for b in scene.sprite_boxes if b.label=='玩家' and 'combat=1' in b.description)}"
         )
 
     rng.shuffle(crop_records)
