@@ -4,6 +4,7 @@
 
 mod labels;
 mod postprocess;
+mod preprocess;
 mod session;
 
 pub use labels::CLASS_NAMES;

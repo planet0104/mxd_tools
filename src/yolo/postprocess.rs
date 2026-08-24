@@ -1,41 +1,35 @@
 use crate::yolo::labels::class_name;
 use crate::yolo::{Detection, LetterboxMeta};
 
-/// Ultralytics YOLO 输出: shape [1, 4+nc, num_anchors]，如 [1, 23, 8400]。
-pub fn decode_yolo_output(
-    output: &ndarray::ArrayD<f32>,
+/// 从 ORT 输出切片解码，避免整份 `to_vec()` 拷贝。
+pub fn decode_yolo_output_flat(
+    shape: &[i64],
+    data: &[f32],
     meta: &LetterboxMeta,
     conf_thres: f32,
     iou_thres: f32,
 ) -> Vec<Detection> {
-    // 期望至少 3 维；兼容 [1, C, N] 或 [C, N]
-    let view = match output.ndim() {
-        3 => output.index_axis(ndarray::Axis(0), 0),
-        2 => output.view(),
+    let (channels, num) = match shape {
+        [_, c, n] => (*c as usize, *n as usize),
+        [c, n] => (*c as usize, *n as usize),
         _ => return Vec::new(),
     };
-    let shape = view.shape();
-    if shape.len() != 2 {
-        return Vec::new();
-    }
-    let channels = shape[0];
-    let num = shape[1];
-    if channels < 5 || num == 0 {
+    if channels < 5 || num == 0 || data.len() < channels * num {
         return Vec::new();
     }
     let nc = channels - 4;
 
     let mut candidates: Vec<Detection> = Vec::new();
     for i in 0..num {
-        let cx = view[[0, i]];
-        let cy = view[[1, i]];
-        let w = view[[2, i]];
-        let h = view[[3, i]];
+        let cx = data[i];
+        let cy = data[num + i];
+        let w = data[2 * num + i];
+        let h = data[3 * num + i];
 
         let mut best_cls = 0usize;
-        let mut best_score = view[[4, i]];
+        let mut best_score = data[4 * num + i];
         for c in 1..nc {
-            let s = view[[4 + c, i]];
+            let s = data[(4 + c) * num + i];
             if s > best_score {
                 best_score = s;
                 best_cls = c;
@@ -45,7 +39,6 @@ pub fn decode_yolo_output(
             continue;
         }
 
-        // letterbox 坐标 → 原图
         let x1 = (cx - w * 0.5 - meta.pad_x) / meta.gain;
         let y1 = (cy - h * 0.5 - meta.pad_y) / meta.gain;
         let x2 = (cx + w * 0.5 - meta.pad_x) / meta.gain;
@@ -68,6 +61,17 @@ pub fn decode_yolo_output(
     }
 
     nms(candidates, iou_thres)
+}
+
+/// Ultralytics YOLO 输出: shape [1, 4+nc, num_anchors]，如 [1, 23, 8400]。
+pub fn decode_yolo_output(
+    output: &ndarray::ArrayD<f32>,
+    meta: &LetterboxMeta,
+    conf_thres: f32,
+    iou_thres: f32,
+) -> Vec<Detection> {
+    let shape_i64: Vec<i64> = output.shape().iter().map(|&d| d as i64).collect();
+    decode_yolo_output_flat(&shape_i64, output.as_slice().unwrap_or(&[]), meta, conf_thres, iou_thres)
 }
 
 fn clip_xyxy(x1: f32, y1: f32, x2: f32, y2: f32, w: u32, h: u32) -> (f32, f32, f32, f32) {
