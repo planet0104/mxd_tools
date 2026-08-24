@@ -4,7 +4,7 @@
 //!   cargo run --release --bin yolo_infer -- \
 //!     --model yolo_nangang_e1000.onnx \
 //!     --source "screen_caps/彩虹岛-南港西郊平原" \
-//!     --out temp/yolo_output \
+//!     --out tmp/yolo_output \
 //!     --device cpu
 
 use std::collections::HashSet;
@@ -618,7 +618,7 @@ fn main() -> Result<()> {
     let iou: f32 = arg_value(&args, "--iou").unwrap_or("0.7").parse().context("--iou")?;
     let out_dir = arg_value(&args, "--out")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("temp/yolo_output"));
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tmp/yolo_output"));
 
     let mut det = YoloDetector::load_with_thresholds(&model, device, conf, iou, 640)?;
     eprintln!("device={}", det.device_label);
