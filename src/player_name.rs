@@ -2,9 +2,6 @@
 
 use anyhow::{Context, Result};
 use image::{Rgb, RgbImage};
-use opencv::core::{Mat, Size, Vec3b};
-use opencv::imgproc::{self, InterpolationFlags};
-use opencv::prelude::*;
 
 use crate::image_util::{crop_rgb, mark_player_diamond};
 use crate::ocr;
@@ -24,6 +21,7 @@ pub struct NamedPlayerHit {
 }
 
 const PLAYER_LABEL: &str = "玩家";
+const MATCH_STOP_SCORE: f32 = 0.92;
 
 /// 归一化中心距离：0 为屏幕正中，1 为角落。
 fn center_distance_norm(cx: f32, cy: f32, img_w: u32, img_h: u32) -> f32 {
@@ -65,64 +63,71 @@ pub fn find_named_player_verbose(
     let img_w = img.width();
     let img_h = img.height();
 
-    for det in detections {
-        if det.label != PLAYER_LABEL || det.conf < min_player_conf {
+    let mut players: Vec<&Detection> = detections
+        .iter()
+        .filter(|d| d.label == PLAYER_LABEL && d.conf >= min_player_conf)
+        .collect();
+    players.sort_by(|a, b| b.conf.partial_cmp(&a.conf).unwrap_or(std::cmp::Ordering::Equal));
+
+    'players: for det in players {
+        let (rx, ry, rw, rh) = name_search_region(det, img.width(), img.height());
+        if rw < 8 || rh < 8 {
             continue;
         }
-        for (x, y, w, h) in name_search_rois(det, img.width(), img.height()) {
-            if w < 8 || h < 8 {
-                continue;
-            }
-            let roi = crop_rgb(img, x, y, w, h);
-            if let Some((text, match_score)) =
-                ocr_and_match_roi_variants(&roi, target_name).context("OCR 名牌区域失败")?
-            {
-                if verbose {
-                    attempts.push(PlayerOcrAttempt {
-                        player_conf: det.conf,
-                        player_xyxy: (det.x1, det.y1, det.x2, det.y2),
-                        roi: (x, y, w, h),
-                        ocr_text: text.clone(),
-                        match_score,
-                    });
-                }
-                if match_score < 0.45 {
-                    continue;
-                }
-                let hit = NamedPlayerHit {
-                    x: (det.x1 + det.x2) * 0.5,
-                    y: det.y2,
-                    ocr_text: text.clone(),
-                    match_score,
-                    partial: is_partial_name(&text, target_name),
-                    player_conf: det.conf,
-                    roi: (x, y, w, h),
-                };
-                let det_cx = (det.x1 + det.x2) * 0.5;
-                let det_cy = (det.y1 + det.y2) * 0.5;
-                let dist = center_distance_norm(det_cx, det_cy, img_w, img_h);
-                let score = player_score(match_score, dist);
-                if best
-                    .as_ref()
-                    .map(|(b, bdist)| {
-                        let b_score = player_score(b.match_score, *bdist);
-                        score > b_score
-                            || (score == b_score
-                                && (dist < *bdist || hit.match_score > b.match_score))
-                    })
-                    .unwrap_or(true)
-                {
-                    best = Some((hit, dist));
-                }
-            } else if verbose {
+        let region = crop_rgb(img, rx, ry, rw, rh);
+        let Some((text, match_score, (bx, by, bw, bh))) =
+            ocr_and_match_region_det(&region, target_name).context("OCR 名牌区域失败")?
+        else {
+            if verbose {
                 attempts.push(PlayerOcrAttempt {
                     player_conf: det.conf,
                     player_xyxy: (det.x1, det.y1, det.x2, det.y2),
-                    roi: (x, y, w, h),
+                    roi: (rx, ry, rw, rh),
                     ocr_text: String::new(),
                     match_score: 0.0,
                 });
             }
+            continue;
+        };
+        if verbose {
+            attempts.push(PlayerOcrAttempt {
+                player_conf: det.conf,
+                player_xyxy: (det.x1, det.y1, det.x2, det.y2),
+                roi: (rx + bx, ry + by, bw, bh),
+                ocr_text: text.clone(),
+                match_score,
+            });
+        }
+        if match_score < 0.45 {
+            continue;
+        }
+        let hit = NamedPlayerHit {
+            x: (det.x1 + det.x2) * 0.5,
+            y: det.y2,
+            ocr_text: text.clone(),
+            match_score,
+            partial: is_partial_name(&text, target_name),
+            player_conf: det.conf,
+            roi: (rx + bx, ry + by, bw, bh),
+        };
+        let det_cx = (det.x1 + det.x2) * 0.5;
+        let det_cy = (det.y1 + det.y2) * 0.5;
+        let dist = center_distance_norm(det_cx, det_cy, img_w, img_h);
+        let score = player_score(match_score, dist);
+        if best
+            .as_ref()
+            .map(|(b, bdist)| {
+                let b_score = player_score(b.match_score, *bdist);
+                score > b_score
+                    || (score == b_score
+                        && (dist < *bdist || hit.match_score > b.match_score))
+            })
+            .unwrap_or(true)
+        {
+            best = Some((hit, dist));
+        }
+        if match_score >= MATCH_STOP_SCORE {
+            break 'players;
         }
     }
 
@@ -156,8 +161,8 @@ pub fn draw_named_player_hit(img: &mut RgbImage, hit: &NamedPlayerHit) {
     crate::image_util::draw_rect(img, x, y, w, h, Rgb([255, 220, 0]), 2);
 }
 
-/// 名牌搜索区域：玩家框下方、水平居中扩展（多种纵向偏移）。
-pub fn name_search_rois(det: &Detection, img_w: u32, img_h: u32) -> Vec<(u32, u32, u32, u32)> {
+/// 玩家框下方主搜索区（供 det 定位文本行）。
+pub fn name_search_region(det: &Detection, img_w: u32, img_h: u32) -> (u32, u32, u32, u32) {
     let bw = (det.x2 - det.x1).max(1.0);
     let bh = (det.y2 - det.y1).max(1.0);
     let cx = (det.x1 + det.x2) * 0.5;
@@ -165,150 +170,76 @@ pub fn name_search_rois(det: &Detection, img_w: u32, img_h: u32) -> Vec<(u32, u3
     let roi_w = (bw * 3.2).clamp(100.0, 360.0);
     let roi_h = (bh * 0.85).clamp(28.0, 80.0);
 
-    let y_starts = [det.y2 - bh * 0.05, det.y2 + bh * 0.02, det.y2 + bh * 0.12];
-    let mut out = Vec::new();
-    for y1 in y_starts {
-        let mut x1 = (cx - roi_w * 0.5).max(0.0);
-        let mut x2 = (cx + roi_w * 0.5).min(img_w as f32);
-        // 玩家靠近屏幕边缘时，名牌可能被裁切，ROI 扩展到画面边界
-        if cx < img_w as f32 * 0.18 {
-            x1 = 0.0;
-        }
-        if cx > img_w as f32 * 0.82 {
-            x2 = img_w as f32;
-        }
-        let y2 = (y1 + roi_h).min(img_h as f32);
-        let w = (x2 - x1).max(1.0) as u32;
-        let h = (y2 - y1).max(1.0) as u32;
-        if h >= 8 && w >= 8 {
-            out.push((x1 as u32, y1.max(0.0) as u32, w, h));
-        }
+    let y1 = det.y2 + bh * 0.02;
+    let mut x1 = (cx - roi_w * 0.5).max(0.0);
+    let mut x2 = (cx + roi_w * 0.5).min(img_w as f32);
+    if cx < img_w as f32 * 0.18 {
+        x1 = 0.0;
     }
-    out
+    if cx > img_w as f32 * 0.82 {
+        x2 = img_w as f32;
+    }
+    let y2 = (y1 + roi_h).min(img_h as f32);
+    let w = (x2 - x1).max(1.0) as u32;
+    let h = (y2 - y1).max(1.0) as u32;
+    if h >= 8 && w >= 8 {
+        (x1 as u32, y1.max(0.0) as u32, w, h)
+    } else {
+        (0, 0, 1, 1)
+    }
 }
 
-/// 兼容旧接口：取第一档 ROI。
-pub fn name_search_roi(det: &Detection, img_w: u32, img_h: u32) -> (u32, u32, u32, u32) {
-    name_search_rois(det, img_w, img_h)
-        .into_iter()
-        .next()
-        .unwrap_or((0, 0, 1, 1))
-}
-
-/// 在 ROI 内收紧到高对比名牌横条（白底黑字 / 黑底白字）。
-fn tighten_to_name_plate(roi: &RgbImage) -> RgbImage {
-    let (w, h) = roi.dimensions();
-    if w < 4 || h < 4 {
-        return roi.clone();
-    }
-
-    let mut best_band: Option<(u32, u32, PlateMode)> = None;
-    let mut best_score = 0.0f32;
-
-    for mode in [PlateMode::Light, PlateMode::Dark] {
-        for y in 0..h {
-            let mut mode_px = 0u32;
-            let mut edge = 0u32;
-            let mut prev_l = luminance(roi.get_pixel(0, y).0);
-            for x in 0..w {
-                let l = luminance(roi.get_pixel(x, y).0);
-                if mode.matches(l) {
-                    mode_px += 1;
-                }
-                if x > 0 && (l as i32 - prev_l as i32).abs() > 28 {
-                    edge += 1;
-                }
-                prev_l = l;
-            }
-            let fill = mode_px as f32 / w as f32;
-            let edge_ratio = edge as f32 / w as f32;
-            let score = match mode {
-                PlateMode::Light => fill * 0.7 + edge_ratio * 0.3,
-                PlateMode::Dark => (1.0 - fill) * 0.55 + edge_ratio * 0.45,
-            };
-            if score > best_score && fill > 0.12 && fill < 0.92 && edge_ratio > 0.035 {
-                best_score = score;
-                best_band = Some((y, y, mode));
-            }
-        }
-    }
-
-    let Some((mut y1, mut y2, mode)) = best_band else {
-        return roi.clone();
-    };
-
-    let center_l = row_mean_luma(roi, (y1 + y2) / 2);
-    while y1 > 0 && (row_mean_luma(roi, y1 - 1) - center_l).abs() < 45.0 {
-        y1 -= 1;
-    }
-    while y2 + 1 < h && (row_mean_luma(roi, y2 + 1) - center_l).abs() < 45.0 {
-        y2 += 1;
-    }
-
-    let pad_y = 2u32;
-    y1 = y1.saturating_sub(pad_y);
-    y2 = (y2 + pad_y).min(h - 1);
-    let bh = y2 - y1 + 1;
-
-    let (x1, x2) = horizontal_text_bounds(roi, y1, y2, mode);
-    if x2 <= x1 || bh < 4 {
-        return roi.clone();
-    }
-    crop_rgb(roi, x1, y1, x2 - x1 + 1, bh)
-}
-
-fn horizontal_text_bounds(roi: &RgbImage, y1: u32, y2: u32, mode: PlateMode) -> (u32, u32) {
-    let w = roi.width();
-    let is_text = |l: u8| match mode {
-        PlateMode::Light => l < 120,
-        PlateMode::Dark => l > 185,
-    };
-
-    let mut x1 = 0u32;
-    let mut x2 = w.saturating_sub(1);
-    'left: for xx in 0..w {
-        for yy in y1..=y2 {
-            if is_text(luminance(roi.get_pixel(xx, yy).0)) {
-                x1 = xx.saturating_sub(2);
-                break 'left;
-            }
-        }
-    }
-    'right: for xx in (0..w).rev() {
-        for yy in y1..=y2 {
-            if is_text(luminance(roi.get_pixel(xx, yy).0)) {
-                x2 = (xx + 2).min(w - 1);
-                break 'right;
-            }
-        }
-    }
-    (x1, x2)
-}
-
-fn roi_variants(roi: &RgbImage) -> Vec<RgbImage> {
-    let mut out = vec![roi.clone()];
-    let tight = tighten_to_name_plate(roi);
-    if tight.width() >= 12
-        && tight.height() >= 6
-        && tight.width() * tight.height() < roi.width() * roi.height()
-    {
-        out.push(tight);
-    }
-    out
-}
-
-fn ocr_and_match_roi_variants(
-    roi: &RgbImage,
+/// PP-OCRv5 det 定位文本行后做精简 rec 匹配。
+fn ocr_and_match_region_det(
+    region: &RgbImage,
     target_name: &str,
-) -> Result<Option<(String, f32)>> {
+) -> Result<Option<(String, f32, (u32, u32, u32, u32))>> {
+    let mut boxes = ocr::detect_text_boxes(region)?;
+    if boxes.is_empty() {
+        if let Some((text, score)) = ocr_and_match_roi_simple(region, target_name)? {
+            if score > 0.0 {
+                let (w, h) = region.dimensions();
+                return Ok(Some((text, score, (0, 0, w, h))));
+            }
+        }
+        return Ok(None);
+    }
+
+    boxes.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut best: Option<(String, f32, (u32, u32, u32, u32))> = None;
+    for tb in boxes {
+        let crop = crop_rgb(region, tb.x, tb.y, tb.w, tb.h);
+        let Some((text, score)) = ocr_and_match_roi_simple(&crop, target_name)? else {
+            continue;
+        };
+        if score >= MATCH_STOP_SCORE {
+            return Ok(Some((text, score, (tb.x, tb.y, tb.w, tb.h))));
+        }
+        if score > best.as_ref().map(|b| b.1).unwrap_or(0.0) {
+            best = Some((text, score, (tb.x, tb.y, tb.w, tb.h)));
+        }
+    }
+    Ok(best)
+}
+
+/// 对单个文本行 crop 做最多 2 次 rec（原图 + 反色）。
+fn ocr_and_match_roi_simple(roi: &RgbImage, target_name: &str) -> Result<Option<(String, f32)>> {
+    let invert = invert_rgb(roi);
+    let refs: [&RgbImage; 2] = [roi, &invert];
+    let texts = ocr::recognize_rgb_batch(&refs).unwrap_or_else(|_| vec![String::new(); 2]);
     let mut best_text = String::new();
     let mut best_match = 0.0f32;
-    for variant in roi_variants(roi) {
-        let (text, _) = ocr_name_in_roi(&variant)?;
-        let m = name_similarity(&text, target_name);
+    for text in texts {
+        let normalized = normalize_name(&text);
+        let m = name_similarity(&normalized, target_name);
         if m > best_match {
             best_match = m;
-            best_text = text;
+            best_text = normalized;
         }
     }
     if best_match > 0.0 {
@@ -318,278 +249,54 @@ fn ocr_and_match_roi_variants(
     }
 }
 
-/// YOLO 漏检时：在游戏区域扫描名牌横条并 OCR。
+/// YOLO 漏检时：对画面下部区域做 det + rec。
 fn scan_name_plates_fallback(
     img: &RgbImage,
     target_name: &str,
 ) -> Result<(Option<(NamedPlayerHit, f32)>, Vec<PlayerOcrAttempt>)> {
     let (w, h) = img.dimensions();
-    let y_top = 48u32;
-    let y_bot = h.saturating_sub(130);
-    let x_pad = (w as f32 * 0.04) as u32;
-    let x1 = x_pad;
-    let x2 = w.saturating_sub(x_pad);
-
     let mut attempts = Vec::new();
     let mut best: Option<(NamedPlayerHit, f32)> = None;
 
-    let mut y = y_top;
-    while y + 10 < y_bot {
-        if let Some((py1, py2, px1, px2)) = find_plate_at_row(img, y, x1, x2) {
-            let pw = px2 - px1 + 1;
-            let ph = py2 - py1 + 1;
-            if pw >= 40 && pw <= 360 && ph >= 8 && ph <= 40 {
-                let roi = crop_rgb(img, px1, py1, pw, ph);
-                if let Some((text, match_score)) = ocr_and_match_roi_variants(&roi, target_name)? {
-                    attempts.push(PlayerOcrAttempt {
-                        player_conf: 0.0,
-                        player_xyxy: (0.0, 0.0, 0.0, 0.0),
-                        roi: (px1, py1, pw, ph),
-                        ocr_text: text.clone(),
-                        match_score,
-                    });
-                    if match_score >= 0.45 {
-                        let hit = NamedPlayerHit {
-                            x: px1 as f32 + pw as f32 * 0.5,
-                            y: py1 as f32 - 4.0,
-                            ocr_text: text.clone(),
-                            match_score,
-                            partial: is_partial_name(&text, target_name),
-                            player_conf: 0.0,
-                            roi: (px1, py1, pw, ph),
-                        };
-                        let plate_cx = px1 as f32 + pw as f32 * 0.5;
-                        let plate_cy = py1 as f32 + ph as f32 * 0.5;
-                        let dist = center_distance_norm(plate_cx, plate_cy, w, h);
-                        let score = player_score(match_score, dist);
-                        if best
-                            .as_ref()
-                            .map(|(b, bdist)| {
-                                let b_score = player_score(b.match_score, *bdist);
-                                score > b_score
-                                    || (score == b_score
-                                        && (dist < *bdist || hit.match_score > b.match_score))
-                            })
-                            .unwrap_or(true)
-                        {
-                            best = Some((hit, dist));
-                        }
-                    }
-                }
-            }
-            y = py2 + 2;
-        } else {
-            y += 3;
+    let y_start = (h as f32 * 0.65) as u32;
+    let y_end = h.saturating_sub(90);
+    let x_start = w / 8;
+    let x_end = w * 7 / 8;
+    if y_end <= y_start + 20 || x_end <= x_start + 40 {
+        return Ok((None, attempts));
+    }
+
+    let region = crop_rgb(img, x_start, y_start, x_end - x_start, y_end - y_start);
+    if let Some((text, match_score, (bx, by, bw, bh))) =
+        ocr_and_match_region_det(&region, target_name)?
+    {
+        attempts.push(PlayerOcrAttempt {
+            player_conf: 0.0,
+            player_xyxy: (0.0, 0.0, 0.0, 0.0),
+            roi: (x_start + bx, y_start + by, bw, bh),
+            ocr_text: text.clone(),
+            match_score,
+        });
+        if match_score >= 0.45 {
+            let px = x_start + bx;
+            let py = y_start + by;
+            let hit = NamedPlayerHit {
+                x: px as f32 + bw as f32 * 0.5,
+                y: py as f32 - 4.0,
+                ocr_text: text,
+                match_score,
+                partial: is_partial_name(&attempts[0].ocr_text, target_name),
+                player_conf: 0.0,
+                roi: (px, py, bw, bh),
+            };
+            let plate_cx = px as f32 + bw as f32 * 0.5;
+            let plate_cy = py as f32 + bh as f32 * 0.5;
+            let dist = center_distance_norm(plate_cx, plate_cy, w, h);
+            best = Some((hit, dist));
         }
     }
 
     Ok((best, attempts))
-}
-
-fn find_plate_at_row(
-    img: &RgbImage,
-    y: u32,
-    x1: u32,
-    x2: u32,
-) -> Option<(u32, u32, u32, u32)> {
-    let score = row_plate_score(img, y, x1, x2);
-    if score < 0.12 {
-        return None;
-    }
-
-    let mut y1 = y;
-    let mut y2 = y;
-    while y1 > 0 && row_plate_score(img, y1 - 1, x1, x2) > 0.08 {
-        y1 -= 1;
-    }
-    while y2 + 1 < img.height() && row_plate_score(img, y2 + 1, x1, x2) > 0.08 {
-        y2 += 1;
-    }
-
-    let (mut px1, mut px2) = (x1, x2);
-    let mid = (y1 + y2) / 2;
-    'left: for xx in x1..=x2 {
-        let l = luminance(img.get_pixel(xx, mid).0);
-        if (l > 185) || (l < 120) {
-            px1 = xx.saturating_sub(4);
-            break 'left;
-        }
-    }
-    'right: for xx in (x1..=x2).rev() {
-        let l = luminance(img.get_pixel(xx, mid).0);
-        if (l > 185) || (l < 120) {
-            px2 = (xx + 4).min(x2);
-            break 'right;
-        }
-    }
-
-    if px2 <= px1 || y2 <= y1 {
-        return None;
-    }
-    Some((y1, y2, px1, px2))
-}
-
-fn row_plate_score(img: &RgbImage, y: u32, x1: u32, x2: u32) -> f32 {
-    if y >= img.height() || x2 <= x1 {
-        return 0.0;
-    }
-    let mut dark = 0u32;
-    let mut bright = 0u32;
-    let mut edge = 0u32;
-    let mut prev = luminance(img.get_pixel(x1, y).0);
-    for x in x1..=x2 {
-        let l = luminance(img.get_pixel(x, y).0);
-        if (35..=130).contains(&l) {
-            dark += 1;
-        }
-        if l >= 200 {
-            bright += 1;
-        }
-        if (l as i32 - prev as i32).abs() > 35 {
-            edge += 1;
-        }
-        prev = l;
-    }
-    let w = (x2 - x1 + 1) as f32;
-    let dark_r = dark as f32 / w;
-    let bright_r = bright as f32 / w;
-    let edge_r = edge as f32 / w;
-
-    let dark_plate = dark_r * 0.45 + bright_r * 1.2 + edge_r * 0.8;
-    let light_plate = (bright_r + dark_r * 0.3) * 0.5 + edge_r;
-    dark_plate.max(light_plate * 0.85)
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PlateMode {
-    Light,
-    Dark,
-}
-
-impl PlateMode {
-    fn matches(self, l: u8) -> bool {
-        match self {
-            PlateMode::Light => l > 185,
-            PlateMode::Dark => l < 95,
-        }
-    }
-}
-
-fn luminance(rgb: [u8; 3]) -> u8 {
-    ((u16::from(rgb[0]) * 30 + u16::from(rgb[1]) * 59 + u16::from(rgb[2]) * 11) / 100) as u8
-}
-
-fn row_mean_luma(img: &RgbImage, y: u32) -> f32 {
-    let w = img.width();
-    let sum: u32 = (0..w)
-        .map(|x| u32::from(luminance(img.get_pixel(x, y).0)))
-        .sum();
-    sum as f32 / w as f32
-}
-
-fn ocr_name_in_roi(roi: &RgbImage) -> Result<(String, f32)> {
-    let mut best_text = String::new();
-    let mut best_score = 0.0f32;
-
-    for variant in preprocess_variants(roi)? {
-        let text = ocr::recognize_rgb(&variant).unwrap_or_default();
-        let score = ocr_quality_score(&text);
-        if score > best_score {
-            best_score = score;
-            best_text = normalize_name(&text);
-        }
-    }
-
-    Ok((best_text, best_score))
-}
-
-fn preprocess_variants(roi: &RgbImage) -> Result<Vec<RgbImage>> {
-    let up5 = upscale_rgb(roi, 5.0)?;
-    let stretched = contrast_stretch(&up5);
-    let de_rope = remove_vertical_ropes(&up5);
-    Ok(vec![
-        up5.clone(),
-        invert_rgb(&up5),
-        stretched.clone(),
-        invert_rgb(&stretched),
-        de_rope.clone(),
-        invert_rgb(&de_rope),
-    ])
-}
-
-/// 去除名牌 ROI 内竖直绳子/遮挡线（强-加 之间常见）。
-fn remove_vertical_ropes(img: &RgbImage) -> RgbImage {
-    let (w, h) = img.dimensions();
-    if w < 6 || h < 6 {
-        return img.clone();
-    }
-    let mut col_score = vec![0u32; w as usize];
-    for x in 1..w - 1 {
-        let mut score = 0u32;
-        for y in 1..h - 1 {
-            let _c = luminance(img.get_pixel(x, y).0);
-            let l = luminance(img.get_pixel(x - 1, y).0);
-            let r = luminance(img.get_pixel(x + 1, y).0);
-            let u = luminance(img.get_pixel(x, y - 1).0);
-            let d = luminance(img.get_pixel(x, y + 1).0);
-            let vx = (l as i32 - r as i32).abs();
-            let vy = (u as i32 - d as i32).abs();
-            if vx > vy + 18 && vx > 35 {
-                score += 1;
-            }
-        }
-        col_score[x as usize] = score;
-    }
-    let thresh = (h as f32 * 0.45) as u32;
-    let mut out = img.clone();
-    for x in 1..w - 1 {
-        if col_score[x as usize] < thresh {
-            continue;
-        }
-        for y in 0..h {
-            let l = img.get_pixel(x.saturating_sub(1), y).0;
-            let r = img.get_pixel((x + 1).min(w - 1), y).0;
-            out.put_pixel(
-                x,
-                y,
-                Rgb([
-                    ((u16::from(l[0]) + u16::from(r[0])) / 2) as u8,
-                    ((u16::from(l[1]) + u16::from(r[1])) / 2) as u8,
-                    ((u16::from(l[2]) + u16::from(r[2])) / 2) as u8,
-                ]),
-            );
-        }
-    }
-    out
-}
-
-fn upscale_rgb(img: &RgbImage, scale: f32) -> Result<RgbImage> {
-    let (w, h) = img.dimensions();
-    let nw = ((w as f32) * scale).round().max(1.0) as i32;
-    let nh = ((h as f32) * scale).round().max(1.0) as i32;
-    let src = Mat::new_rows_cols_with_bytes::<Vec3b>(h as i32, w as i32, img.as_raw())
-        .map_err(|e| anyhow::anyhow!("mat from rgb: {e}"))?;
-    let mut dst = Mat::default();
-    imgproc::resize(
-        &src,
-        &mut dst,
-        Size::new(nw, nh),
-        0.0,
-        0.0,
-        InterpolationFlags::INTER_CUBIC.into(),
-    )
-    .map_err(|e| anyhow::anyhow!("resize: {e}"))?;
-    let bytes = dst
-        .data_bytes()
-        .map_err(|e| anyhow::anyhow!("data_bytes: {e}"))?;
-    let mut out = RgbImage::new(nw as u32, nh as u32);
-    for y in 0..nh as u32 {
-        for x in 0..nw as u32 {
-            let i = ((y * nw as u32 + x) * 3) as usize;
-            out.put_pixel(x, y, Rgb([bytes[i + 2], bytes[i + 1], bytes[i]]));
-        }
-    }
-    Ok(out)
 }
 
 fn invert_rgb(img: &RgbImage) -> RgbImage {
@@ -600,41 +307,6 @@ fn invert_rgb(img: &RgbImage) -> RgbImage {
     out
 }
 
-fn contrast_stretch(img: &RgbImage) -> RgbImage {
-    let mut min_v = 255u8;
-    let mut max_v = 0u8;
-    for p in img.pixels() {
-        for c in p.0 {
-            min_v = min_v.min(c);
-            max_v = max_v.max(c);
-        }
-    }
-    if max_v <= min_v + 8 {
-        return img.clone();
-    }
-    let mut out = img.clone();
-    for p in out.pixels_mut() {
-        for c in p.0.iter_mut() {
-            *c = ((*c as f32 - min_v as f32) / (max_v - min_v) as f32 * 255.0).round() as u8;
-        }
-    }
-    out
-}
-
-fn mean_luminance(img: &RgbImage) -> f32 {
-    if img.pixels().len() == 0 {
-        return 128.0;
-    }
-    let sum: u64 = img
-        .pixels()
-        .map(|p| {
-            let [r, g, b] = p.0;
-            u64::from(r) * 30 + u64::from(g) * 59 + u64::from(b) * 11
-        })
-        .sum();
-    (sum / (img.pixels().len() as u64 * 100)) as f32
-}
-
 fn normalize_name(s: &str) -> String {
     s.chars()
         .filter(|c| {
@@ -643,15 +315,6 @@ fn normalize_name(s: &str) -> String {
                 || ('\u{4e00}'..='\u{9fff}').contains(c)
         })
         .collect()
-}
-
-fn ocr_quality_score(text: &str) -> f32 {
-    let n = normalize_name(text).chars().count();
-    if n == 0 {
-        0.0
-    } else {
-        (n as f32).min(12.0) / 12.0
-    }
 }
 
 /// 目标名与 OCR 结果的相似度 [0, 1]。
@@ -771,7 +434,6 @@ mod tests {
     fn rope_splits_chars_subsequence() {
         let s = name_similarity("光头强加强版", "光头强加强版");
         assert!(s >= 0.99);
-        // OCR 中间插入噪声字符
         let s2 = name_similarity("光头强X加强版", "光头强加强版");
         assert!(s2 >= 0.78, "got {s2}");
     }
@@ -779,5 +441,21 @@ mod tests {
     #[test]
     fn full_name_match() {
         assert!(name_similarity("光头强加强版", "光头强加强版") >= 0.99);
+    }
+
+    #[test]
+    #[ignore = "需要本地 screen_caps 与 OCR 模型"]
+    fn fallback_finds_516_screenshot() {
+        use super::find_named_player_verbose;
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("screen_caps/彩虹岛-南港西郊平原/ScreenShot_2026-08-20_095154_516.png");
+        if !path.is_file() {
+            return;
+        }
+        let img = image::open(&path).unwrap().to_rgb8();
+        let (hit, attempts) =
+            find_named_player_verbose(&img, &[], "光头强加强版", 0.2, true).unwrap();
+        eprintln!("attempts={} hit={hit:?}", attempts.len());
+        assert!(hit.is_some(), "fallback should find target on 516");
     }
 }

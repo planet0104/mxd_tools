@@ -1,7 +1,5 @@
-use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
-use image::RgbImage;
 use regex::Regex;
 use serde_json::Value;
 
@@ -158,29 +156,6 @@ fn map_label(map_id: u64, fallback: &str) -> String {
     } else {
         fallback.to_string()
     }
-}
-
-fn decode_png(data: &[u8], ctype: &str) -> Result<RgbImage, String> {
-    if !ctype.to_lowercase().contains("png") && !data.starts_with(b"\x89PNG") {
-        return Err(format!("接口没有返回图片：{ctype}"));
-    }
-    image::load(Cursor::new(data), image::ImageFormat::Png)
-        .map_err(|e| e.to_string())
-        .map(|img| img.to_rgb8())
-}
-
-/// 从网络拉取完整地图 PNG（内存，不读本地文件）。
-pub fn fetch_full_map(map_id: u64) -> Result<RgbImage, String> {
-    let url = RENDER_URL.replace("{map_id}", &map_id.to_string());
-    let (ctype, data) = http_bytes(&url)?;
-    decode_png(&data, &ctype)
-}
-
-/// 从网络拉取官方小地图画布（内存，不读本地缓存）。
-pub fn fetch_canvas(map_id: u64) -> Result<RgbImage, String> {
-    let url = MINIMAP_URL.replace("{map_id}", &map_id.to_string());
-    let (ctype, data) = http_bytes(&url)?;
-    decode_png(&data, &ctype)
 }
 
 /// 查询 maplestory.io 上的街名 / 地图名（英文）。

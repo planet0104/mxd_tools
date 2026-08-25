@@ -3,17 +3,13 @@ mod keyboard_input;
 #[cfg(windows)]
 mod no_activate;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
 use eframe::egui;
-use mxd_tools::locate;
 use mxd_tools::map_api;
-use mxd_tools::minimap_match::{
-    resolve_caps_dir, resolve_map_assets, validate_screen_caps_dir,
-};
-use mxd_tools::paths::{maps_dir, safe_filename, workspace_root};
+use mxd_tools::paths::{maps_dir, workspace_root};
 
 /// 加载系统自带中文字体，避免 egui 默认字体缺字显示为方框/乱码。
 fn setup_cjk_fonts(ctx: &egui::Context) {
@@ -27,12 +23,12 @@ fn setup_cjk_fonts(ctx: &egui::Context) {
 
     let mut chosen: Option<(Vec<u8>, u32, String)> = None;
     for &(path, index) in candidates {
-        if Path::new(path).is_file() {
+        if std::path::Path::new(path).is_file() {
             if let Ok(data) = std::fs::read(path) {
                 chosen = Some((
                     data,
                     index,
-                    Path::new(path)
+                    std::path::Path::new(path)
                         .file_stem()
                         .and_then(|s| s.to_str())
                         .unwrap_or("cjk")
@@ -66,12 +62,6 @@ fn setup_cjk_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
-enum JobKind {
-    ExtractMap,
-    LocateLive,
-    ValidateCaps,
-}
-
 enum JobResult {
     Log(String),
     Done,
@@ -80,7 +70,6 @@ enum JobResult {
 struct App {
     root: PathBuf,
     map_name: String,
-    caps_dir: String,
     log: String,
     busy: bool,
     tx: Option<Sender<JobResult>>,
@@ -93,28 +82,11 @@ impl App {
         Self {
             root: workspace_root(),
             map_name: "彩虹岛-南港西郊平原".into(),
-            caps_dir: String::new(),
-            log: "就绪。地图名可填中文或数字 ID。\n\
-· 提取小地图与完整图：从网络下载资源\n\
-· 定位玩家：截取正在运行的游戏窗口小地图\n\
-· 验证截图定位：OpenCV（静态链接）批量匹配 screen_caps，对齐 Python 脚本\n"
-                .into(),
+            log: "就绪。地图名可填中文或数字 ID。\n· 提取小地图与完整图：从网络下载资源\n".into(),
             busy: false,
             tx: Some(tx),
             rx,
         }
-    }
-
-    fn caps_dir_resolved(&self) -> PathBuf {
-        let trimmed = self.caps_dir.trim();
-        if !trimmed.is_empty() {
-            let p = PathBuf::from(trimmed);
-            if p.is_absolute() {
-                return p;
-            }
-            return self.root.join(p);
-        }
-        resolve_caps_dir(&self.root, &self.map_name)
     }
 
     fn append_log(&mut self, text: impl AsRef<str>) {
@@ -124,7 +96,7 @@ impl App {
         }
     }
 
-    fn spawn_job(&mut self, kind: JobKind) {
+    fn spawn_extract_map(&mut self) {
         if self.busy {
             self.append_log("请等待当前任务完成");
             return;
@@ -135,84 +107,22 @@ impl App {
         let tx = tx0.clone();
         let root = self.root.clone();
         let map_name = self.map_name.clone();
-        let caps_dir = self.caps_dir_resolved();
         self.busy = true;
         self.append_log("任务开始…");
         thread::spawn(move || {
-            match kind {
-                JobKind::ExtractMap => {
-                    if map_name.trim().is_empty() {
-                        let _ = tx.send(JobResult::Log(
-                            "失败：请先填写地图名或地图 ID".into(),
-                        ));
-                    } else {
-                        match map_api::extract_map_by_name(&map_name, &maps_dir(&root)) {
-                            Ok((id, mini, full, label)) => {
-                                let _ = tx.send(JobResult::Log(format!(
-                                    "地图ID {id}\n{label}\n小地图 {}\n完整图 {}",
-                                    mini.display(),
-                                    full.display()
-                                )));
-                            }
-                            Err(e) => {
-                                let _ = tx.send(JobResult::Log(format!("失败：{e}")));
-                            }
-                        }
+            if map_name.trim().is_empty() {
+                let _ = tx.send(JobResult::Log("失败：请先填写地图名或地图 ID".into()));
+            } else {
+                match map_api::extract_map_by_name(&map_name, &maps_dir(&root)) {
+                    Ok((id, mini, full, label)) => {
+                        let _ = tx.send(JobResult::Log(format!(
+                            "地图ID {id}\n{label}\n小地图 {}\n完整图 {}",
+                            mini.display(),
+                            full.display()
+                        )));
                     }
-                }
-                JobKind::LocateLive => {
-                    match locate::locate_player(&root, &map_name) {
-                        Ok(msg) => {
-                            let _ = tx.send(JobResult::Log(msg));
-                        }
-                        Err(e) => {
-                            let _ = tx.send(JobResult::Log(format!("失败：{e}")));
-                        }
-                    }
-                }
-                JobKind::ValidateCaps => {
-                    if map_name.trim().is_empty() {
-                        let _ = tx.send(JobResult::Log(
-                            "失败：请先填写地图名或地图 ID（用于解析资源）".into(),
-                        ));
-                    } else {
-                        let result = (|| -> Result<String, String> {
-                            let map_id = map_api::resolve_map_id(&map_name)
-                                .ok_or_else(|| format!("找不到地图：{map_name}"))?;
-                            let (mini, full) =
-                                resolve_map_assets(&root, &map_name, map_id)?;
-                            if !caps_dir.is_dir() {
-                                return Err(format!(
-                                    "截图目录不存在：{}\n可把完整窗口截图放到 screen_caps/{}",
-                                    caps_dir.display(),
-                                    safe_filename(map_name.trim())
-                                ));
-                            }
-                            let out = root.join("tmp").join("screen_cap_locate");
-                            let _ = tx.send(JobResult::Log(format!(
-                                "caps {}\nminimap {}\nfull {}\nout {}",
-                                caps_dir.display(),
-                                mini.display(),
-                                full.display(),
-                                out.display()
-                            )));
-                            let sum = validate_screen_caps_dir(
-                                &caps_dir,
-                                &mini,
-                                &full,
-                                &out,
-                                Some(map_id),
-                            )?;
-                            Ok(sum.lines.join("\n"))
-                        })();
-                        match result {
-                            Ok(msg) => {
-                                let _ = tx.send(JobResult::Log(msg));
-                            }
-                            Err(e) => {
-                                let _ = tx.send(JobResult::Log(format!("失败：{e}")));
-                            }
-                        }
+                    Err(e) => {
+                        let _ = tx.send(JobResult::Log(format!("失败：{e}")));
                     }
                 }
             }
@@ -290,15 +200,6 @@ impl eframe::App for App {
                         .hint_text("例：彩虹岛-南港西郊平原 或 50001"),
                 );
             });
-            ui.horizontal(|ui| {
-                ui.label("截图目录");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.caps_dir)
-                        .desired_width(420.0)
-                        .hint_text("留空则用 screen_caps/<地图名>"),
-                );
-            });
-            ui.label(format!("将使用：{}", self.caps_dir_resolved().display()));
 
             ui.add_space(8.0);
             ui.horizontal_wrapped(|ui| {
@@ -308,29 +209,13 @@ impl eframe::App for App {
                         .on_hover_text("网络下载 minimap + render 到 maps/")
                         .clicked()
                     {
-                        self.spawn_job(JobKind::ExtractMap);
-                    }
-                    if ui
-                        .button("定位玩家（实时截图）")
-                        .on_hover_text("需游戏在运行；截客户区小地图并标注")
-                        .clicked()
-                    {
-                        self.spawn_job(JobKind::LocateLive);
-                    }
-                    if ui
-                        .button("验证截图定位（OpenCV）")
-                        .on_hover_text(
-                            "静态链接 OpenCV：批量匹配 screen_caps，淡蓝空心菱形标注到 tmp/screen_cap_locate",
-                        )
-                        .clicked()
-                    {
-                        self.spawn_job(JobKind::ValidateCaps);
+                        self.spawn_extract_map();
                     }
                 });
             });
 
             if self.busy {
-                ui.label("执行中…（截图匹配可能需数十秒）");
+                ui.label("执行中…");
             }
 
             #[cfg(windows)]

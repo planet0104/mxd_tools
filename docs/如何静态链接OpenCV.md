@@ -1,8 +1,8 @@
 # Rust + 静态 OpenCV 对接说明
 
-本仓库定位逻辑调用 **OpenCV**（`matchTemplate` / `resize` / mask，以及画布→大图的 **SIFT + FLANN + findHomography**），与 `scripts/locate_from_screencaps.py` 对齐。
+本仓库 **YOLO 预处理** 与 **PP-OCR det 后处理** 使用 OpenCV（`resize`、`findContours` 等）。安装方式与 YOLO 推理相同，见 `docs/如何在Rust中做YOLO推理.md`。
 
-Rust crate features：`imgproc`、`imgcodecs`、`features2d`、`calib3d`、`flann`。链接库需包含对应模块（见下 `OPENCV_LINK_LIBS`）。
+Rust crate features：`imgproc`、`imgcodecs`。链接库需包含对应模块（见下 `OPENCV_LINK_LIBS`）。
 
 为与 **静态链接的 ONNX Runtime（`ort`）** 共存、实现「单 exe 部署」，默认使用：
 
@@ -29,18 +29,14 @@ Rust crate features：`imgproc`、`imgcodecs`、`features2d`、`calib3d`、`flan
 
 4. 编译  
    ```powershell
-   cargo build --release
-   cargo run --release --bin validate_screen_caps -- `
-     --caps screen_caps/彩虹岛-南港西郊平原 `
-     --minimap assets/maps/50001/map_50001_minimap.png `
-     --full assets/maps/50001/map_50001_render_cn.png
+   cargo build --release --bin find_player
+   cargo run --release --bin find_player -- `
+     --model models/yolo_nangang_e2000_best.onnx `
+     --source screen_caps/彩虹岛-南港西郊平原 `
+     --name "光头强加强版"
    ```
 
-YOLO 推理见 `docs/如何在Rust中做YOLO推理.md`（ORT 同样静态链进 exe）。
-
-## App 按钮
-
-「验证截图定位（OpenCV）」走同一套实现，输出到 `tmp/screen_cap_locate/`。算法说明见 `docs/如何从截图定位玩家.md`。
+玩家定位见 `find_player`（YOLO 检测玩家框 + PP-OCR det/rec 识别名牌）。YOLO 推理细节见 `docs/如何在Rust中做YOLO推理.md`。
 
 ## 注意
 

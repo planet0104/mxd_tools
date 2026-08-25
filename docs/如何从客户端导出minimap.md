@@ -51,7 +51,7 @@ python .\scripts\extract_minimap.py 50001 --out .\assets\maps\50001
 
 | 目标 | 来源 | 语言 |
 |------|------|------|
-| minimap（定位对齐） | **优先本脚本（客户端 CN）**；也可 GMS `/minimap` | 客户端无木牌字问题 |
+| minimap 画布 | **优先本脚本（客户端 CN）**；也可 GMS `/minimap` | 客户端无木牌字问题 |
 | 完整大地图 render | `scripts/extract_map_render.py`（GMS `/render` + WZJS portal/VR） | 木牌仍为英文；中文整图拼贴未完成 |
 | 怪物/传送门帧 | `extract_sprites.py` | 客户端 CN |
 
