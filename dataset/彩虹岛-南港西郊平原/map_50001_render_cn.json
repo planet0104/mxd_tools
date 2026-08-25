@@ -3,406 +3,600 @@
   "flags": {},
   "shapes": [
     {
-      "label": "地板",
+      "label": "\u5730\u677f",
       "points": [
         [
-          1129.848484848485,
-          561.1969696969697
+          1118,
+          565.0
         ],
         [
-          1364.6969696969697,
-          676.3484848484849
+          1376,
+          621.0
         ]
       ],
       "group_id": null,
-      "description": "",
+      "description": "from platforms.json horiz",
       "shape_type": "rectangle",
       "flags": {},
       "mask": null
     },
     {
-      "label": "地板",
+      "label": "\u5730\u677f",
       "points": [
         [
-          1045.0,
-          679.3787878787879
+          1568,
+          565.0
         ],
         [
-          1366.2121212121212,
-          796.0454545454545
+          1826,
+          621.0
         ]
       ],
       "group_id": null,
-      "description": "",
+      "description": "from platforms.json horiz",
       "shape_type": "rectangle",
       "flags": {},
       "mask": null
     },
     {
-      "label": "地板",
+      "label": "\u5730\u677f",
       "points": [
         [
-          1578.3333333333335,
-          559.6818181818181
+          1028,
+          685.0
         ],
         [
-          1817.7272727272727,
-          679.3787878787879
+          1376,
+          741.0
         ]
       ],
       "group_id": null,
-      "description": "",
+      "description": "from platforms.json horiz",
       "shape_type": "rectangle",
       "flags": {},
       "mask": null
     },
     {
-      "label": "地板",
+      "label": "\u5730\u677f",
       "points": [
         [
-          1578.3333333333335,
-          682.4090909090909
+          1568,
+          685.0
         ],
         [
-          1907.121212121212,
-          799.0757575757575
+          1916,
+          741.0
         ]
       ],
       "group_id": null,
-      "description": "",
+      "description": "from platforms.json horiz",
       "shape_type": "rectangle",
       "flags": {},
       "mask": null
     },
     {
-      "label": "地板",
+      "label": "\u5730\u677f",
       "points": [
         [
-          1578.3333333333335,
-          917.2575757575756
+          1388,
+          745.0
         ],
         [
-          1908.6363636363635,
-          1035.439393939394
+          1556,
+          801.0
         ]
       ],
       "group_id": null,
-      "description": "",
+      "description": "from platforms.json horiz",
       "shape_type": "rectangle",
       "flags": {},
       "mask": null
     },
     {
-      "label": "地板",
+      "label": "\u5730\u677f",
       "points": [
         [
-          1397.6470588235295,
-          733.2647058823529
+          617,
+          805.0
         ],
         [
-          1541.1764705882354,
-          795.6176470588235
+          926,
+          861.0
         ]
       ],
       "group_id": null,
-      "description": "",
+      "description": "from platforms.json horiz",
       "shape_type": "rectangle",
       "flags": {},
       "mask": null
     },
     {
-      "label": "地板",
+      "label": "\u5730\u677f",
       "points": [
         [
-          951.730769230769,
-          855.9230769230769
+          398,
+          865.0
         ],
         [
-          1094.9999999999998,
-          916.5
+          527,
+          921.0
         ]
       ],
       "group_id": null,
-      "description": "",
+      "description": "from platforms.json horiz",
       "shape_type": "rectangle",
       "flags": {},
       "mask": null
     },
     {
-      "label": "地板",
+      "label": "\u5730\u677f",
       "points": [
         [
-          952.6923076923076,
-          1095.346153846154
+          938,
+          865.0
         ],
         [
-          1364.230769230769,
-          1216.5
+          1106,
+          921.0
         ]
       ],
       "group_id": null,
-      "description": "",
+      "description": "from platforms.json horiz",
       "shape_type": "rectangle",
       "flags": {},
       "mask": null
     },
     {
-      "label": "地板",
+      "label": "\u5730\u677f",
       "points": [
         [
-          770.2415458937197,
-          1156.2342995169083
+          1695,
+          868.0
         ],
         [
-          953.3333333333333,
-          1247.5386473429953
+          1732,
+          924.0
         ]
       ],
       "group_id": null,
-      "description": "",
+      "description": "from platforms.json horiz",
       "shape_type": "rectangle",
       "flags": {},
       "mask": null
     },
     {
-      "label": "地板",
+      "label": "\u5730\u677f",
       "points": [
         [
-          1335.3846153846152,
-          1214.576923076923
+          1644,
+          876.0
         ],
         [
-          1969.9999999999998,
-          1351.1153846153848
+          1675,
+          932.0
         ]
       ],
       "group_id": null,
-      "description": "",
+      "description": "from platforms.json horiz",
       "shape_type": "rectangle",
       "flags": {},
       "mask": null
     },
     {
-      "label": "地板",
+      "label": "\u5730\u677f",
       "points": [
         [
-          77.69230769230765,
-          1218.423076923077
+          1568,
+          925.0
         ],
         [
-          771.9230769230769,
-          1456.8846153846155
+          1916,
+          981.0
         ]
       ],
       "group_id": null,
-      "description": "",
+      "description": "from platforms.json horiz",
       "shape_type": "rectangle",
       "flags": {},
       "mask": null
     },
     {
-      "label": "地板",
+      "label": "\u5730\u677f",
       "points": [
         [
-          412.3076923076922,
-          858.8076923076924
+          1388,
+          985.0
         ],
         [
-          523.8461538461538,
-          918.4230769230771
+          1556,
+          1041.0
         ]
       ],
       "group_id": null,
-      "description": "",
+      "description": "from platforms.json horiz",
       "shape_type": "rectangle",
       "flags": {},
       "mask": null
     },
     {
-      "label": "地板",
+      "label": "\u5730\u677f",
       "points": [
         [
-          1402.6923076923076,
-          979.9615384615386
+          308,
+          1105.0
         ],
         [
-          1539.230769230769,
-          1037.6538461538462
+          527,
+          1161.0
         ]
       ],
       "group_id": null,
-      "description": "",
+      "description": "from platforms.json horiz",
       "shape_type": "rectangle",
       "flags": {},
       "mask": null
     },
     {
-      "label": "绳子",
+      "label": "\u5730\u677f",
       "points": [
         [
-          1157.4999999999998,
-          549.1923076923078
+          938,
+          1105.0
         ],
         [
-          1172.8846153846152,
-          660.7307692307693
+          1376,
+          1161.0
         ]
       ],
       "group_id": null,
-      "description": "",
+      "description": "from platforms.json horiz",
       "shape_type": "rectangle",
       "flags": {},
       "mask": null
     },
     {
-      "label": "绳子",
+      "label": "\u5730\u677f",
       "points": [
         [
-          1088.2692307692307,
-          676.1153846153848
+          218,
+          1165.0
         ],
         [
-          1103.653846153846,
-          832.8461538461538
+          308,
+          1221.0
         ]
       ],
       "group_id": null,
-      "description": "",
+      "description": "from platforms.json horiz",
       "shape_type": "rectangle",
       "flags": {},
       "mask": null
     },
     {
-      "label": "绳子",
+      "label": "\u5730\u677f",
       "points": [
         [
-          1280.2409638554216,
-          661.3795180722891
+          617,
+          1165.0
         ],
         [
-          1301.9277108433735,
-          1046.921686746988
+          656,
+          1221.0
         ]
       ],
       "group_id": null,
-      "description": "",
+      "description": "from platforms.json horiz",
       "shape_type": "rectangle",
       "flags": {},
       "mask": null
     },
     {
-      "label": "绳子",
+      "label": "\u5730\u677f",
       "points": [
         [
-          1763.3734939759036,
-          548.1265060240963
+          758,
+          1165.0
         ],
         [
-          1786.2650602409637,
-          655.3554216867469
+          938,
+          1221.0
         ]
       ],
       "group_id": null,
-      "description": "",
+      "description": "from platforms.json horiz",
       "shape_type": "rectangle",
       "flags": {},
       "mask": null
     },
     {
-      "label": "绳子",
+      "label": "\u5730\u677f",
       "points": [
         [
-          1015.1807228915661,
-          846.9216867469879
+          77,
+          1225.0
         ],
         [
-          1035.6626506024095,
-          1080.6566265060242
+          758,
+          1281.0
         ]
       ],
       "group_id": null,
-      "description": "",
+      "description": "from platforms.json horiz",
       "shape_type": "rectangle",
       "flags": {},
       "mask": null
     },
     {
-      "label": "绳子",
+      "label": "\u5730\u677f",
       "points": [
         [
-          482.6506024096385,
-          845.7168674698795
+          1376,
+          1225.0
         ],
         [
-          503.132530120482,
-          1046.921686746988
+          1967,
+          1281.0
         ]
       ],
       "group_id": null,
-      "description": "",
+      "description": "from platforms.json horiz",
       "shape_type": "rectangle",
       "flags": {},
       "mask": null
     },
     {
-      "label": "梯子",
+      "label": "\u5730\u677f",
       "points": [
         [
-          1454.1880341880342,
-          968.4230769230769
+          1632,
+          883
         ],
         [
-          1505.4700854700855,
-          1170.9871794871794
+          1644,
+          876
+        ],
+        [
+          1644,
+          932.0
+        ],
+        [
+          1632,
+          939.0
         ]
       ],
       "group_id": null,
-      "description": "",
-      "shape_type": "rectangle",
-      "flags": {},
-      "mask": null
-    },
-    {
-      "label": "地板",
-      "points": [
-        [
-          619.6753246753246,
-          795.0714285714287
-        ],
-        [
-          915.7792207792206,
-          915.2012987012987
-        ]
-      ],
-      "group_id": null,
-      "description": "",
-      "shape_type": "rectangle",
-      "flags": {},
-      "mask": null
-    },
-    {
-      "label": "地板",
-      "points": [
-        [
-          523.5714285714286,
-          858.0584415584416
-        ],
-        [
-          615.7792207792207,
-          795.0714285714287
-        ],
-        [
-          619.6753246753246,
-          918.448051948052
-        ],
-        [
-          524.2207792207791,
-          919.0974025974027
-        ]
-      ],
-      "group_id": null,
-      "description": "",
+      "description": "from platforms.json slant id=132",
       "shape_type": "polygon",
+      "flags": {},
+      "mask": null
+    },
+    {
+      "label": "\u5730\u677f",
+      "points": [
+        [
+          1748,
+          894
+        ],
+        [
+          1865,
+          897
+        ],
+        [
+          1865,
+          953.0
+        ],
+        [
+          1748,
+          950.0
+        ]
+      ],
+      "group_id": null,
+      "description": "from platforms.json slant id=131",
+      "shape_type": "polygon",
+      "flags": {},
+      "mask": null
+    },
+    {
+      "label": "\u5730\u677f",
+      "points": [
+        [
+          1675,
+          876
+        ],
+        [
+          1685,
+          881
+        ],
+        [
+          1685,
+          937.0
+        ],
+        [
+          1675,
+          932.0
+        ]
+      ],
+      "group_id": null,
+      "description": "from platforms.json slant id=134",
+      "shape_type": "polygon",
+      "flags": {},
+      "mask": null
+    },
+    {
+      "label": "\u5730\u677f",
+      "points": [
+        [
+          527,
+          865
+        ],
+        [
+          617,
+          805
+        ],
+        [
+          617,
+          861.0
+        ],
+        [
+          527,
+          921.0
+        ]
+      ],
+      "group_id": null,
+      "description": "from platforms.json slant id=102",
+      "shape_type": "polygon",
+      "flags": {},
+      "mask": null
+    },
+    {
+      "label": "\u5730\u677f",
+      "points": [
+        [
+          527,
+          1105
+        ],
+        [
+          617,
+          1165
+        ],
+        [
+          617,
+          1221.0
+        ],
+        [
+          527,
+          1161.0
+        ]
+      ],
+      "group_id": null,
+      "description": "from platforms.json slant id=22",
+      "shape_type": "polygon",
+      "flags": {},
+      "mask": null
+    },
+    {
+      "label": "\u7ef3\u5b50",
+      "points": [
+        [
+          480.0,
+          867.0
+        ],
+        [
+          496.0,
+          1048.0
+        ]
+      ],
+      "group_id": null,
+      "description": "from platforms.json rope",
+      "shape_type": "rectangle",
+      "flags": {},
+      "mask": null
+    },
+    {
+      "label": "\u7ef3\u5b50",
+      "points": [
+        [
+          1762.0,
+          567.0
+        ],
+        [
+          1778.0,
+          659.0
+        ]
+      ],
+      "group_id": null,
+      "description": "from platforms.json rope",
+      "shape_type": "rectangle",
+      "flags": {},
+      "mask": null
+    },
+    {
+      "label": "\u7ef3\u5b50",
+      "points": [
+        [
+          1153.0,
+          567.0
+        ],
+        [
+          1169.0,
+          661.0
+        ]
+      ],
+      "group_id": null,
+      "description": "from platforms.json rope",
+      "shape_type": "rectangle",
+      "flags": {},
+      "mask": null
+    },
+    {
+      "label": "\u7ef3\u5b50",
+      "points": [
+        [
+          1012.0,
+          867.0
+        ],
+        [
+          1028.0,
+          1079.0
+        ]
+      ],
+      "group_id": null,
+      "description": "from platforms.json rope",
+      "shape_type": "rectangle",
+      "flags": {},
+      "mask": null
+    },
+    {
+      "label": "\u68af\u5b50",
+      "points": [
+        [
+          1452.0,
+          987.0
+        ],
+        [
+          1502.0,
+          1171.0
+        ]
+      ],
+      "group_id": null,
+      "description": "from platforms.json ladder",
+      "shape_type": "rectangle",
+      "flags": {},
+      "mask": null
+    },
+    {
+      "label": "\u7ef3\u5b50",
+      "points": [
+        [
+          1278.0,
+          687.0
+        ],
+        [
+          1294.0,
+          1045.0
+        ]
+      ],
+      "group_id": null,
+      "description": "from platforms.json rope",
+      "shape_type": "rectangle",
+      "flags": {},
+      "mask": null
+    },
+    {
+      "label": "\u7ef3\u5b50",
+      "points": [
+        [
+          1084.0,
+          687.0
+        ],
+        [
+          1100.0,
+          838.0
+        ]
+      ],
+      "group_id": null,
+      "description": "from platforms.json rope",
+      "shape_type": "rectangle",
       "flags": {},
       "mask": null
     }

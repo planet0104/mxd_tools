@@ -104,7 +104,9 @@ impl GameMap {
     pub fn ground_at(&self, x: f32, feet_y: f32, max_drop: f32) -> Option<f32> {
         let mut best: Option<f32> = None;
         for p in &self.platforms {
-            let py = platform_y_at_x(p, x)?;
+            let Some(py) = platform_y_at_x(p, x) else {
+                continue;
+            };
             if py < feet_y - 8.0 {
                 continue;
             }
@@ -116,16 +118,17 @@ impl GameMap {
             }
         }
         for slope in &self.slopes {
-            if let Some(py) = slope_ground_y(slope, x) {
-                if py < feet_y - 8.0 {
-                    continue;
-                }
-                if py > feet_y + max_drop {
-                    continue;
-                }
-                if best.map(|b| py < b).unwrap_or(true) {
-                    best = Some(py);
-                }
+            let Some(py) = slope_ground_y(slope, x) else {
+                continue;
+            };
+            if py < feet_y - 8.0 {
+                continue;
+            }
+            if py > feet_y + max_drop {
+                continue;
+            }
+            if best.map(|b| py < b).unwrap_or(true) {
+                best = Some(py);
             }
         }
         best
@@ -205,18 +208,23 @@ fn platform_y_at_x(p: &PlatformSeg, x: f32) -> Option<f32> {
     } else {
         (p.x2, p.x1)
     };
+    // 过短/近乎竖直的线段不当作站立面（避免墙体中点被当成地面）
+    if (xmax - xmin) < 8.0 {
+        return None;
+    }
     if x < xmin - 4.0 || x > xmax + 4.0 {
         return None;
     }
     if (p.y1 - p.y2).abs() < 2.0 {
         return Some((p.y1 + p.y2) * 0.5);
     }
-    let t = if (xmax - xmin).abs() < 0.01 {
-        0.5
+    let t = (x - xmin) / (xmax - xmin);
+    let (ya, yb) = if p.x1 <= p.x2 {
+        (p.y1, p.y2)
     } else {
-        (x - xmin) / (xmax - xmin)
+        (p.y2, p.y1)
     };
-    Some(p.y1 + (p.y2 - p.y1) * t)
+    Some(ya + (yb - ya) * t)
 }
 
 fn slope_top_edge(points: &[[f32; 2]]) -> Option<([f32; 2], [f32; 2])> {

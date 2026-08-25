@@ -147,33 +147,35 @@ impl GameSim {
         }
     }
 
-    fn respawn_player(&mut self) {
-        let p = &mut self.state.player;
-        p.x = self.spawn_x;
-        p.y = self.spawn_y;
-        p.vx = 0.0;
-        p.vy = 0.0;
-        p.climbing = false;
-        p.climb_kind.clear();
-        p.hurt_t = 0.0;
-        p.invuln_t = 1.0;
-        if let Some(gy) = self.map.ground_at(p.x, p.y + 40.0, 120.0) {
-            p.y = gy;
-        }
-        p.on_ground = true;
-    }
-
     fn check_void_fall(&mut self) {
         let p = &self.state.player;
         if p.climbing {
             return;
         }
-        let void = p.y > self.map.death_y() && !p.on_ground;
-        let stuck_below = p.y > self.map.max_stand_y() + 16.0
-            && self.map.ground_at(p.x, p.y + 2.0, 64.0).is_none();
-        if void || stuck_below {
+        // 只有明显掉出最低平台以下才重生，避免站立时误触发
+        let too_low = p.y > self.map.death_y();
+        if too_low {
             self.respawn_player();
         }
+    }
+
+    fn respawn_player(&mut self) {
+        let (sx, sy) = self.map.default_spawn();
+        self.spawn_x = sx;
+        self.spawn_y = sy;
+        {
+            let p = &mut self.state.player;
+            p.x = sx;
+            p.y = sy;
+            p.vx = 0.0;
+            p.vy = 0.0;
+            p.climbing = false;
+            p.climb_kind.clear();
+            p.hurt_t = 0.0;
+            p.invuln_t = 0.0;
+            p.on_ground = false;
+        }
+        self.snap_player_to_ground();
     }
 
     fn spawn_mobs(&mut self) {
@@ -360,12 +362,19 @@ impl GameSim {
 
     fn apply_ground(p: &mut PlayerState, gy: Option<f32>) {
         if let Some(gy) = gy {
-            if p.vy >= 0.0 && p.y >= gy - 12.0 {
+            // 脚在平台附近（略上或略下）且非上升时吸附
+            if p.vy >= -10.0 && p.y >= gy - 16.0 && p.y <= gy + 24.0 {
                 p.y = gy;
                 p.vy = 0.0;
                 p.on_ground = true;
+                return;
             }
-        } else {
+        }
+        // 有平台但未吸附，或脚下无平台
+        if p.vy < -10.0 {
+            // 上升中保持离地
+            p.on_ground = false;
+        } else if gy.is_none() {
             p.on_ground = false;
         }
     }
@@ -388,7 +397,9 @@ impl GameSim {
         }
         p.x += p.vx * dt;
         p.y += p.vy * dt;
-        let gy = self.map.ground_at(p.x, p.y + 2.0, 48.0);
+        // 下落越快探测越深，避免高速穿地
+        let max_drop = 48.0_f32.max(p.vy.abs() * dt + 24.0);
+        let gy = self.map.ground_at(p.x, p.y + 2.0, max_drop);
         Self::apply_ground(p, gy);
     }
 

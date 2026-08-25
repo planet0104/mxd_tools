@@ -13,25 +13,35 @@ use mxd_tools::game::{MobAnim, MobState, PlayerState};
 fn window_conf() -> Conf {
     Conf {
         window_title: "冒险岛小游戏".to_owned(),
-        window_width: WINDOW_W as i32,
-        window_height: WINDOW_H as i32,
+        // 初始约为逻辑分辨率的 1/3，可拉伸；画面仍按 1368×768 逻辑坐标绘制
+        window_width: (WINDOW_W / 3.0).round() as i32,
+        window_height: (WINDOW_H / 3.0).round() as i32,
         window_resizable: true,
+        high_dpi: true,
         ..Default::default()
     }
 }
 
 /// 将逻辑分辨率 1368×768 等比缩放到当前窗口，留黑边。
+///
+/// 注意：OpenGL viewport 的 y 从底部算起；`from_display_rect` 的负 zoom.y
+/// 在部分环境下与 viewport 叠用会整屏倒置，这里改用正 zoom + 底部原点 viewport。
 fn begin_logical_viewport() {
     let sw = screen_width();
     let sh = screen_height();
     let scale = f32::min(sw / WINDOW_W, sh / WINDOW_H);
-    let vw = WINDOW_W * scale;
-    let vh = WINDOW_H * scale;
+    let vw = (WINDOW_W * scale).round();
+    let vh = (WINDOW_H * scale).round();
     let ox = ((sw - vw) * 0.5).round() as i32;
-    let oy = ((sh - vh) * 0.5).round() as i32;
-    let mut cam = Camera2D::from_display_rect(Rect::new(0.0, 0.0, WINDOW_W, WINDOW_H));
-    cam.viewport = Some((ox, oy, vw as i32, vh as i32));
-    set_camera(&cam);
+    let oy_top = ((sh - vh) * 0.5).round() as i32;
+    let oy = sh.round() as i32 - oy_top - vh as i32;
+
+    set_camera(&Camera2D {
+        target: vec2(WINDOW_W * 0.5, WINDOW_H * 0.5),
+        zoom: vec2(2.0 / WINDOW_W, 2.0 / WINDOW_H),
+        viewport: Some((ox, oy, vw as i32, vh as i32)),
+        ..Default::default()
+    });
 }
 
 fn end_logical_viewport() {
