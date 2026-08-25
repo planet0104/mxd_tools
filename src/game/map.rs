@@ -3,6 +3,18 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
+use crate::game::types::SAME_LEVEL_TOL;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum WalkAhead {
+    /// 可走到同高度平台（含微台阶），值为站立 y
+    SameLevel(f32),
+    /// 前方无同高地面，但下方有更低平台 → 走出后下落
+    Fall,
+    /// 墙/高台侧面/虚空边缘 → 挡住
+    Blocked,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct PlatformSeg {
     pub x1: f32,
@@ -11,6 +23,25 @@ pub struct PlatformSeg {
     pub y2: f32,
     #[serde(default)]
     pub id: u32,
+    /// WZ foothold layerId（地图层级）
+    #[serde(default)]
+    pub layer: i32,
+    /// WZ foothold groupId（同层内连通组，对应 zM）
+    #[serde(default)]
+    pub group: i32,
+    #[serde(default)]
+    pub prev: u32,
+    #[serde(default)]
+    pub next: u32,
+}
+
+/// 脚底站立信息（含层级，用于侧墙只挡同组）
+#[derive(Debug, Clone, Copy)]
+pub struct StandInfo {
+    pub y: f32,
+    pub id: u32,
+    pub layer: i32,
+    pub group: i32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -100,34 +131,216 @@ impl GameMap {
         })
     }
 
-    /// 脚下最近可站立平台 y（图像坐标，向下为正）。
-    pub fn ground_at(&self, x: f32, feet_y: f32, max_drop: f32) -> Option<f32> {
-        let mut best: Option<f32> = None;
+    /// 脚下最近可站立平台（含 layer/group）。
+    pub fn stand_at(&self, x: f32, feet_y: f32, max_drop: f32) -> Option<StandInfo> {
+        let mut best: Option<StandInfo> = None;
         for p in &self.platforms {
             let Some(py) = platform_y_at_x(p, x) else {
                 continue;
             };
-            if py < feet_y - 8.0 {
+            if py < feet_y - SAME_LEVEL_TOL {
                 continue;
             }
             if py > feet_y + max_drop {
                 continue;
             }
-            if best.map(|b| py < b).unwrap_or(true) {
-                best = Some(py);
+            let info = StandInfo {
+                y: py,
+                id: p.id,
+                layer: p.layer,
+                group: p.group,
+            };
+            if best.map(|b| py < b.y).unwrap_or(true) {
+                best = Some(info);
             }
         }
         for slope in &self.slopes {
             let Some(py) = slope_ground_y(slope, x) else {
                 continue;
             };
-            if py < feet_y - 8.0 {
+            if py < feet_y - SAME_LEVEL_TOL {
                 continue;
             }
             if py > feet_y + max_drop {
                 continue;
             }
-            if best.map(|b| py < b).unwrap_or(true) {
+            let info = StandInfo {
+                y: py,
+                id: 0,
+                layer: -1,
+                group: -1,
+            };
+            if best.map(|b| py < b.y).unwrap_or(true) {
+                best = Some(info);
+            }
+        }
+        best
+    }
+
+    /// 脚下最近可站立平台 y（图像坐标，向下为正）。
+    pub fn ground_at(&self, x: f32, feet_y: f32, max_drop: f32) -> Option<f32> {
+        self.stand_at(x, feet_y, max_drop).map(|s| s.y)
+    }
+
+    /// 从 y_from 下落到 y_to 时穿过的平台顶（单向平台落地，任意层级）。
+    pub fn land_at(&self, x: f32, y_from: f32, y_to: f32) -> Option<StandInfo> {
+        if y_to < y_from - 0.5 {
+            return None;
+        }
+        let mut best: Option<StandInfo> = None;
+        let lo = y_from - 2.0;
+        let hi = y_to + 2.0;
+        for p in &self.platforms {
+            let Some(py) = platform_y_at_x(p, x) else {
+                continue;
+            };
+            if py < lo || py > hi {
+                continue;
+            }
+            let info = StandInfo {
+                y: py,
+                id: p.id,
+                layer: p.layer,
+                group: p.group,
+            };
+            if best.map(|b| py < b.y).unwrap_or(true) {
+                best = Some(info);
+            }
+        }
+        for slope in &self.slopes {
+            let Some(py) = slope_ground_y(slope, x) else {
+                continue;
+            };
+            if py < lo || py > hi {
+                continue;
+            }
+            let info = StandInfo {
+                y: py,
+                id: 0,
+                layer: -1,
+                group: -1,
+            };
+            if best.map(|b| py < b.y).unwrap_or(true) {
+                best = Some(info);
+            }
+        }
+        best
+    }
+
+    pub fn land_y(&self, x: f32, y_from: f32, y_to: f32) -> Option<f32> {
+        self.land_at(x, y_from, y_to).map(|s| s.y)
+    }
+
+    /// 竖直墙 foothold：仅当 `fh_layer/fh_group` 与墙同组时阻挡（空中传 None=不挡侧墙）。
+    pub fn resolve_wall_x(
+        &self,
+        x_from: f32,
+        x_to: f32,
+        y_top: f32,
+        y_bottom: f32,
+        fh: Option<(i32, i32)>,
+    ) -> f32 {
+        if (x_to - x_from).abs() < 0.01 {
+            return x_to;
+        }
+        let Some((fl, fg)) = fh else {
+            return x_to;
+        };
+        if fl < 0 {
+            return x_to;
+        }
+        let mut x = x_to;
+        let going_right = x_to > x_from;
+        for p in &self.platforms {
+            if p.layer != fl || p.group != fg {
+                continue;
+            }
+            let (xmin, xmax) = if p.x1 <= p.x2 {
+                (p.x1, p.x2)
+            } else {
+                (p.x2, p.x1)
+            };
+            let dx = xmax - xmin;
+            let ymin = p.y1.min(p.y2);
+            let ymax = p.y1.max(p.y2);
+            if dx >= 8.0 || (ymax - ymin) < 8.0 {
+                continue;
+            }
+            let wx = (p.x1 + p.x2) * 0.5;
+            if ymax < y_top + 2.0 || ymin > y_bottom - 2.0 {
+                continue;
+            }
+            if going_right && x_from <= wx && x >= wx {
+                x = wx - 0.5;
+            } else if !going_right && x_from >= wx && x <= wx {
+                x = wx + 0.5;
+            }
+        }
+        x
+    }
+
+    /// 前方水平移动；侧墙/高台阻挡只对当前 foothold 同 layer+group。
+    pub fn walk_ahead(
+        &self,
+        x: f32,
+        feet_y: f32,
+        to_x: f32,
+        fh: Option<(i32, i32)>,
+    ) -> WalkAhead {
+        use crate::game::types::{FALL_PROBE, SAME_LEVEL_TOL, WALL_HIT_H};
+
+        let y_hi = feet_y - WALL_HIT_H;
+        let blocked_x = self.resolve_wall_x(x, to_x, y_hi, feet_y - 2.0, fh);
+        if (blocked_x - to_x).abs() > 0.1 {
+            return WalkAhead::Blocked;
+        }
+
+        if let Some(st) = self.stand_at(to_x, feet_y, SAME_LEVEL_TOL) {
+            if (st.y - feet_y).abs() <= SAME_LEVEL_TOL {
+                return WalkAhead::SameLevel(st.y);
+            }
+        }
+
+        // 同组内略高台面才挡；其它层级平台可从旁穿过，靠跳跃落上
+        if let Some((fl, fg)) = fh {
+            if fl >= 0 {
+                if let Some(gy) =
+                    self.surface_above_in_group(to_x, feet_y, WALL_HIT_H + SAME_LEVEL_TOL, fl, fg)
+                {
+                    if gy < feet_y - SAME_LEVEL_TOL {
+                        return WalkAhead::Blocked;
+                    }
+                }
+            }
+        }
+
+        if self.ground_at(to_x, feet_y + 2.0, FALL_PROBE).is_some() {
+            return WalkAhead::Fall;
+        }
+
+        WalkAhead::Blocked
+    }
+
+    fn surface_above_in_group(
+        &self,
+        x: f32,
+        feet_y: f32,
+        max_up: f32,
+        layer: i32,
+        group: i32,
+    ) -> Option<f32> {
+        let mut best: Option<f32> = None;
+        for p in &self.platforms {
+            if p.layer != layer || p.group != group {
+                continue;
+            }
+            let Some(py) = platform_y_at_x(p, x) else {
+                continue;
+            };
+            if py >= feet_y - 2.0 || py < feet_y - max_up {
+                continue;
+            }
+            if best.map(|b| py > b).unwrap_or(true) {
                 best = Some(py);
             }
         }
@@ -170,8 +383,11 @@ impl GameMap {
         best.map(|(p, _)| p)
     }
 
-    pub fn wall_at(&self, x: f32, feet_y: f32) -> bool {
-        self.ground_at(x, feet_y - 40.0, 80.0).is_none()
+    pub fn wall_at(&self, x: f32, feet_y: f32, fh: Option<(i32, i32)>) -> bool {
+        use crate::game::types::WALL_HIT_H;
+        let y_hi = feet_y - WALL_HIT_H;
+        let probed = self.resolve_wall_x(x, x + 1.0, y_hi, feet_y - 2.0, fh);
+        (probed - (x + 1.0)).abs() > 0.1
     }
 
     pub fn max_stand_y(&self) -> f32 {
@@ -199,6 +415,60 @@ impl GameMap {
             return (sp.x, sp.y);
         }
         (400.0, self.max_stand_y())
+    }
+
+    /// 刷怪点所在高度上、包含 x 的连续水平平台巡逻区间。
+    pub fn walk_range_at(&self, x: f32, y: f32) -> (f32, f32) {
+        const Y_TOL: f32 = 4.0;
+        const GAP: f32 = 8.0;
+        const EDGE_PAD: f32 = 8.0;
+        const MIN_HALF: f32 = 20.0;
+
+        let mut spans: Vec<(f32, f32)> = Vec::new();
+        for p in &self.platforms {
+            let (xmin, xmax) = if p.x1 <= p.x2 {
+                (p.x1, p.x2)
+            } else {
+                (p.x2, p.x1)
+            };
+            if xmax - xmin < 8.0 {
+                continue;
+            }
+            if (p.y1 - p.y2).abs() >= 2.0 {
+                continue;
+            }
+            let py = (p.y1 + p.y2) * 0.5;
+            if (py - y).abs() > Y_TOL {
+                continue;
+            }
+            spans.push((xmin, xmax));
+        }
+        spans.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        let mut merged: Vec<(f32, f32)> = Vec::new();
+        for (lo, hi) in spans {
+            if let Some(last) = merged.last_mut() {
+                if lo <= last.1 + GAP {
+                    last.1 = last.1.max(hi);
+                    continue;
+                }
+            }
+            merged.push((lo, hi));
+        }
+
+        for (lo, hi) in merged {
+            if x >= lo - 4.0 && x <= hi + 4.0 {
+                let mut w1 = lo + EDGE_PAD;
+                let mut w2 = hi - EDGE_PAD;
+                if w2 - w1 < MIN_HALF * 2.0 {
+                    let mid = (lo + hi) * 0.5;
+                    w1 = mid - MIN_HALF;
+                    w2 = mid + MIN_HALF;
+                }
+                return (w1, w2);
+            }
+        }
+        (x - MIN_HALF, x + MIN_HALF)
     }
 }
 

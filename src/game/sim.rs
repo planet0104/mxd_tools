@@ -3,7 +3,7 @@ use rand::{Rng, SeedableRng};
 
 use crate::game::camera::WorldCamera;
 use crate::game::input::InputFrame;
-use crate::game::map::GameMap;
+use crate::game::map::{GameMap, WalkAhead};
 use crate::game::types::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,6 +23,14 @@ pub struct PlayerState {
     pub hp: i32,
     pub max_hp: i32,
     pub on_ground: bool,
+    /// 离地后仍可起跳的剩余时间
+    pub coyote_t: f32,
+    /// 跳跃输入缓冲剩余时间
+    pub jump_buf_t: f32,
+    /// 当前站立 foothold 的 layer/group（来自 WZ）；空中保留上次以便短时间侧墙判断可不用
+    pub fh_layer: i32,
+    pub fh_group: i32,
+    pub fh_id: u32,
     pub climbing: bool,
     pub climb_kind: String,
     pub anim: PlayerAnim,
@@ -109,6 +117,11 @@ impl GameSim {
                     hp: PLAYER_MAX_HP,
                     max_hp: PLAYER_MAX_HP,
                     on_ground: false,
+                    coyote_t: 0.0,
+                    jump_buf_t: 0.0,
+                    fh_layer: -1,
+                    fh_group: -1,
+                    fh_id: 0,
                     climbing: false,
                     climb_kind: String::new(),
                     anim: PlayerAnim::Stand,
@@ -141,9 +154,28 @@ impl GameSim {
 
     fn snap_player_to_ground(&mut self) {
         let x = self.state.player.x;
-        if let Some(gy) = self.map.ground_at(x, self.state.player.y + 40.0, 120.0) {
-            self.state.player.y = gy;
-            self.state.player.on_ground = true;
+        if let Some(st) = self.map.stand_at(x, self.state.player.y + 40.0, 120.0) {
+            let p = &mut self.state.player;
+            p.y = st.y;
+            p.on_ground = true;
+            p.fh_id = st.id;
+            p.fh_layer = st.layer;
+            p.fh_group = st.group;
+            p.coyote_t = COYOTE_TIME;
+        }
+    }
+
+    fn apply_stand(p: &mut PlayerState, st: Option<crate::game::map::StandInfo>) {
+        if let Some(st) = st {
+            p.y = st.y;
+            p.vy = 0.0;
+            p.on_ground = true;
+            p.fh_id = st.id;
+            p.fh_layer = st.layer;
+            p.fh_group = st.group;
+            p.coyote_t = COYOTE_TIME;
+        } else {
+            p.on_ground = false;
         }
     }
 
@@ -181,15 +213,17 @@ impl GameSim {
     fn spawn_mobs(&mut self) {
         for sp in &self.map.spawns.clone() {
             let stats = mob_stats(sp.mob_id);
+            // 以刷怪点所在连续平台为准，避免 JSON 里误写成全图宽度
+            let (walk_x1, walk_x2) = self.map.walk_range_at(sp.x, sp.y);
             self.state.mobs.push(MobState {
                 mob_id: sp.mob_id,
-                x: sp.x,
+                x: sp.x.clamp(walk_x1, walk_x2),
                 y: sp.y,
                 hp: stats.hp,
                 max_hp: stats.hp,
-                vx: stats.speed_factor * PLAYER_SPEED * if self.rng.gen_bool(0.5) { 1.0 } else { -1.0 },
-                walk_x1: sp.walk_x1.min(sp.walk_x2),
-                walk_x2: sp.walk_x1.max(sp.walk_x2),
+                vx: stats.walk_speed() * if self.rng.gen_bool(0.5) { 1.0 } else { -1.0 },
+                walk_x1,
+                walk_x2,
                 alive: true,
                 hit_t: 0.0,
                 die_t: 0.0,
@@ -312,26 +346,47 @@ impl GameSim {
                 self.tick_player_move(input, dt);
             }
         } else {
-            let p = &mut self.state.player;
-            p.vx *= 0.5;
-            if !p.on_ground || p.vy > 0.0 {
-                p.vy += GRAVITY * dt;
+            let (prev_x, prev_y, vx, vy, on_ground, fh) = {
+                let p = &self.state.player;
+                let fh = if p.on_ground && p.fh_layer >= 0 {
+                    Some((p.fh_layer, p.fh_group))
+                } else {
+                    None
+                };
+                (p.x, p.y, p.vx * 0.5, p.vy, p.on_ground, fh)
+            };
+            let mut vy = vy;
+            if !on_ground || vy > 0.0 {
+                vy += GRAVITY * dt;
             }
-            p.x += p.vx * dt;
-            p.y += p.vy * dt;
-            let gy = self.map.ground_at(p.x, p.y + 2.0, 48.0);
-            Self::apply_ground(p, gy);
+            let desire_x = prev_x + vx * dt;
+            let y_hi = prev_y - WALL_HIT_H;
+            let new_x = self
+                .map
+                .resolve_wall_x(prev_x, desire_x, y_hi, prev_y - 2.0, fh);
+            let next_y = prev_y + vy * dt;
+            let landed = if vy >= 0.0 {
+                self.map.land_at(new_x, prev_y, next_y)
+            } else {
+                None
+            };
+            let p = &mut self.state.player;
+            p.vx = vx;
+            p.x = new_x;
+            if let Some(st) = landed {
+                Self::apply_stand(p, Some(st));
+            } else {
+                p.y = next_y;
+                p.vy = vy;
+                p.on_ground = false;
+            }
         }
 
         {
             let p = &mut self.state.player;
             p.x = p.x.clamp(16.0, self.map.width - 16.0);
-            let y_max = if p.climbing {
-                self.map.height - 16.0
-            } else {
-                self.map.death_y()
-            };
-            p.y = p.y.clamp(16.0, y_max);
+            // 只限制上边界；下边界由虚空重生处理，避免卡在泥土高度
+            p.y = p.y.max(16.0);
         }
 
         self.check_void_fall();
@@ -360,47 +415,136 @@ impl GameSim {
         }
     }
 
-    fn apply_ground(p: &mut PlayerState, gy: Option<f32>) {
-        if let Some(gy) = gy {
-            // 脚在平台附近（略上或略下）且非上升时吸附
-            if p.vy >= -10.0 && p.y >= gy - 16.0 && p.y <= gy + 24.0 {
-                p.y = gy;
-                p.vy = 0.0;
-                p.on_ground = true;
-                return;
-            }
-        }
-        // 有平台但未吸附，或脚下无平台
-        if p.vy < -10.0 {
-            // 上升中保持离地
-            p.on_ground = false;
-        } else if gy.is_none() {
-            p.on_ground = false;
-        }
-    }
 
     fn tick_player_move(&mut self, input: &InputFrame, dt: f32) {
-        let p = &mut self.state.player;
         let h = input.horizontal();
-        if h.abs() > 0.01 {
-            p.vx = h * PLAYER_SPEED;
-            p.facing = h.signum();
+        let (
+            prev_x,
+            prev_y,
+            mut vy,
+            mut on_ground,
+            mut facing,
+            mut coyote_t,
+            mut jump_buf_t,
+            fh_layer,
+            fh_group,
+        ) = {
+            let p = &self.state.player;
+            (
+                p.x,
+                p.y,
+                p.vy,
+                p.on_ground,
+                p.facing,
+                p.coyote_t,
+                p.jump_buf_t,
+                p.fh_layer,
+                p.fh_group,
+            )
+        };
+        let mut vx = 0.0_f32;
+        // 站在某组平台上才用该组侧墙；空中不挡其它层级侧面
+        let fh = if on_ground && fh_layer >= 0 {
+            Some((fh_layer, fh_group))
         } else {
-            p.vx = 0.0;
+            None
+        };
+
+        if h.abs() > 0.01 {
+            vx = h * PLAYER_SPEED;
+            facing = h.signum();
+        } else {
+            vx = 0.0;
         }
-        if input.jump && p.on_ground {
-            p.vy = JUMP_VY;
+
+        if input.jump {
+            jump_buf_t = JUMP_BUFFER;
+        } else {
+            jump_buf_t = (jump_buf_t - dt).max(0.0);
+        }
+
+        if on_ground {
+            coyote_t = COYOTE_TIME;
+        } else {
+            coyote_t = (coyote_t - dt).max(0.0);
+        }
+
+        let can_jump = on_ground || coyote_t > 0.0;
+        if jump_buf_t > 0.0 && can_jump {
+            vy = JUMP_VY;
+            on_ground = false;
+            coyote_t = 0.0;
+            jump_buf_t = 0.0;
+        }
+
+        let desire_x = prev_x + vx * dt;
+        let y_hi = prev_y - WALL_HIT_H;
+        let wall_fh = if on_ground { fh } else { None };
+        let mut new_x =
+            self.map
+                .resolve_wall_x(prev_x, desire_x, y_hi, prev_y - 2.0, wall_fh);
+
+        let mut align_y: Option<f32> = None;
+        if on_ground && vy >= 0.0 && (new_x - prev_x).abs() > 0.01 {
+            match self.map.walk_ahead(prev_x, prev_y, new_x, fh) {
+                WalkAhead::SameLevel(gy) => {
+                    align_y = Some(gy);
+                }
+                WalkAhead::Fall => {
+                    on_ground = false;
+                }
+                WalkAhead::Blocked => {
+                    new_x = prev_x;
+                    vx = 0.0;
+                }
+            }
+        }
+
+        let feet_y = align_y.unwrap_or(prev_y);
+
+        if !on_ground || vy > 0.0 {
+            vy += GRAVITY * dt;
+        }
+
+        let stand = if on_ground && vy >= 0.0 {
+            self.map.stand_at(new_x, feet_y, SAME_LEVEL_TOL)
+        } else {
+            None
+        };
+        let next_y = if on_ground && vy >= 0.0 {
+            feet_y + vy * dt
+        } else {
+            prev_y + vy * dt
+        };
+        let landed = if !(on_ground && vy >= 0.0) && vy >= 0.0 {
+            self.map.land_at(new_x, prev_y, next_y)
+        } else {
+            None
+        };
+
+        let p = &mut self.state.player;
+        p.x = new_x;
+        p.vx = vx;
+        p.facing = facing;
+        p.jump_buf_t = jump_buf_t;
+
+        if on_ground && vy >= 0.0 {
+            if stand.is_some() {
+                Self::apply_stand(p, stand);
+            } else {
+                p.y = next_y;
+                p.vy = vy;
+                p.on_ground = false;
+                p.coyote_t = coyote_t;
+            }
+        } else if let Some(st) = landed {
+            Self::apply_stand(p, Some(st));
+        } else {
+            p.y = next_y;
+            p.vy = vy;
             p.on_ground = false;
+            p.coyote_t = coyote_t;
         }
-        if !p.on_ground || p.vy > 0.0 {
-            p.vy += GRAVITY * dt;
-        }
-        p.x += p.vx * dt;
-        p.y += p.vy * dt;
-        // 下落越快探测越深，避免高速穿地
-        let max_drop = 48.0_f32.max(p.vy.abs() * dt + 24.0);
-        let gy = self.map.ground_at(p.x, p.y + 2.0, max_drop);
-        Self::apply_ground(p, gy);
     }
 
     fn tick_player_climb(&mut self, input: &InputFrame, dt: f32) {
@@ -437,13 +581,15 @@ impl GameSim {
             p.on_ground = false;
         } else if leave && at_bottom {
             p.climbing = false;
-            let gy = self.map.ground_at(p.x, p.y + 2.0, 48.0);
-            Self::apply_ground(p, gy);
+            if let Some(st) = self.map.stand_at(p.x, p.y + 2.0, 48.0) {
+                Self::apply_stand(p, Some(st));
+            } else {
+                p.on_ground = false;
+            }
         } else if at_top && !input.up {
-            if let Some(gy) = self.map.ground_at(p.x, p.y + 8.0, 24.0) {
+            if let Some(st) = self.map.stand_at(p.x, p.y + 8.0, 24.0) {
                 p.climbing = false;
-                p.y = gy;
-                p.on_ground = true;
+                Self::apply_stand(p, Some(st));
             }
         }
 
@@ -454,13 +600,14 @@ impl GameSim {
 
     fn try_attack_mobs(&mut self) {
         let p = &self.state.player;
+        // 身前攻击框（脚底坐标）：水平朝向 + 覆盖同台怪身高
         let (x1, x2) = if p.facing > 0.0 {
-            (p.x, p.x + 48.0)
+            (p.x + 4.0, p.x + 56.0)
         } else {
-            (p.x - 48.0, p.x)
+            (p.x - 56.0, p.x - 4.0)
         };
-        let y1 = p.y - 48.0;
-        let y2 = p.y - 8.0;
+        let y1 = p.y - 72.0;
+        let y2 = p.y + 20.0;
         let mut loot: Vec<(f32, f32)> = Vec::new();
         for mob in &mut self.state.mobs {
             if !mob.alive {
@@ -555,6 +702,13 @@ impl GameSim {
     fn tick_drops(&mut self, input: &InputFrame, dt: f32) {
         let px = self.state.player.x;
         let py = self.state.player.y;
+        // 怀旧版：走近不会自动捡，需按拾取键（默认 Z）
+        if !input.pick_up {
+            for drop in &mut self.state.drops {
+                drop.bob_t += dt;
+            }
+            return;
+        }
         for drop in &mut self.state.drops {
             if !drop.alive {
                 continue;
@@ -562,18 +716,18 @@ impl GameSim {
             drop.bob_t += dt;
             let dy = (drop.y - 8.0) - py;
             let dx = drop.x - px;
-            let pick = input.pick_up || (dx * dx + dy * dy).sqrt() < 36.0;
-            if pick {
-                match drop.kind {
-                    DropKind::Meso => {
-                        self.state.meso += self.rng.gen_range(1..=5);
-                    }
-                    DropKind::RedPotion => {
-                        self.state.potions += 1;
-                    }
-                }
-                drop.alive = false;
+            if (dx * dx + dy * dy).sqrt() > 40.0 {
+                continue;
             }
+            match drop.kind {
+                DropKind::Meso => {
+                    self.state.meso += self.rng.gen_range(1..=5);
+                }
+                DropKind::RedPotion => {
+                    self.state.potions += 1;
+                }
+            }
+            drop.alive = false;
         }
         self.state.drops.retain(|d| d.alive);
     }

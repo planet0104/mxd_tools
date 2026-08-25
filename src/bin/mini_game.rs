@@ -84,13 +84,30 @@ async fn main() {
 
     let mut sim = GameSim::new(map, 42);
     let mut acc = 0.0f32;
+    // is_key_pressed 只在渲染帧为真；逻辑步固定 60Hz 时可能丢边沿，需锁存
+    let mut jump_latched = false;
+    let mut attack_latched = false;
 
     loop {
-        let input = poll_input();
+        let mut input = poll_input();
+        jump_latched |= input.jump;
+        attack_latched |= input.attack;
+        input.jump = jump_latched;
+        input.attack = attack_latched;
+
         let dt = get_frame_time();
         acc += dt;
         while acc >= LOGIC_DT {
             sim.tick(&input);
+            // 每个逻辑步最多消费一次边沿，避免同帧多 tick 重复触发
+            if input.jump {
+                jump_latched = false;
+                input.jump = false;
+            }
+            if input.attack {
+                attack_latched = false;
+                input.attack = false;
+            }
             acc -= LOGIC_DT;
         }
 
@@ -238,7 +255,7 @@ fn poll_input() -> InputFrame {
         attack: is_key_pressed(KeyCode::LeftControl) || is_key_pressed(KeyCode::J),
         up: is_key_down(KeyCode::Up) || is_key_down(KeyCode::W),
         down: is_key_down(KeyCode::Down) || is_key_down(KeyCode::S),
-        pick_up: is_key_pressed(KeyCode::Z),
+        pick_up: is_key_down(KeyCode::Z),
         use_potion: is_key_pressed(KeyCode::Key1),
         open_inventory: is_key_pressed(KeyCode::I),
         inventory_click: None,
@@ -347,11 +364,13 @@ fn frame_index(anim_t: f32, fps: f32, len: usize) -> usize {
 }
 
 fn draw_player(assets: &GameAssets, p: &PlayerState, cam_x: f32, cam_y: f32) {
+    // 资源立绘默认朝左；facing>0 向右时需要水平翻转
+    let face_right = p.facing > 0.0;
     let (key, flip) = match p.anim {
-        PlayerAnim::Walk => ("walk1", p.facing < 0.0),
-        PlayerAnim::Jump => ("jump", p.facing < 0.0),
-        PlayerAnim::Attack => ("swingO1", p.facing < 0.0),
-        PlayerAnim::Hurt => ("alert", p.facing < 0.0),
+        PlayerAnim::Walk => ("walk1", face_right),
+        PlayerAnim::Jump => ("jump", face_right),
+        PlayerAnim::Attack => ("swingO1", face_right),
+        PlayerAnim::Hurt => ("alert", face_right),
         PlayerAnim::Climb => {
             if p.climb_kind == "ladder" {
                 ("ladder", false)
@@ -359,7 +378,7 @@ fn draw_player(assets: &GameAssets, p: &PlayerState, cam_x: f32, cam_y: f32) {
                 ("rope", false)
             }
         }
-        PlayerAnim::Stand => ("stand1", p.facing < 0.0),
+        PlayerAnim::Stand => ("stand1", face_right),
     };
     let anim = assets
         .player
@@ -419,7 +438,8 @@ fn draw_mob(assets: &GameAssets, mob: &MobState, cam_x: f32, cam_y: f32) {
     let tex = &anim.textures[fi];
     let sx = mob.x - cam_x;
     let sy = mob.y - cam_y;
-    let flip = mob.vx < 0.0;
+    // 怪物贴图默认朝左；vx>0 向右走时翻转
+    let flip = mob.vx > 0.0;
     draw_texture_ex(
         tex,
         sx - tex.width() * 0.5,
