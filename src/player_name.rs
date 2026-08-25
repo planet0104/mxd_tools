@@ -25,6 +25,24 @@ pub struct NamedPlayerHit {
 
 const PLAYER_LABEL: &str = "玩家";
 
+/// 归一化中心距离：0 为屏幕正中，1 为角落。
+fn center_distance_norm(cx: f32, cy: f32, img_w: u32, img_h: u32) -> f32 {
+    let hw = img_w as f32 * 0.5;
+    let hh = img_h as f32 * 0.5;
+    if hw == 0.0 || hh == 0.0 {
+        return 1.0;
+    }
+    let dx = (cx - hw) / hw;
+    let dy = (cy - hh) / hh;
+    (dx * dx + dy * dy).sqrt().clamp(0.0, 1.0)
+}
+
+/// 综合匹配分：在 match_score 基础上，越靠近屏幕中心扣分越少。
+fn player_score(match_score: f32, dist_norm: f32) -> f32 {
+    const CENTER_PENALTY: f32 = 0.15;
+    match_score - CENTER_PENALTY * dist_norm
+}
+
 /// 在 YOLO 检测到的玩家框下方搜索名牌 OCR，返回与 `target_name` 最匹配的一个。
 pub fn find_named_player(
     img: &RgbImage,
@@ -42,8 +60,10 @@ pub fn find_named_player_verbose(
     min_player_conf: f32,
     verbose: bool,
 ) -> Result<(Option<NamedPlayerHit>, Vec<PlayerOcrAttempt>)> {
-    let mut best: Option<NamedPlayerHit> = None;
+    let mut best: Option<(NamedPlayerHit, f32)> = None;
     let mut attempts = Vec::new();
+    let img_w = img.width();
+    let img_h = img.height();
 
     for det in detections {
         if det.label != PLAYER_LABEL || det.conf < min_player_conf {
@@ -78,15 +98,21 @@ pub fn find_named_player_verbose(
                     player_conf: det.conf,
                     roi: (x, y, w, h),
                 };
+                let det_cx = (det.x1 + det.x2) * 0.5;
+                let det_cy = (det.y1 + det.y2) * 0.5;
+                let dist = center_distance_norm(det_cx, det_cy, img_w, img_h);
+                let score = player_score(match_score, dist);
                 if best
                     .as_ref()
-                    .map(|b| {
-                        hit.match_score > b.match_score
-                            || (hit.match_score == b.match_score && hit.player_conf > b.player_conf)
+                    .map(|(b, bdist)| {
+                        let b_score = player_score(b.match_score, *bdist);
+                        score > b_score
+                            || (score == b_score
+                                && (dist < *bdist || hit.match_score > b.match_score))
                     })
                     .unwrap_or(true)
                 {
-                    best = Some(hit);
+                    best = Some((hit, dist));
                 }
             } else if verbose {
                 attempts.push(PlayerOcrAttempt {
@@ -106,12 +132,12 @@ pub fn find_named_player_verbose(
         if verbose {
             attempts.extend(fb_attempts);
         }
-        if fallback.is_some() {
-            best = fallback;
+        if let Some((hit, dist)) = fallback {
+            best = Some((hit, dist));
         }
     }
 
-    Ok((best, attempts))
+    Ok((best.map(|(h, _)| h), attempts))
 }
 
 #[derive(Debug, Clone)]
@@ -296,7 +322,7 @@ fn ocr_and_match_roi_variants(
 fn scan_name_plates_fallback(
     img: &RgbImage,
     target_name: &str,
-) -> Result<(Option<NamedPlayerHit>, Vec<PlayerOcrAttempt>)> {
+) -> Result<(Option<(NamedPlayerHit, f32)>, Vec<PlayerOcrAttempt>)> {
     let (w, h) = img.dimensions();
     let y_top = 48u32;
     let y_bot = h.saturating_sub(130);
@@ -305,7 +331,7 @@ fn scan_name_plates_fallback(
     let x2 = w.saturating_sub(x_pad);
 
     let mut attempts = Vec::new();
-    let mut best: Option<NamedPlayerHit> = None;
+    let mut best: Option<(NamedPlayerHit, f32)> = None;
 
     let mut y = y_top;
     while y + 10 < y_bot {
@@ -332,12 +358,21 @@ fn scan_name_plates_fallback(
                             player_conf: 0.0,
                             roi: (px1, py1, pw, ph),
                         };
+                        let plate_cx = px1 as f32 + pw as f32 * 0.5;
+                        let plate_cy = py1 as f32 + ph as f32 * 0.5;
+                        let dist = center_distance_norm(plate_cx, plate_cy, w, h);
+                        let score = player_score(match_score, dist);
                         if best
                             .as_ref()
-                            .map(|b| hit.match_score > b.match_score)
+                            .map(|(b, bdist)| {
+                                let b_score = player_score(b.match_score, *bdist);
+                                score > b_score
+                                    || (score == b_score
+                                        && (dist < *bdist || hit.match_score > b.match_score))
+                            })
                             .unwrap_or(true)
                         {
-                            best = Some(hit);
+                            best = Some((hit, dist));
                         }
                     }
                 }

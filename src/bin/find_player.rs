@@ -2,7 +2,7 @@
 //!
 //! 用法：
 //!   cargo run --release --bin find_player -- \
-//!     --model models/yolo_nangang_e3000.onnx \
+//!     --model models/yolo_nangang_e2000_best.onnx \
 //!     --source "screen_caps/彩虹岛-南港西郊平原" \
 //!     --name "光头强加强版"
 
