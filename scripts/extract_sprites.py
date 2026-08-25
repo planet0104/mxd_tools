@@ -60,7 +60,7 @@ PORTAL_PH_KEYS = {
 
 # 玩家预设：完整立绘由 IO Character 合成；可选从客户端裁部件（--player-parts）
 # ladder/rope 为背部攀爬姿势（贴绳子/梯子用）；climb 在 IO 上常 400
-PLAYER_ANIMS = {
+PLAYER_BASE_ANIMS = {
     "stand1": 4,
     "walk1": 4,
     "jump": 1,
@@ -69,16 +69,34 @@ PLAYER_ANIMS = {
     "rope": 2,
 }
 
+# 战斗/攻击（YOLO「玩家战斗」类、小游戏普攻）；IO 按预设装备合成，持武器预设会带上武器
+PLAYER_COMBAT_ANIMS = {
+    "swingO1": 3,
+    "swingO2": 3,
+    "swingO3": 3,
+    "swingT1": 3,
+    "stabO1": 3,
+    "stabO2": 3,
+    "shoot1": 3,
+}
+
+# 兼容旧引用
+PLAYER_ANIMS = {**PLAYER_BASE_ANIMS, **PLAYER_COMBAT_ANIMS}
+
+
+def player_all_animations() -> dict[str, int]:
+    return dict(PLAYER_ANIMS)
+
 PLAYER_PRESETS: dict[str, dict] = {
     "默认男新手": {
         "skin": 2000,
-        "items": [20000, 30000, 1040002, 1060002, 1072001],
-        "desc": "创角男：白背心 + 蓝短裤 + 红胶鞋 / Black Toben",
+        "items": [20000, 30000, 1040002, 1060002, 1072001, 1302000],
+        "desc": "创角男 + 木剑：白背心 + 蓝短裤 + 红胶鞋 / Black Toben",
     },
     "默认女新手": {
         "skin": 2000,
-        "items": [21000, 31000, 1041002, 1061002, 1072001],
-        "desc": "创角女：白抹胸 + 红短裙 + 红胶鞋 / Black Sammy",
+        "items": [21000, 31000, 1041002, 1061002, 1072001, 1302000],
+        "desc": "创角女 + 木剑：白抹胸 + 红短裙 + 红胶鞋 / Black Sammy",
     },
     "男战士": {
         "skin": 2000,
@@ -515,11 +533,13 @@ def download_item_part_templates(item_id: int, dest: Path) -> int:
 
 def download_composed_player(
     skin: int, items: list[int], animations: dict[str, int], dest: Path
-) -> int:
+) -> tuple[int, dict[str, int]]:
     dest.mkdir(parents=True, exist_ok=True)
     item_str = ",".join(str(i) for i in items)
     n = 0
+    per_anim: dict[str, int] = {}
     for anim, frames in animations.items():
+        got = 0
         for i in range(frames):
             url = f"{IO_BASE}/Character/{skin}/{item_str}/{anim}/{i}"
             try:
@@ -531,8 +551,11 @@ def download_composed_player(
                 print(f"  skip {anim}_{i}: not png")
                 continue
             (dest / f"{anim}_{i}.png").write_bytes(data)
+            got += 1
             n += 1
-    return n
+        if got:
+            per_anim[anim] = got
+    return n, per_anim
 
 
 def extract_player(
@@ -578,8 +601,11 @@ def extract_player(
         atlas.save(atlas_dir / f"{label}_{Path(rel).name}")
         print(f"  atlas {label}: {atlas.size}")
 
-    composed = download_composed_player(skin, items, PLAYER_ANIMS, out_dir)
-    print(f"  合成立绘帧: {composed}")
+    composed, per_anim = download_composed_player(
+        skin, items, player_all_animations(), out_dir
+    )
+    combat = [k for k in per_anim if k.startswith(("swing", "stab", "shoot"))]
+    print(f"  合成立绘帧: {composed}（战斗动作 {len(combat)} 种: {', '.join(combat) or '无'}）")
 
     if with_parts:
         parts_dir = out_dir / "parts_from_game"
@@ -611,8 +637,10 @@ def extract_player(
         f"{cfg.get('desc', '')}\n"
         f"皮肤 skin={skin}（身体 {skin:08d} / 头 {skin + 10000:08d}）\n"
         f"装备 IDs: {item_line}\n"
-        f"完整立绘（stand1_*.png / walk1_*.png 等）: "
+        f"完整立绘（stand1_*.png / walk1_*.png / swingO1_*.png 等）: "
         f"maplestory.io GMS/83 Character 合成\n"
+        f"  战斗帧前缀: swing* / stab* / shoot*（与 auto_annotate 玩家战斗类一致）\n"
+        f"  持武器: items 中含武器 ID 时攻击帧自动带武器（无需分层合成）\n"
         f"  URL: {IO_BASE}/Character/{skin}/{{items}}/{{anim}}/{{frame}}\n"
         f"  身体与头不是独立 item，无法像怪物那样从单张图集 NCC 裁出整人\n"
         f"部件图集: {bundle.name} → SpriteSheet/CN/Character/...\n"

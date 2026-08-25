@@ -23,7 +23,7 @@ import argparse
 import json
 import random
 import shutil
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -71,9 +71,18 @@ DROP_LABELS = ("金币", "药水", "武器", "装备", "材料")
 MOB_KEEP_PREFIX = ("stand", "move", "jump", "skill", "hit")
 PLAYER_KEEP_PREFIX = ("stand", "walk", "jump", "alert")
 PLAYER_CLIMB_PREFIX = ("ladder", "rope")
+# 与 extract_sprites.PLAYER_COMBAT_ANIMS 一致：swingO1/O2/O3、swingT1、stabO1/O2、shoot1
 PLAYER_COMBAT_PREFIX = ("swing", "stab", "shoot")
-# 持武器明显的战斗帧，优先用于 combat 贴图
-COMBAT_PREFER_PREFIX = ("swingpf", "swingtf", "stabtf", "swingof", "stabof")
+# 优先抽持武器更明显的帧（小写匹配文件名）；O1/O2 通常比部分中间帧更清晰
+COMBAT_PREFER_PREFIX = (
+    "swingo1",
+    "swingo2",
+    "stabo1",
+    "shoot1",
+    "swingo3",
+    "stabo2",
+    "swingt1",
+)
 PORTAL_KEEP_PREFIX = ("pv",)
 
 # 精灵互遮：任一框被另一框盖住超过该比例则拒绝摆放（最多 30% 遮挡）
@@ -1008,13 +1017,14 @@ def build_full_scene(
         )
         placed_climb += 1
 
-    # 3c) 战斗姿态玩家：swing/stab/shoot，约一半半空
+    # 3c) 战斗姿态：swingO1/O2/O3、stab、shoot；优先 O1/O2，约一半半空
     combat_pool = sprites.get("玩家战斗") or []
     preferred_combat = [
         p
         for p in combat_pool
         if any(p.name.lower().startswith(pref) for pref in COMBAT_PREFER_PREFIX)
     ]
+    # 70% 从优先池抽，30% 从全战斗池抽，保证 O1/O2/stab/shoot 覆盖且仍有多样性
     combat_pick_pool = preferred_combat or combat_pool
     n_combat = rng.randint(*combat_n) if combat_pick_pool else 0
     placed_combat = 0
@@ -1022,7 +1032,12 @@ def build_full_scene(
     while placed_combat < n_combat and attempts < n_combat * 40:
         attempts += 1
         floor = rng.choice(floors)
-        spr, desc = pick_sprite(combat_pick_pool, rng, allow_flip=True)
+        pool = (
+            preferred_combat
+            if preferred_combat and rng.random() < 0.7
+            else combat_pick_pool
+        )
+        spr, desc = pick_sprite(pool, rng, allow_flip=True)
         sw, sh = spr.size
         use_airborne = rng.random() < 0.5
         if use_airborne:
@@ -1246,10 +1261,15 @@ def load_all_sprites(assets: Path) -> dict[str, list[Path]]:
     climb_frames: list[Path] = []
     combat_frames: list[Path] = []
     player_root = assets / "player"
+    preset_dirs: list[Path] = []
     if player_root.is_dir():
         for sub in sorted(player_root.iterdir()):
             if not sub.is_dir():
                 continue
+            # 跳过部件/图集备份子目录
+            if sub.name in ("atlases_from_game", "parts_from_game"):
+                continue
+            preset_dirs.append(sub)
             player_frames.extend(list_sprite_frames(sub, PLAYER_KEEP_PREFIX))
             climb_frames.extend(list_sprite_frames(sub, PLAYER_CLIMB_PREFIX))
             combat_frames.extend(list_sprite_frames(sub, PLAYER_COMBAT_PREFIX))
@@ -1286,6 +1306,18 @@ def load_all_sprites(assets: Path) -> dict[str, list[Path]]:
         print("提示: 无 ladder/rope 背部帧，攀爬贴图将回退为正面玩家帧")
     if not combat_frames:
         print("提示: 无 swing/stab/shoot 战斗帧，战斗玩家贴图将跳过")
+    else:
+        # 按动作前缀统计，确认 O1/O2 等已进入池
+        pref_cnt = Counter()
+        for p in combat_frames:
+            n = p.name.lower()
+            key = n.rsplit("_", 1)[0]
+            pref_cnt[key] += 1
+        top = ", ".join(f"{k}×{v}" for k, v in sorted(pref_cnt.items()))
+        print(
+            f"玩家预设 {len(preset_dirs)} 个 | 站立/走跳 {len(player_frames)} | "
+            f"攀爬 {len(climb_frames)} | 战斗 {len(combat_frames)}（{top}）"
+        )
     return sprites
 
 

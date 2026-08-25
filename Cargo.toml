@@ -32,6 +32,8 @@ rusttype = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 urlencoding = "2"
+macroquad = "0.4.14"
+rand = "0.8.5"
 
 [target.'cfg(windows)'.dependencies]
 raw-window-handle = "0.6"
