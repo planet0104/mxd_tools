@@ -30,7 +30,7 @@ pub fn load_default_map() -> Result<GameMap> {
 }
 
 pub fn ui_layout_path() -> PathBuf {
-    assets_root().join("ui/ui_layout.json")
+    assets_root().join("ui_game/ui_layout.json")
 }
 
 pub fn player_sprite_dir() -> PathBuf {
@@ -42,7 +42,7 @@ pub fn mob_sprite_dir(mob_id: u32) -> PathBuf {
 }
 
 pub fn ui_texture_path(name: &str) -> PathBuf {
-    assets_root().join("ui").join(name)
+    assets_root().join("ui_game").join(name)
 }
 
 pub fn portal_sprite_dir() -> PathBuf {
@@ -93,10 +93,12 @@ pub struct UiLayoutFile {
 #[derive(Debug, serde::Deserialize)]
 pub struct UiWidgets {
     pub minimap: UiRect,
-    pub quest: UiRect,
-    pub float_buttons: UiRect,
     pub panel: UiRect,
     pub keyboard: UiRect,
+    #[serde(default)]
+    pub quest: Option<UiRect>,
+    #[serde(default)]
+    pub float_buttons: Option<UiRect>,
 }
 
 #[derive(Debug, serde::Deserialize)]

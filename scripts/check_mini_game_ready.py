@@ -29,9 +29,27 @@ def main() -> int:
     checks: list[Path] = [
         ASSETS / "maps/50001" / plat["image"],
     ]
-    ui = json.loads((ASSETS / "ui/ui_layout.json").read_text(encoding="utf-8"))
-    for w in ui["widgets"].values():
-        checks.append(ASSETS / "ui" / w["file"])
+    ui_layout = ASSETS / "ui_game/ui_layout.json"
+    if not ui_layout.is_file():
+        errors.append("missing: assets/ui_game/ui_layout.json")
+        print("  FAIL ui_game/ui_layout.json")
+    else:
+        ui = json.loads(ui_layout.read_text(encoding="utf-8"))
+        ui_dir = ui_layout.parent
+        for key, w in ui["widgets"].items():
+            checks.append(ui_dir / w["file"])
+        wh = ui.get("world_height")
+        panel = ui["widgets"]["panel"]
+        if wh != panel["y"]:
+            errors.append(f"world_height {wh} != panel.y {panel['y']}")
+        if panel["y"] + panel["h"] != ui["window"][1]:
+            errors.append("panel 未贴齐窗口底边")
+        kb = ui["widgets"]["keyboard"]
+        if kb["y"] + kb["h"] != panel["y"]:
+            errors.append("keyboard 底边未贴齐 panel 顶边")
+        if kb["x"] + kb["w"] != panel["x"] + panel["w"]:
+            errors.append("keyboard 右边未与 panel 右对齐")
+
 
     player = ASSETS / "player/默认男新手"
     for anim in ["stand1", "walk1", "jump", "alert"]:

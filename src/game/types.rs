@@ -1,6 +1,6 @@
 pub const WINDOW_W: f32 = 1368.0;
 pub const WINDOW_H: f32 = 768.0;
-pub const WORLD_VIEW_H: f32 = 696.0;
+pub const WORLD_VIEW_H: f32 = 697.0;
 pub const LOGIC_HZ: f32 = 60.0;
 pub const LOGIC_DT: f32 = 1.0 / LOGIC_HZ;
 

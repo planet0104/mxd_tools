@@ -144,14 +144,22 @@ async fn load_assets() -> Result<GameAssets, String> {
 
     let ui_layout = game::load_ui_layout().map_err(|e| e.to_string())?;
     let mut ui = HashMap::new();
-    for (_k, rect) in [
-        ("minimap", &ui_layout.widgets.minimap),
-        ("quest", &ui_layout.widgets.quest),
-        ("float_buttons", &ui_layout.widgets.float_buttons),
-        ("panel", &ui_layout.widgets.panel),
-        ("keyboard", &ui_layout.widgets.keyboard),
-    ] {
+    let mut rects: Vec<&game::UiRect> = vec![
+        &ui_layout.widgets.minimap,
+        &ui_layout.widgets.panel,
+        &ui_layout.widgets.keyboard,
+    ];
+    if let Some(r) = &ui_layout.widgets.quest {
+        rects.push(r);
+    }
+    if let Some(r) = &ui_layout.widgets.float_buttons {
+        rects.push(r);
+    }
+    for rect in rects {
         let path = game::ui_texture_path(&rect.file);
+        if !path.is_file() {
+            return Err(format!("缺少 UI 贴图: {}", path.display()));
+        }
         ui.insert(rect.file.clone(), load_texture(&path).await?);
     }
 
@@ -454,9 +462,25 @@ fn draw_mob(assets: &GameAssets, mob: &MobState, cam_x: f32, cam_y: f32) {
 
 fn draw_ui_shell(assets: &GameAssets, sim: &GameSim) {
     let w = &assets.ui_layout.widgets;
-    for rect in [&w.minimap, &w.quest, &w.float_buttons, &w.panel, &w.keyboard] {
+    let mut rects: Vec<&game::UiRect> = vec![&w.minimap, &w.panel, &w.keyboard];
+    if let Some(r) = &w.quest {
+        rects.push(r);
+    }
+    if let Some(r) = &w.float_buttons {
+        rects.push(r);
+    }
+    for rect in rects {
         if let Some(tex) = assets.ui.get(&rect.file) {
-            draw_texture(tex, rect.x, rect.y, WHITE);
+            draw_texture_ex(
+                tex,
+                rect.x,
+                rect.y,
+                WHITE,
+                DrawTextureParams {
+                    dest_size: Some(vec2(rect.w, rect.h)),
+                    ..Default::default()
+                },
+            );
         }
     }
 
