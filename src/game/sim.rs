@@ -743,3 +743,178 @@ impl GameSim {
         self.state.cam_y = cam.cam_y;
     }
 }
+
+#[cfg(test)]
+mod control_tests {
+    use super::*;
+    use crate::game::load_default_map;
+
+    fn sim(seed: u64) -> GameSim {
+        let map = load_default_map().expect("default map");
+        GameSim::new(map, seed)
+    }
+
+    fn tick_n(sim: &mut GameSim, input: &InputFrame, n: usize) {
+        for _ in 0..n {
+            sim.tick(input);
+        }
+    }
+
+    #[test]
+    fn walk_right_moves_player() {
+        let mut s = sim(1);
+        let x0 = s.state.player.x;
+        tick_n(&mut s, &InputFrame { right: true, ..Default::default() }, 30);
+        assert!(
+            s.state.player.x > x0 + 10.0,
+            "walk right: x0={x0} x1={}",
+            s.state.player.x
+        );
+    }
+
+    #[test]
+    fn jump_leaves_ground() {
+        let mut s = sim(42);
+        // 与 mini_game 窗口模式相同 seed；站在主地面 y≈1225
+        s.state.player.x = 500.0;
+        s.state.player.y = 1225.0;
+        s.state.player.on_ground = true;
+        s.state.player.vy = 0.0;
+        let y0 = s.state.player.y;
+        s.tick(&InputFrame {
+            jump: true,
+            ..Default::default()
+        });
+        assert!(
+            !s.state.player.on_ground || s.state.player.vy < 0.0,
+            "jump should leave ground or set upward vy"
+        );
+        tick_n(&mut s, &InputFrame::default(), 10);
+        assert!(s.state.player.y < y0 - 5.0, "jump should raise player");
+    }
+
+    #[test]
+    fn rope_climb_moves_up() {
+        let mut s = sim(3);
+        // map_50001 绳 x=1770, y1=567..679
+        s.state.player.x = 1770.0;
+        s.state.player.y = 650.0;
+        s.state.player.on_ground = false;
+        s.state.player.climbing = false;
+        let y0 = s.state.player.y;
+        tick_n(
+            &mut s,
+            &InputFrame {
+                up: true,
+                ..Default::default()
+            },
+            20,
+        );
+        assert!(s.state.player.climbing, "should grab rope");
+        assert!(
+            s.state.player.y < y0 - 5.0,
+            "climb up: y0={y0} y1={}",
+            s.state.player.y
+        );
+        assert_eq!(s.state.player.climb_kind, "rope");
+    }
+
+    #[test]
+    fn ladder_climb_moves_up() {
+        let mut s = sim(4);
+        // ladder x=1477, y1=987..1191
+        s.state.player.x = 1477.0;
+        s.state.player.y = 1100.0;
+        s.state.player.on_ground = false;
+        s.state.player.climbing = false;
+        let y0 = s.state.player.y;
+        tick_n(
+            &mut s,
+            &InputFrame {
+                up: true,
+                ..Default::default()
+            },
+            20,
+        );
+        assert!(s.state.player.climbing, "should grab ladder");
+        assert!(s.state.player.y < y0 - 5.0);
+        assert_eq!(s.state.player.climb_kind, "ladder");
+    }
+
+    #[test]
+    fn attack_damages_mob_in_front() {
+        let mut s = sim(5);
+        let px = s.state.player.x;
+        let py = s.state.player.y;
+        s.state.player.facing = 1.0;
+        s.state.mobs.clear();
+        s.state.mobs.push(MobState {
+            mob_id: 130101,
+            x: px + 30.0,
+            y: py,
+            hp: 50,
+            max_hp: 50,
+            vx: 0.0,
+            walk_x1: px - 50.0,
+            walk_x2: px + 100.0,
+            alive: true,
+            hit_t: 0.0,
+            die_t: 0.0,
+            anim: MobAnim::Move,
+            anim_t: 0.0,
+            touch_damage: 5,
+        });
+        s.tick(&InputFrame {
+            attack: true,
+            ..Default::default()
+        });
+        let hp = s.state.mobs[0].hp;
+        assert!(
+            hp < 50,
+            "attack should damage mob, hp={hp}"
+        );
+    }
+
+    #[test]
+    fn pick_up_collects_nearby_drop() {
+        let mut s = sim(6);
+        let px = s.state.player.x;
+        let py = s.state.player.y;
+        s.state.drops.push(DropState {
+            kind: DropKind::Meso,
+            x: px + 10.0,
+            y: py,
+            alive: true,
+            bob_t: 0.0,
+        });
+        let meso0 = s.state.meso;
+        s.tick(&InputFrame {
+            pick_up: true,
+            ..Default::default()
+        });
+        assert!(s.state.meso > meso0, "pick_up should collect meso");
+        assert!(s.state.drops.is_empty());
+    }
+
+    #[test]
+    fn use_potion_heals_player() {
+        let mut s = sim(7);
+        s.state.mobs.clear();
+        s.state.player.hp = 40;
+        let potions0 = s.state.potions;
+        s.tick(&InputFrame {
+            use_potion: true,
+            ..Default::default()
+        });
+        assert_eq!(s.state.player.hp, 70);
+        assert_eq!(s.state.potions, potions0 - 1);
+    }
+
+    #[test]
+    fn ground_truth_exports_state() {
+        let s = sim(8);
+        let gt = s.ground_truth();
+        assert!(gt.max_hp > 0);
+        assert!(gt.mob_count > 0);
+    }
+}
