@@ -14,8 +14,8 @@ from ultralytics import YOLO
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "screen_caps/彩虹岛-南港西郊平原"
-ONNX = ROOT / "models/yolo_nangang_e2000_best.onnx"
-PT = ROOT / "models/yolo_nangang_e2000_best.pt"
+ONNX = ROOT / "models/yolo_nangang_e3000_best.onnx"
+PT = ROOT / "models/yolo_nangang_e3000_best.pt"
 RUST_CPU = ROOT / "target/release/yolo_infer.exe"
 RUST_CUDA = ROOT / "target/release/yolo_infer.exe"  # same binary, cuda feature at build time
 WARMUP = 2

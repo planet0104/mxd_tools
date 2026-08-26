@@ -1,6 +1,27 @@
 pub const WINDOW_W: f32 = 1368.0;
 pub const WINDOW_H: f32 = 768.0;
 pub const WORLD_VIEW_H: f32 = 697.0;
+
+/// 玩家头顶/脚下名牌（与 find_player / NEAT 训练一致）
+pub const DEFAULT_PLAYER_NAME: &str = "光头强加强版";
+
+/// NEAT 训练：装饰玩家数量与资源（`assets/player/` 下目录名）
+pub const TRAINING_NPC_COUNT: usize = 4;
+/// 训练装饰玩家名牌（与 `DEFAULT_PLAYER_NAME` 无共用长子串，避免 OCR 误匹配）
+pub const TRAINING_NPC_NAMES: [&str; TRAINING_NPC_COUNT] =
+    ["南港商人", "冒险萌新", "路过的骑士", "摆摊小贩"];
+pub const TRAINING_NPC_SPRITES: [&str; TRAINING_NPC_COUNT] =
+    ["默认女新手", "男战士", "男魔法师", "男弓箭手"];
+/// 训练模式怪物掉落红药概率（金币已较频繁，少量红药够学盲喝即可）
+pub const TRAINING_POTION_DROP_CHANCE: f32 = 0.18;
+/// 普通模式怪物掉落红药概率
+pub const NORMAL_POTION_DROP_CHANCE: f32 = 0.30;
+/// 名牌：脚点下方间距、内边距、字号（凤凰点阵体 16px，对齐原版 UIImageText）
+pub const NAME_TAG_GAP_BELOW_FEET: f32 = 3.0;
+pub const NAME_TAG_PAD_X: f32 = 4.0;
+pub const NAME_TAG_PAD_Y: f32 = 2.0;
+pub const NAME_TAG_FONT_SIZE: u16 = 16;
+pub const NAME_TAG_BG_ALPHA: f32 = 0.58;
 pub const LOGIC_HZ: f32 = 60.0;
 pub const LOGIC_DT: f32 = 1.0 / LOGIC_HZ;
 

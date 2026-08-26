@@ -2,9 +2,13 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
 use crate::game::camera::WorldCamera;
+use crate::game::config::GameSimConfig;
+use crate::game::fitness::TrainingFitness;
 use crate::game::input::InputFrame;
 use crate::game::map::{GameMap, WalkAhead};
+use crate::game::npc::{self, NpcPlayerState};
 use crate::game::types::*;
+use crate::yolo::Detection;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GameModal {
@@ -97,6 +101,10 @@ pub struct GroundTruth {
 pub struct GameSim {
     pub map: GameMap,
     pub state: GameState,
+    pub config: GameSimConfig,
+    /// 训练用装饰玩家（YOLO「玩家」干扰，OCR 排除自身）
+    pub npc_players: Vec<NpcPlayerState>,
+    pub fitness: TrainingFitness,
     spawn_x: f32,
     spawn_y: f32,
     rng: StdRng,
@@ -104,7 +112,18 @@ pub struct GameSim {
 
 impl GameSim {
     pub fn new(map: GameMap, seed: u64) -> Self {
+        Self::new_with_config(map, seed, GameSimConfig::default())
+    }
+
+    /// NEAT 训练用实例：装饰玩家、波次刷怪、视觉计分、零初始药水。
+    pub fn new_training(map: GameMap, seed: u64) -> Self {
+        Self::new_with_config(map, seed, GameSimConfig::training())
+    }
+
+    pub fn new_with_config(map: GameMap, seed: u64, config: GameSimConfig) -> Self {
         let (spawn_x, spawn_y) = map.default_spawn();
+        let rng = StdRng::seed_from_u64(seed);
+        let start_potions = if config.training { 0 } else { 5 };
         let mut sim = Self {
             map,
             state: GameState {
@@ -134,7 +153,7 @@ impl GameSim {
                 mobs: Vec::new(),
                 drops: Vec::new(),
                 meso: 0,
-                potions: 5,
+                potions: start_potions,
                 kills: 0,
                 modal: GameModal::None,
                 cam_x: 0.0,
@@ -142,11 +161,17 @@ impl GameSim {
                 tick: 0,
                 portal_hint: None,
             },
+            config,
+            npc_players: Vec::new(),
+            fitness: TrainingFitness::default(),
             spawn_x,
             spawn_y,
-            rng: StdRng::seed_from_u64(seed),
+            rng,
         };
         sim.spawn_mobs();
+        if sim.config.training {
+            sim.npc_players = npc::spawn_training_npcs(&sim.map, &mut sim.rng);
+        }
         sim.snap_player_to_ground();
         sim.update_camera();
         sim
@@ -246,9 +271,26 @@ impl GameSim {
         }
     }
 
+    /// NEAT 个体是否已死亡（HP 归零）。
+    pub fn is_episode_over(&self) -> bool {
+        self.state.modal == GameModal::GameOver
+    }
+
+    /// 每帧 `VisionPipeline::perceive` 之后调用，更新可见掉落框供计分。
+    pub fn record_vision_loot(&mut self, detections: &[Detection]) {
+        if self.config.training {
+            self.fitness.record_visible_drops(detections);
+        }
+    }
+
     pub fn tick(&mut self, input: &InputFrame) {
+        self.tick_with_action(input, None);
+    }
+
+    /// 训练评估：传入本帧 NEAT 动作用于视觉 shaping。
+    pub fn tick_with_action(&mut self, input: &InputFrame, action: Option<super::action::Action>) {
         if input.restart && self.state.modal == GameModal::GameOver {
-            *self = GameSim::new(self.map.clone(), self.rng.gen());
+            *self = GameSim::new_with_config(self.map.clone(), self.rng.gen(), self.config);
             return;
         }
 
@@ -277,9 +319,18 @@ impl GameSim {
         self.state.tick += 1;
         let dt = LOGIC_DT;
         self.tick_player(input, dt);
+        if self.config.training {
+            npc::tick_npc_players(&mut self.npc_players, &mut self.state.mobs, dt, &mut self.rng);
+        }
         self.tick_mobs(dt);
         self.tick_drops(input, dt);
         self.update_camera();
+
+        if self.config.training {
+            if let Some(a) = action {
+                self.fitness.try_score_action(a);
+            }
+        }
     }
 
     fn use_potion(&mut self) {
@@ -609,6 +660,8 @@ impl GameSim {
         let y1 = p.y - 72.0;
         let y2 = p.y + 20.0;
         let mut loot: Vec<(f32, f32)> = Vec::new();
+        let mut hits = 0u32;
+        let mut kills = 0u32;
         for mob in &mut self.state.mobs {
             if !mob.alive {
                 continue;
@@ -617,6 +670,7 @@ impl GameSim {
                 mob.hp -= PLAYER_ATTACK_DAMAGE;
                 mob.hit_t = 0.15;
                 mob.anim = MobAnim::Hit;
+                hits += 1;
                 let kb = 28.0 * p.facing;
                 mob.x += kb;
                 if mob.hp <= 0 {
@@ -624,8 +678,17 @@ impl GameSim {
                     mob.die_t = 0.5;
                     mob.anim = MobAnim::Die;
                     self.state.kills += 1;
+                    kills += 1;
                     loot.push((mob.x, mob.y));
                 }
+            }
+        }
+        if self.config.training {
+            for _ in 0..hits {
+                self.fitness.record_mob_hit();
+            }
+            for _ in 0..kills {
+                self.fitness.record_mob_kill();
             }
         }
         for (x, y) in loot {
@@ -641,7 +704,12 @@ impl GameSim {
             alive: true,
             bob_t: 0.0,
         });
-        if self.rng.gen_bool(0.3) {
+        let potion_chance = if self.config.training {
+            TRAINING_POTION_DROP_CHANCE
+        } else {
+            NORMAL_POTION_DROP_CHANCE
+        };
+        if self.rng.gen_bool(potion_chance as f64) {
             self.state.drops.push(DropState {
                 kind: DropKind::RedPotion,
                 x: x + 12.0,
@@ -697,6 +765,10 @@ impl GameSim {
             }
         }
         self.state.mobs.retain(|m| m.alive || m.die_t > 0.0);
+        // 训练：单平台清怪不重生；全图怪物杀光并播完死亡动画后整图一波重生
+        if self.config.training && self.state.mobs.is_empty() && !self.map.spawns.is_empty() {
+            self.spawn_mobs();
+        }
     }
 
     fn tick_drops(&mut self, input: &InputFrame, dt: f32) {
@@ -721,9 +793,18 @@ impl GameSim {
             }
             match drop.kind {
                 DropKind::Meso => {
-                    self.state.meso += self.rng.gen_range(1..=5);
+                    let amount = self.rng.gen_range(1..=5);
+                    if self.config.training {
+                        self.fitness
+                            .try_score_pickup(DropKind::Meso, drop.x, drop.y, amount);
+                    }
+                    self.state.meso += amount;
                 }
                 DropKind::RedPotion => {
+                    if self.config.training {
+                        self.fitness
+                            .try_score_pickup(DropKind::RedPotion, drop.x, drop.y, 0);
+                    }
                     self.state.potions += 1;
                 }
             }
@@ -916,5 +997,40 @@ mod control_tests {
         let gt = s.ground_truth();
         assert!(gt.max_hp > 0);
         assert!(gt.mob_count > 0);
+    }
+
+    #[test]
+    fn training_starts_without_potions_and_spawns_npcs() {
+        let map = load_default_map().expect("default map");
+        let s = GameSim::new_training(map, 99);
+        assert_eq!(s.state.potions, 0);
+        assert_eq!(s.npc_players.len(), 4);
+    }
+
+    #[test]
+    fn training_hp_zero_ends_episode() {
+        let map = load_default_map().expect("default map");
+        let mut s = GameSim::new_training(map, 7);
+        s.state.player.hp = 0;
+        s.tick(&InputFrame::default());
+        assert!(s.is_episode_over());
+    }
+
+    #[test]
+    fn training_wave_respawns_after_all_mobs_cleared() {
+        let map = load_default_map().expect("default map");
+        let mut s = GameSim::new_training(map, 3);
+        let n0 = s.state.mobs.len();
+        assert!(n0 > 0);
+        for m in &mut s.state.mobs {
+            m.alive = false;
+            m.die_t = 0.0;
+        }
+        s.tick(&InputFrame::default());
+        assert_eq!(
+            s.state.mobs.iter().filter(|m| m.alive).count(),
+            n0,
+            "all mobs dead should wave respawn"
+        );
     }
 }

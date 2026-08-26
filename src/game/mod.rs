@@ -1,21 +1,35 @@
+pub mod action;
 pub mod camera;
+pub mod config;
+pub mod fitness;
 pub mod input;
 pub mod map;
+pub mod npc;
+pub mod observation;
 pub mod sim;
 pub mod types;
+pub mod view;
+pub mod vision;
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+pub use action::{action_to_input, actions_from_bits, Action};
 pub use camera::WorldCamera;
+pub use config::{GameSimConfig, TrainingPaceConfig};
+pub use fitness::{FitnessShapingConfig, TrainingFitness};
 pub use input::InputFrame;
 pub use map::{GameMap, Portal};
+pub use npc::NpcPlayerState;
+pub use observation::{VisionObservation, NEAT_CONF_THRESH, OBS_DIM};
 pub use sim::{GameModal, GameSim, GameState, GroundTruth, MobState, PlayerState};
 pub use types::{
-    DropKind, MobAnim, PlayerAnim, ATTACK_DURATION, LOGIC_DT, LOGIC_HZ, WINDOW_H, WINDOW_W,
-    WORLD_VIEW_H,
+    DropKind, MobAnim, PlayerAnim, ATTACK_DURATION, DEFAULT_PLAYER_NAME, LOGIC_DT, LOGIC_HZ,
+    NAME_TAG_BG_ALPHA, NAME_TAG_FONT_SIZE, NAME_TAG_GAP_BELOW_FEET, NAME_TAG_PAD_X, NAME_TAG_PAD_Y,
+    TRAINING_NPC_SPRITES, WINDOW_H, WINDOW_W, WORLD_VIEW_H,
 };
+pub use vision::{assert_training_frame, filter_detections, VisionPipeline, VisionStep};
 
 pub fn assets_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets")
@@ -35,6 +49,10 @@ pub fn ui_layout_path() -> PathBuf {
 
 pub fn player_sprite_dir() -> PathBuf {
     assets_root().join("player/默认男新手")
+}
+
+pub fn player_sprite_dir_named(name: &str) -> PathBuf {
+    assets_root().join("player").join(name)
 }
 
 pub fn mob_sprite_dir(mob_id: u32) -> PathBuf {

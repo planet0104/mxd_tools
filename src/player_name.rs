@@ -164,20 +164,22 @@ pub fn draw_named_player_hit(img: &mut RgbImage, hit: &NamedPlayerHit) {
 /// 玩家框下方主搜索区（供 det 定位文本行）。
 pub fn name_search_region(det: &Detection, img_w: u32, img_h: u32) -> (u32, u32, u32, u32) {
     let bw = (det.x2 - det.x1).max(1.0);
-    let bh = (det.y2 - det.y1).max(1.0);
     let cx = (det.x1 + det.x2) * 0.5;
 
-    let roi_w = (bw * 3.2).clamp(100.0, 360.0);
-    let roi_h = (bh * 0.85).clamp(28.0, 80.0);
+    // 名牌单行约 16px 高；ROI 收窄、贴近脚点，避免混入脚下草地
+    let roi_w = (bw * 2.0).clamp(88.0, 168.0);
+    let roi_h = 22.0_f32.clamp(18.0, 30.0);
 
-    let y1 = det.y2 + bh * 0.02;
+    let y1 = det.y2 + 2.0;
     let mut x1 = (cx - roi_w * 0.5).max(0.0);
     let mut x2 = (cx + roi_w * 0.5).min(img_w as f32);
-    if cx < img_w as f32 * 0.18 {
+    if cx < img_w as f32 * 0.14 {
         x1 = 0.0;
+        x2 = roi_w.min(img_w as f32);
     }
-    if cx > img_w as f32 * 0.82 {
+    if cx > img_w as f32 * 0.86 {
         x2 = img_w as f32;
+        x1 = (x2 - roi_w).max(0.0);
     }
     let y2 = (y1 + roi_h).min(img_h as f32);
     let w = (x2 - x1).max(1.0) as u32;
@@ -441,6 +443,18 @@ mod tests {
     #[test]
     fn full_name_match() {
         assert!(name_similarity("光头强加强版", "光头强加强版") >= 0.99);
+    }
+
+    #[test]
+    fn training_npc_names_not_similar_to_self() {
+        use crate::game::types::{DEFAULT_PLAYER_NAME, TRAINING_NPC_NAMES};
+        for npc in TRAINING_NPC_NAMES {
+            let s = name_similarity(npc, DEFAULT_PLAYER_NAME);
+            assert!(
+                s < 0.55,
+                "装饰 NPC 名「{npc}」与主角相似度过高: {s:.2}"
+            );
+        }
     }
 
     #[test]

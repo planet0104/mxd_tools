@@ -1,40 +1,95 @@
-//! 无头模式：固定步进逻辑，可选导出帧（P3 基础）。
+//! 无头模式：固定步进逻辑 + 离屏渲染截图（供 YOLO / find_player 测试）。
+//!
+//! ```powershell
+//! cargo run --release --bin mini_game_headless -- --training --screenshot screen_caps/.../out.png
+//! cargo run --release --bin mini_game_headless -- --seed 42 --ticks 600 --dump-every 60
+//! ```
 
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use image::RgbImage;
-use mxd_tools::game::{GameSim, InputFrame, LOGIC_DT, WINDOW_H, WINDOW_W, WORLD_VIEW_H};
+use macroquad::prelude::*;
+use mxd_tools::game::{self, GameSim, InputFrame, LOGIC_DT, WINDOW_H, WINDOW_W};
+use mxd_tools::game::view::{self, GameViewAssets};
+use mxd_tools::headless_gl;
 
-fn main() {
+fn window_conf() -> Conf {
+    headless_gl::headless_window_conf("mini_game_headless")
+}
+
+fn arg_value(args: &[String], key: &str) -> Option<String> {
+    args.iter()
+        .position(|a| a == key)
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+}
+
+fn arg_u64(args: &[String], key: &str, default: u64) -> u64 {
+    args.iter()
+        .position(|a| a == key)
+        .and_then(|i| args.get(i + 1))
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default)
+}
+
+#[macroquad::main(window_conf)]
+async fn main() {
+    let _ = headless_gl::hide_gl_window();
     let args: Vec<String> = env::args().collect();
+    let training = args.iter().any(|a| a == "--training");
     let seed = arg_u64(&args, "--seed", 42);
-    let ticks = arg_u64(&args, "--ticks", 600) as usize;
+    let ticks = arg_u64(&args, "--ticks", 120) as usize;
     let dump_every = arg_u64(&args, "--dump-every", 0) as usize;
+    let screenshot_out = arg_value(&args, "--screenshot");
+    let warmup_frames = arg_u64(&args, "--warmup-frames", 3) as usize;
 
-    let map = match mxd_tools::game::load_default_map() {
-        Ok(m) => m,
+    let assets = match view::load_view_assets().await {
+        Ok(a) => a,
         Err(e) => {
-            eprintln!("加载地图失败: {e}");
-            std::process::exit(1);
+            eprintln!("加载资源失败: {e}");
+            return;
         }
     };
 
-    let mut sim = GameSim::new(map, seed);
+    let map = match game::load_default_map() {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("加载地图失败: {e}");
+            return;
+        }
+    };
+
+    let mut sim = if training {
+        GameSim::new_training(map, seed)
+    } else {
+        GameSim::new(map, seed)
+    };
     let out_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tmp/mini_game_headless");
     if dump_every > 0 {
         let _ = std::fs::create_dir_all(&out_dir);
     }
 
+    let rt = view::new_render_target();
+
     for i in 0..ticks {
-        let input = demo_input(i);
-        sim.tick(&input);
+        sim.tick(&InputFrame::default());
         if dump_every > 0 && i % dump_every == 0 {
-            let frame = render_placeholder(&sim);
+            let frame = capture_after_draw(&assets, &sim, &rt, warmup_frames).await;
             let path = out_dir.join(format!("frame_{i:05}.png"));
             if let Err(e) = frame.save(&path) {
                 eprintln!("写帧失败: {e}");
             }
+        }
+    }
+
+    if let Some(ref path) = screenshot_out {
+        let frame = capture_after_draw(&assets, &sim, &rt, warmup_frames).await;
+        if let Some(parent) = Path::new(path).parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match frame.save(path) {
+            Ok(()) => eprintln!("截图已保存: {path} ({WINDOW_W}x{WINDOW_H})"),
+            Err(e) => eprintln!("截图失败: {e}"),
         }
     }
 
@@ -54,40 +109,17 @@ fn main() {
     }
 }
 
-fn arg_u64(args: &[String], key: &str, default: u64) -> u64 {
-    args.iter()
-        .position(|a| a == key)
-        .and_then(|i| args.get(i + 1))
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(default)
-}
-
-fn demo_input(tick: usize) -> InputFrame {
-    let phase = tick % 240;
-    InputFrame {
-        right: phase < 120,
-        left: phase >= 120,
-        jump: phase == 60 || phase == 180,
-        attack: phase % 40 == 0,
-        pick_up: phase % 50 == 0,
-        ..Default::default()
+async fn capture_after_draw(
+    assets: &GameViewAssets,
+    sim: &GameSim,
+    rt: &RenderTarget,
+    warmup_frames: usize,
+) -> image::RgbImage {
+    for _ in 0..warmup_frames {
+        view::draw_to_render_target(assets, sim, rt);
+        next_frame().await;
     }
-}
-
-/// 占位渲染：深灰底 + 玩家位置标记（完整 macroquad 离屏渲染后续接入）。
-fn render_placeholder(sim: &GameSim) -> RgbImage {
-    let mut img = RgbImage::new(WINDOW_W as u32, WINDOW_H as u32);
-    for p in img.pixels_mut() {
-        *p = image::Rgb([30, 32, 40]);
-    }
-    let px = (sim.state.player.x - sim.state.cam_x).clamp(0.0, WINDOW_W - 4.0) as u32;
-    let py = (sim.state.player.y - sim.state.cam_y).clamp(0.0, WORLD_VIEW_H - 4.0) as u32;
-    for dy in 0..8 {
-        for dx in 0..8 {
-            if px + dx < WINDOW_W as u32 && py + dy < WINDOW_H as u32 {
-                img.put_pixel(px + dx, py + dy, image::Rgb([80, 220, 255]));
-            }
-        }
-    }
-    img
+    view::draw_to_render_target(assets, sim, rt);
+    next_frame().await;
+    view::render_target_to_rgb(rt)
 }
