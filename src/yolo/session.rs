@@ -1,13 +1,20 @@
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
-use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
 use ort::value::TensorRef;
 
-use crate::yolo::postprocess::decode_yolo_output_flat;
+use crate::ort_util::{build_session, OrtDevice};
+use crate::yolo::postprocess::{decode_yolo_batch_output, decode_yolo_output_flat};
 use crate::yolo::preprocess::{letterbox_rgb_into, LetterboxBuffers};
-use crate::yolo::{Detection, YoloDevice};
+use crate::yolo::{Detection, LetterboxMeta, YoloDevice};
+
+fn yolo_to_ort(device: YoloDevice) -> OrtDevice {
+    match device {
+        YoloDevice::Cpu => OrtDevice::Cpu,
+        YoloDevice::Cuda(id) => OrtDevice::Cuda(id),
+    }
+}
 
 pub struct YoloDetector {
     session: Session,
@@ -17,6 +24,8 @@ pub struct YoloDetector {
     pub device_label: String,
     input_buf: Vec<f32>,
     letterbox_bufs: LetterboxBuffers,
+    /// `None` = 未探测；固定 batch=1 模型为 `false`。
+    batch_tensor_ok: Option<bool>,
 }
 
 impl YoloDetector {
@@ -31,70 +40,8 @@ impl YoloDetector {
         iou: f32,
         imgsz: u32,
     ) -> Result<Self> {
-        if !onnx.is_file() {
-            bail!("找不到 ONNX: {}", onnx.display());
-        }
-
-        let mut device_label = "cpu".to_string();
-        let mk_builder = || {
-            Session::builder()
-                .map_err(|e| anyhow::anyhow!("创建 ORT SessionBuilder 失败: {e}"))?
-                .with_optimization_level(GraphOptimizationLevel::Level3)
-                .map_err(|e| anyhow::anyhow!("设置图优化失败: {e}"))?
-                .with_intra_threads(4)
-                .map_err(|e| anyhow::anyhow!("设置 intra_threads 失败: {e}"))
-        };
-        let session = match device {
-            YoloDevice::Cuda(id) => {
-                #[cfg(feature = "cuda")]
-                {
-                    use ort::ep::CUDA;
-                    let try_cuda = mk_builder()?
-                        .with_execution_providers([CUDA::default().with_device_id(id as i32).build()]);
-                    match try_cuda {
-                        Ok(mut b) => match b.commit_from_file(onnx) {
-                            Ok(s) => {
-                                device_label = format!("cuda:{id}");
-                                eprintln!("YOLO: 使用 CUDA EP (device={id})");
-                                s
-                            }
-                            Err(e) => {
-                                eprintln!("YOLO: CUDA session 失败，回退 CPU: {e}");
-                                device_label = "cpu(fallback)".to_string();
-                                mk_builder()?
-                                    .commit_from_file(onnx)
-                                    .with_context(|| {
-                                        format!("加载 ONNX 失败: {}", onnx.display())
-                                    })?
-                            }
-                        },
-                        Err(e) => {
-                            eprintln!("YOLO: 注册 CUDA EP 失败，回退 CPU: {e}");
-                            device_label = "cpu(fallback)".to_string();
-                            mk_builder()?.commit_from_file(onnx).with_context(|| {
-                                format!("加载 ONNX 失败: {}", onnx.display())
-                            })?
-                        }
-                    }
-                }
-                #[cfg(not(feature = "cuda"))]
-                {
-                    let _ = id;
-                    eprintln!(
-                        "YOLO: 未启用 cargo feature `cuda`，使用 CPU。\
-                         需要 GPU: cargo build --release --features cuda --bin yolo_predict"
-                    );
-                    device_label = "cpu(no-cuda-feature)".to_string();
-                    mk_builder()?.commit_from_file(onnx).with_context(|| {
-                        format!("加载 ONNX 失败: {}", onnx.display())
-                    })?
-                }
-            }
-            YoloDevice::Cpu => mk_builder()?
-                .commit_from_file(onnx)
-                .with_context(|| format!("加载 ONNX 失败: {}", onnx.display()))?,
-        };
-
+        let (session, device_label) = build_session(onnx, yolo_to_ort(device), 4)?;
+        eprintln!("YOLO: {device_label}");
         let plane = (imgsz as usize) * (imgsz as usize) * 3;
         Ok(Self {
             session,
@@ -104,6 +51,7 @@ impl YoloDetector {
             device_label,
             input_buf: Vec::with_capacity(plane),
             letterbox_bufs: LetterboxBuffers::new().context("初始化 letterbox 缓冲失败")?,
+            batch_tensor_ok: None,
         })
     }
 
@@ -114,6 +62,115 @@ impl YoloDetector {
 
     /// `rgb` 为 packed RGB8，长度 = w*h*3。
     pub fn detect_rgb8(&mut self, w: u32, h: u32, rgb: &[u8]) -> Result<Vec<Detection>> {
+        let mut metas = Vec::with_capacity(1);
+        self.preprocess_one(w, h, rgb, &mut metas)?;
+        let shape = [1_i64, 3, self.imgsz as i64, self.imgsz as i64];
+        let input_tensor = TensorRef::from_array_view((shape, self.input_buf.as_slice()))
+            .context("构造输入张量失败")?;
+        let outputs = self
+            .session
+            .run(ort::inputs![input_tensor])
+            .context("ORT 推理失败")?;
+        let (_name, value) = outputs.iter().next().context("ORT 无输出")?;
+        let (out_shape, out_data) = value
+            .try_extract_tensor::<f32>()
+            .context("解析输出张量失败")?;
+        Ok(decode_yolo_output_flat(
+            &out_shape,
+            out_data,
+            &metas[0],
+            self.conf,
+            self.iou,
+        ))
+    }
+
+    /// 批量 YOLO 推理：`frames` 为 `(w, h, rgb)` 列表。
+    /// 若 ONNX 固定 batch=1，自动回退为同 session 逐帧 GPU 推理。
+    pub fn detect_rgb8_batch(
+        &mut self,
+        frames: &[(u32, u32, &[u8])],
+    ) -> Result<Vec<Vec<Detection>>> {
+        if frames.is_empty() {
+            return Ok(vec![]);
+        }
+        if self.batch_tensor_ok != Some(false) && frames.len() > 1 {
+            match self.detect_rgb8_batch_tensor(frames) {
+                Ok(v) => {
+                    self.batch_tensor_ok = Some(true);
+                    return Ok(v);
+                }
+                Err(e) => {
+                    self.batch_tensor_ok = Some(false);
+                    eprintln!("YOLO: batch 维度不可用 ({e})，后续逐帧推理");
+                }
+            }
+        }
+        let mut out = Vec::with_capacity(frames.len());
+        for &(w, h, rgb) in frames {
+            out.push(self.detect_rgb8(w, h, rgb)?);
+        }
+        Ok(out)
+    }
+
+    fn detect_rgb8_batch_tensor(
+        &mut self,
+        frames: &[(u32, u32, &[u8])],
+    ) -> Result<Vec<Vec<Detection>>> {
+        let n = frames.len();
+        if n == 0 {
+            return Ok(vec![]);
+        }
+        let plane = (self.imgsz as usize) * (self.imgsz as usize) * 3;
+        self.input_buf.resize(n * plane, 0.0);
+        let mut metas = Vec::with_capacity(n);
+        for (i, (w, h, rgb)) in frames.iter().enumerate() {
+            if rgb.len() != (*w as usize) * (*h as usize) * 3 {
+                bail!(
+                    "batch[{i}] RGB 长度不符: got {} expect {}",
+                    rgb.len(),
+                    *w as usize * *h as usize * 3
+                );
+            }
+            let offset = i * plane;
+            let mut slot = Vec::with_capacity(plane);
+            let meta = letterbox_rgb_into(
+                rgb,
+                *w,
+                *h,
+                self.imgsz,
+                &mut self.letterbox_bufs,
+                &mut slot,
+            )?;
+            self.input_buf[offset..offset + plane].copy_from_slice(&slot);
+            metas.push(meta);
+        }
+        let shape = [n as i64, 3, self.imgsz as i64, self.imgsz as i64];
+        let input_tensor = TensorRef::from_array_view((shape, self.input_buf.as_slice()))
+            .context("构造 batch 输入张量失败")?;
+        let outputs = self
+            .session
+            .run(ort::inputs![input_tensor])
+            .context("ORT batch 推理失败")?;
+        let (_name, value) = outputs.iter().next().context("ORT 无输出")?;
+        let (out_shape, out_data) = value
+            .try_extract_tensor::<f32>()
+            .context("解析 batch 输出张量失败")?;
+        Ok(decode_yolo_batch_output(
+            &out_shape,
+            out_data,
+            &metas,
+            self.conf,
+            self.iou,
+        ))
+    }
+
+    fn preprocess_one(
+        &mut self,
+        w: u32,
+        h: u32,
+        rgb: &[u8],
+        metas: &mut Vec<LetterboxMeta>,
+    ) -> Result<()> {
         if rgb.len() != (w as usize) * (h as usize) * 3 {
             bail!(
                 "RGB 缓冲长度不符: got {} expect {}",
@@ -121,7 +178,6 @@ impl YoloDetector {
                 w as usize * h as usize * 3
             );
         }
-
         let meta = letterbox_rgb_into(
             rgb,
             w,
@@ -130,26 +186,7 @@ impl YoloDetector {
             &mut self.letterbox_bufs,
             &mut self.input_buf,
         )?;
-
-        let shape = [1_i64, 3, self.imgsz as i64, self.imgsz as i64];
-        let input_tensor = TensorRef::from_array_view((shape, self.input_buf.as_slice()))
-            .context("构造输入张量失败")?;
-        let outputs = self
-            .session
-            .run(ort::inputs![input_tensor])
-            .context("ORT 推理失败")?;
-
-        let (_name, value) = outputs.iter().next().context("ORT 无输出")?;
-        let (out_shape, out_data) = value
-            .try_extract_tensor::<f32>()
-            .context("解析输出张量失败")?;
-
-        Ok(decode_yolo_output_flat(
-            &out_shape,
-            out_data,
-            &meta,
-            self.conf,
-            self.iou,
-        ))
+        metas.push(meta);
+        Ok(())
     }
 }

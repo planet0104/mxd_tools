@@ -116,7 +116,7 @@ async fn main() {
     let capture_tick = arg_usize(&args, "--capture-tick", 800);
     let max_ticks = arg_usize(&args, "--max-ticks", capture_tick + 400);
     let pace = TrainingPaceConfig {
-        vision_interval_ticks: arg_u32(&args, "--pace", 4).max(1),
+        vision_interval_ticks: arg_u32(&args, "--pace", 12).max(1),
     };
     let model = arg_path(&args, "--model").unwrap_or(default_model);
     let out_dir = arg_path(&args, "--out").unwrap_or_else(|| {

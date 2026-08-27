@@ -138,7 +138,7 @@ impl GameMap {
             let Some(py) = platform_y_at_x(p, x) else {
                 continue;
             };
-            if py < feet_y - SAME_LEVEL_TOL {
+            if py <= feet_y + SAME_LEVEL_TOL {
                 continue;
             }
             if py > feet_y + max_drop {
@@ -158,7 +158,7 @@ impl GameMap {
             let Some(py) = slope_ground_y(slope, x) else {
                 continue;
             };
-            if py < feet_y - SAME_LEVEL_TOL {
+            if py <= feet_y + SAME_LEVEL_TOL {
                 continue;
             }
             if py > feet_y + max_drop {
@@ -180,6 +180,37 @@ impl GameMap {
     /// 脚下最近可站立平台 y（图像坐标，向下为正）。
     pub fn ground_at(&self, x: f32, feet_y: f32, max_drop: f32) -> Option<f32> {
         self.stand_at(x, feet_y, max_drop).map(|s| s.y)
+    }
+
+    /// 正下方更低平台（严格 x，无 platform 边距），用于判 walk-off 坠落。
+    pub fn ground_below_at(&self, x: f32, feet_y: f32, max_drop: f32) -> Option<f32> {
+        let mut best: Option<f32> = None;
+        for p in &self.platforms {
+            let Some(py) = platform_y_at_x_strict(p, x) else {
+                continue;
+            };
+            if py <= feet_y + SAME_LEVEL_TOL {
+                continue;
+            }
+            if py > feet_y + max_drop {
+                continue;
+            }
+            if best.map(|b| py < b).unwrap_or(true) {
+                best = Some(py);
+            }
+        }
+        for slope in &self.slopes {
+            let Some(py) = slope_ground_y(slope, x) else {
+                continue;
+            };
+            if py <= feet_y + SAME_LEVEL_TOL || py > feet_y + max_drop {
+                continue;
+            }
+            if best.map(|b| py < b).unwrap_or(true) {
+                best = Some(py);
+            }
+        }
+        best
     }
 
     /// 从 y_from 下落到 y_to 时穿过的平台顶（单向平台落地，任意层级）。
@@ -288,6 +319,7 @@ impl GameMap {
         fh: Option<(i32, i32)>,
     ) -> WalkAhead {
         use crate::game::types::{FALL_PROBE, SAME_LEVEL_TOL, WALL_HIT_H};
+        const EDGE_FALL_PROBE: f32 = 64.0;
 
         let y_hi = feet_y - WALL_HIT_H;
         let blocked_x = self.resolve_wall_x(x, to_x, y_hi, feet_y - 2.0, fh);
@@ -296,7 +328,7 @@ impl GameMap {
         }
 
         if let Some(st) = self.stand_at(to_x, feet_y, SAME_LEVEL_TOL) {
-            if (st.y - feet_y).abs() <= SAME_LEVEL_TOL {
+            if (st.y - feet_y).abs() <= SAME_LEVEL_TOL && self.strict_stand_at(to_x, feet_y).is_some() {
                 return WalkAhead::SameLevel(st.y);
             }
         }
@@ -314,11 +346,43 @@ impl GameMap {
             }
         }
 
-        if self.ground_at(to_x, feet_y + 2.0, FALL_PROBE).is_some() {
+        if self.ground_below_at(to_x, feet_y + 2.0, EDGE_FALL_PROBE).is_some() {
             return WalkAhead::Fall;
+        }
+        if self.ground_below_at(to_x, feet_y + 2.0, FALL_PROBE).is_some() {
+            if let Some((lo, hi)) = self.platform_span_at(x, feet_y) {
+                if to_x >= lo && to_x <= hi {
+                    return WalkAhead::Fall;
+                }
+            } else {
+                return WalkAhead::Fall;
+            }
         }
 
         WalkAhead::Blocked
+    }
+
+    /// 严格平台边（无 platform_y_at_x 的 ±4px 容差），用于地面行走判边。
+    pub fn strict_stand_at(&self, x: f32, feet_y: f32) -> Option<StandInfo> {
+        let mut best: Option<StandInfo> = None;
+        for p in &self.platforms {
+            let Some(py) = platform_y_at_x_strict(p, x) else {
+                continue;
+            };
+            if py < feet_y - SAME_LEVEL_TOL || py > feet_y + SAME_LEVEL_TOL {
+                continue;
+            }
+            let info = StandInfo {
+                y: py,
+                id: p.id,
+                layer: p.layer,
+                group: p.group,
+            };
+            if best.map(|b| py < b.y).unwrap_or(true) {
+                best = Some(info);
+            }
+        }
+        best
     }
 
     fn surface_above_in_group(
@@ -410,19 +474,60 @@ impl GameMap {
         self.max_stand_y() + 40.0
     }
 
-    pub fn default_spawn(&self) -> (f32, f32) {
-        if let Some(sp) = self.spawns.first() {
-            return (sp.x, sp.y);
+    /// 可站立平台（含斜坡顶边）在 x 方向上的范围；用于空中贴图边界，不外扩 padding。
+    pub fn playable_x_bounds(&self) -> (f32, f32) {
+        const BODY_INSET: f32 = 4.0;
+        let mut min_x = f32::MAX;
+        let mut max_x = f32::MIN;
+
+        for p in &self.platforms {
+            let (xmin, xmax) = if p.x1 <= p.x2 {
+                (p.x1, p.x2)
+            } else {
+                (p.x2, p.x1)
+            };
+            if xmax - xmin < 8.0 {
+                continue;
+            }
+            if (p.y1 - p.y2).abs() >= 2.0 {
+                continue;
+            }
+            min_x = min_x.min(xmin);
+            max_x = max_x.max(xmax);
         }
-        (400.0, self.max_stand_y())
+
+        for slope in &self.slopes {
+            let Some((a, b)) = slope_top_edge(&slope.points) else {
+                continue;
+            };
+            let xmin = a[0].min(b[0]);
+            let xmax = a[0].max(b[0]);
+            if xmax - xmin < 8.0 {
+                continue;
+            }
+            min_x = min_x.min(xmin);
+            max_x = max_x.max(xmax);
+        }
+
+        if min_x > max_x {
+            return (16.0, self.width - 16.0);
+        }
+        (min_x + BODY_INSET, max_x - BODY_INSET)
     }
 
-    /// 刷怪点所在高度上、包含 x 的连续水平平台巡逻区间。
-    pub fn walk_range_at(&self, x: f32, y: f32) -> (f32, f32) {
+    /// 当前高度上、包含 x 的连续水平平台区间（不含怪物巡逻 inset）。
+    pub fn platform_span_at(&self, x: f32, y: f32) -> Option<(f32, f32)> {
+        for (lo, hi) in self.horizontal_spans_at(y) {
+            if x >= lo - 4.0 && x <= hi + 4.0 {
+                return Some((lo, hi));
+            }
+        }
+        None
+    }
+
+    fn horizontal_spans_at(&self, y: f32) -> Vec<(f32, f32)> {
         const Y_TOL: f32 = 4.0;
         const GAP: f32 = 8.0;
-        const EDGE_PAD: f32 = 8.0;
-        const MIN_HALF: f32 = 20.0;
 
         let mut spans: Vec<(f32, f32)> = Vec::new();
         for p in &self.platforms {
@@ -455,8 +560,22 @@ impl GameMap {
             }
             merged.push((lo, hi));
         }
+        merged
+    }
 
-        for (lo, hi) in merged {
+    pub fn default_spawn(&self) -> (f32, f32) {
+        if let Some(sp) = self.spawns.first() {
+            return (sp.x, sp.y);
+        }
+        (400.0, self.max_stand_y())
+    }
+
+    /// 刷怪点所在高度上、包含 x 的连续水平平台巡逻区间。
+    pub fn walk_range_at(&self, x: f32, y: f32) -> (f32, f32) {
+        const EDGE_PAD: f32 = 8.0;
+        const MIN_HALF: f32 = 20.0;
+
+        for (lo, hi) in self.horizontal_spans_at(y) {
             if x >= lo - 4.0 && x <= hi + 4.0 {
                 let mut w1 = lo + EDGE_PAD;
                 let mut w2 = hi - EDGE_PAD;
@@ -470,6 +589,30 @@ impl GameMap {
         }
         (x - MIN_HALF, x + MIN_HALF)
     }
+}
+
+fn platform_y_at_x_strict(p: &PlatformSeg, x: f32) -> Option<f32> {
+    let (xmin, xmax) = if p.x1 <= p.x2 {
+        (p.x1, p.x2)
+    } else {
+        (p.x2, p.x1)
+    };
+    if (xmax - xmin) < 8.0 {
+        return None;
+    }
+    if x < xmin || x > xmax {
+        return None;
+    }
+    if (p.y1 - p.y2).abs() < 2.0 {
+        return Some((p.y1 + p.y2) * 0.5);
+    }
+    let t = (x - xmin) / (xmax - xmin);
+    let (ya, yb) = if p.x1 <= p.x2 {
+        (p.y1, p.y2)
+    } else {
+        (p.y2, p.y1)
+    };
+    Some(ya + (yb - ya) * t)
 }
 
 fn platform_y_at_x(p: &PlatformSeg, x: f32) -> Option<f32> {
@@ -529,4 +672,33 @@ fn slope_ground_y(slope: &SlopePoly, x: f32) -> Option<f32> {
     let ax = if a[0] <= b[0] { a } else { b };
     let bx = if a[0] <= b[0] { b } else { a };
     Some(ax[1] + (bx[1] - ax[1]) * t)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::load_default_map;
+
+    #[test]
+    fn playable_x_bounds_inside_image() {
+        let map = load_default_map().expect("default map");
+        let (lo, hi) = map.playable_x_bounds();
+        assert!(lo < hi);
+        assert!((lo - 81.0).abs() < 1.0, "left bound should be ~81, got {lo}");
+        assert!(hi < map.width);
+        assert!(hi < map.width - 16.0);
+    }
+
+    #[test]
+    fn left_ground_edge_blocks_walk_off() {
+        let map = load_default_map().expect("default map");
+        let y = 1225.0;
+        let span = map.platform_span_at(100.0, y).expect("ground span");
+        assert!((span.0 - 77.0).abs() < 1.0, "leftmost ground x=77, got {}", span.0);
+        let ahead = map.walk_ahead(78.0, y, 76.0, Some((2, 0)));
+        assert!(
+            matches!(ahead, WalkAhead::Blocked),
+            "walking past left map edge should block, got {ahead:?}"
+        );
+    }
 }

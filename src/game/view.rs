@@ -44,6 +44,22 @@ pub fn logical_camera() -> Camera2D {
     }
 }
 
+/// 将逻辑分辨率画面居中缩放到当前窗口（窗口模式预览/训练用）。
+pub fn begin_logical_viewport() {
+    let sw = screen_width();
+    let sh = screen_height();
+    let scale = f32::min(sw / WINDOW_W, sh / WINDOW_H);
+    let vw = (WINDOW_W * scale).round();
+    let vh = (WINDOW_H * scale).round();
+    let ox = ((sw - vw) * 0.5).round() as i32;
+    let oy_top = ((sh - vh) * 0.5).round() as i32;
+    let oy = sh.round() as i32 - oy_top - vh as i32;
+
+    let mut cam = logical_camera();
+    cam.viewport = Some((ox, oy, vw as i32, vh as i32));
+    set_camera(&cam);
+}
+
 pub fn new_render_target() -> RenderTarget {
     let rt = render_target(WINDOW_W as u32, WINDOW_H as u32);
     rt.texture.set_filter(FilterMode::Nearest);

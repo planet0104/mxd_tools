@@ -1,6 +1,6 @@
 //! YOLO11 ONNX 推理（ort / ONNX Runtime）。
 //!
-//! CPU 默认可用；GPU 需 `--features cuda` 并安装兼容的 CUDA/cuDNN。
+//! ONNX YOLO 检测（CPU 默认可用；可选 `--features cuda` 用于工具链）。
 
 mod labels;
 mod postprocess;

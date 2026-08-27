@@ -43,6 +43,8 @@ pub struct WorkerPoolConfig {
     pub max_ticks: usize,
     pub pace: u32,
     pub fitness_shaping: f32,
+    pub no_ocr: bool,
+    pub anchor_offset: f32,
 }
 
 impl WorkerPool {
@@ -69,10 +71,23 @@ impl WorkerPool {
                 &cfg.pace.to_string(),
                 "--fitness-shaping",
                 &cfg.fitness_shaping.to_string(),
-            ])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            ]);
+            if cfg.no_ocr {
+                cmd.arg("--no-ocr");
+                cmd.arg("--anchor-offset");
+                cmd.arg(cfg.anchor_offset.to_string());
+            }
+            let worker_log = manifest.join(format!("tmp/neat_worker_{id}.log"));
+            let stderr_file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&worker_log);
+            cmd.stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(match stderr_file {
+                    Ok(f) => Stdio::from(f),
+                    Err(_) => Stdio::null(),
+                });
 
             let mut child = cmd.spawn()?;
             let stdin = child.stdin.take().expect("worker stdin");
@@ -145,7 +160,7 @@ impl WorkerPool {
         self.workers.iter().filter(|w| w.busy_job.is_some()).count()
     }
 
-    /// 若有空闲 worker 则派发任务。
+    /// 若有空闲 worker 则派发单基因组评估任务。
     pub fn try_submit(
         &mut self,
         job_idx: usize,
@@ -200,23 +215,10 @@ impl WorkerPool {
         Ok((resp.job_idx, resp.fitness))
     }
 
-    /// 某 worker 当前任务的 status 文件路径（供心跳读取）。
-    pub fn status_for_job(&self, job_idx: usize) -> Option<PathBuf> {
-        self.workers
-            .iter()
-            .find(|w| w.busy_job == Some(job_idx))
-            .and_then(|w| w.status_path.clone())
-    }
-
     pub fn in_flight_status(&self) -> Vec<(usize, PathBuf)> {
         self.workers
             .iter()
-            .filter_map(|w| {
-                Some((
-                    w.busy_job?,
-                    w.status_path.clone()?,
-                ))
-            })
+            .filter_map(|w| Some((w.busy_job?, w.status_path.clone()?)))
             .collect()
     }
 

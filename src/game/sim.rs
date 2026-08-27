@@ -8,6 +8,7 @@ use crate::game::input::InputFrame;
 use crate::game::map::{GameMap, WalkAhead};
 use crate::game::npc::{self, NpcPlayerState};
 use crate::game::types::*;
+use crate::game::vision::SimVisionSnapshot;
 use crate::yolo::Detection;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,6 +103,8 @@ pub struct GameSim {
     pub map: GameMap,
     pub state: GameState,
     pub config: GameSimConfig,
+    /// 本局 episode 种子（SimMatch 锚点偏移等）。
+    pub episode_seed: u64,
     /// 训练用装饰玩家（YOLO「玩家」干扰，OCR 排除自身）
     pub npc_players: Vec<NpcPlayerState>,
     pub fitness: TrainingFitness,
@@ -162,6 +165,7 @@ impl GameSim {
                 portal_hint: None,
             },
             config,
+            episode_seed: seed,
             npc_players: Vec::new(),
             fitness: TrainingFitness::default(),
             spawn_x,
@@ -271,6 +275,17 @@ impl GameSim {
         }
     }
 
+    /// SimMatch 视觉锚点：当前帧 sim 投影用快照。
+    pub fn vision_snapshot(&self) -> SimVisionSnapshot {
+        SimVisionSnapshot {
+            player_x: self.state.player.x,
+            player_y: self.state.player.y,
+            cam_x: self.state.cam_x,
+            cam_y: self.state.cam_y,
+            episode_seed: self.episode_seed,
+        }
+    }
+
     /// NEAT 个体是否已死亡（HP 归零）。
     pub fn is_episode_over(&self) -> bool {
         self.state.modal == GameModal::GameOver
@@ -284,11 +299,11 @@ impl GameSim {
     }
 
     pub fn tick(&mut self, input: &InputFrame) {
-        self.tick_with_action(input, None);
+        self.tick_with_action(input);
     }
 
-    /// 训练评估：传入本帧 NEAT 动作用于视觉 shaping。
-    pub fn tick_with_action(&mut self, input: &InputFrame, action: Option<super::action::Action>) {
+    /// 训练评估：传入本帧输入用于视觉 shaping。
+    pub fn tick_with_action(&mut self, input: &InputFrame) {
         if input.restart && self.state.modal == GameModal::GameOver {
             *self = GameSim::new_with_config(self.map.clone(), self.rng.gen(), self.config);
             return;
@@ -318,6 +333,9 @@ impl GameSim {
 
         self.state.tick += 1;
         let dt = LOGIC_DT;
+        if self.config.training {
+            self.fitness.try_score_input(input, self.state.tick);
+        }
         self.tick_player(input, dt);
         if self.config.training {
             npc::tick_npc_players(&mut self.npc_players, &mut self.state.mobs, dt, &mut self.rng);
@@ -327,8 +345,10 @@ impl GameSim {
         self.update_camera();
 
         if self.config.training {
-            if let Some(a) = action {
-                self.fitness.try_score_action(a);
+            let (px, py) = (self.state.player.x, self.state.player.y);
+            if self.fitness.tick_stagnation(px, py, self.state.tick) {
+                self.state.player.hp = 0;
+                self.state.modal = GameModal::GameOver;
             }
         }
     }
@@ -435,7 +455,15 @@ impl GameSim {
 
         {
             let p = &mut self.state.player;
-            p.x = p.x.clamp(16.0, self.map.width - 16.0);
+            const BODY_INSET: f32 = 4.0;
+            if p.on_ground {
+                if let Some((lo, hi)) = self.map.platform_span_at(p.x, p.y) {
+                    p.x = p.x.clamp(lo + BODY_INSET, hi - BODY_INSET);
+                }
+            } else {
+                let (px_lo, px_hi) = self.map.playable_x_bounds();
+                p.x = p.x.clamp(px_lo, px_hi);
+            }
             // 只限制上边界；下边界由虚空重生处理，避免卡在泥土高度
             p.y = p.y.max(16.0);
         }
@@ -685,10 +713,10 @@ impl GameSim {
         }
         if self.config.training {
             for _ in 0..hits {
-                self.fitness.record_mob_hit();
+                self.fitness.record_mob_hit(self.state.tick);
             }
             for _ in 0..kills {
-                self.fitness.record_mob_kill();
+                self.fitness.record_mob_kill(self.state.tick);
             }
         }
         for (x, y) in loot {
@@ -721,25 +749,57 @@ impl GameSim {
     }
 
     fn check_mob_touch(&mut self) {
-        let p = &mut self.state.player;
-        if p.invuln_t > 0.0 || p.hurt_t > 0.0 {
+        if self.state.player.invuln_t > 0.0 || self.state.player.hurt_t > 0.0 {
             return;
         }
+        let px = self.state.player.x;
+        let py = self.state.player.y;
+        let mut hit: Option<(i32, f32)> = None;
         for mob in &self.state.mobs {
             if !mob.alive {
                 continue;
             }
-            let dx = p.x - mob.x;
-            let dy = p.y - mob.y;
+            let dx = px - mob.x;
+            let dy = py - mob.y;
             if dx.abs() < 28.0 && dy.abs() < 36.0 {
-                p.hp -= mob.touch_damage;
-                p.hurt_t = HURT_DURATION;
-                p.invuln_t = INVULN_DURATION;
-                p.anim = PlayerAnim::Hurt;
-                p.x += dx.signum() * 40.0;
+                let knock_dir = if dx.abs() < 0.01 {
+                    mob.vx.signum()
+                } else {
+                    dx.signum()
+                };
+                hit = Some((mob.touch_damage, knock_dir));
                 break;
             }
         }
+        let Some((damage, knock_dir)) = hit else {
+            return;
+        };
+
+        let p = &mut self.state.player;
+        p.hp -= damage;
+        p.hurt_t = HURT_DURATION;
+        p.invuln_t = INVULN_DURATION;
+        p.anim = PlayerAnim::Hurt;
+        p.x = Self::safe_hurt_knockback_x(&self.map, p.x, p.y, knock_dir);
+    }
+
+    /// 受击水平击退：仅当落点仍在脚下平台时才位移，避免角落被顶出平台坠亡。
+    fn safe_hurt_knockback_x(map: &GameMap, x: f32, feet_y: f32, knock_dir: f32) -> f32 {
+        const KNOCK_DIST: f32 = 40.0;
+        const GROUND_PROBE: f32 = 64.0;
+        if knock_dir.abs() < 0.01 {
+            return x;
+        }
+        let proposed = x + knock_dir * KNOCK_DIST;
+        if map.stand_at(proposed, feet_y + 40.0, GROUND_PROBE).is_some() {
+            if let Some((lo, hi)) = map.platform_span_at(x, feet_y) {
+                const BODY_INSET: f32 = 4.0;
+                return proposed.clamp(lo + BODY_INSET, hi - BODY_INSET);
+            }
+            let (px_lo, px_hi) = map.playable_x_bounds();
+            return proposed.clamp(px_lo, px_hi);
+        }
+        x
     }
 
     fn tick_mobs(&mut self, dt: f32) {
@@ -795,15 +855,25 @@ impl GameSim {
                 DropKind::Meso => {
                     let amount = self.rng.gen_range(1..=5);
                     if self.config.training {
-                        self.fitness
-                            .try_score_pickup(DropKind::Meso, drop.x, drop.y, amount);
+                        self.fitness.try_score_pickup(
+                            DropKind::Meso,
+                            drop.x,
+                            drop.y,
+                            amount,
+                            self.state.tick,
+                        );
                     }
                     self.state.meso += amount;
                 }
                 DropKind::RedPotion => {
                     if self.config.training {
-                        self.fitness
-                            .try_score_pickup(DropKind::RedPotion, drop.x, drop.y, 0);
+                        self.fitness.try_score_pickup(
+                            DropKind::RedPotion,
+                            drop.x,
+                            drop.y,
+                            0,
+                            self.state.tick,
+                        );
                     }
                     self.state.potions += 1;
                 }
@@ -1004,7 +1074,7 @@ mod control_tests {
         let map = load_default_map().expect("default map");
         let s = GameSim::new_training(map, 99);
         assert_eq!(s.state.potions, 0);
-        assert_eq!(s.npc_players.len(), 4);
+        assert_eq!(s.npc_players.len(), TRAINING_NPC_COUNT);
     }
 
     #[test]
@@ -1014,6 +1084,41 @@ mod control_tests {
         s.state.player.hp = 0;
         s.tick(&InputFrame::default());
         assert!(s.is_episode_over());
+    }
+
+    #[test]
+    fn training_idle_forfeit_ends_episode() {
+        use crate::game::input::InputFrame;
+        use crate::game::fitness::{IDLE_FORFEIT_GRACE_TICKS, STAGNATION_TICKS};
+
+        let map = load_default_map().expect("default map");
+        let mut s = GameSim::new_training(map, 7);
+        let noop = InputFrame::default();
+        for _ in 0..(IDLE_FORFEIT_GRACE_TICKS as usize + STAGNATION_TICKS as usize + 2) {
+            s.tick_with_action(&noop);
+            if s.is_episode_over() {
+                break;
+            }
+        }
+        assert!(s.is_episode_over());
+        assert!(s.fitness.idle_forfeit);
+    }
+
+    #[test]
+    fn safe_hurt_knockback_stays_on_ground() {
+        let map = load_default_map().expect("default map");
+        let s = GameSim::new_training(map.clone(), 1);
+        let x = s.state.player.x;
+        let y = s.state.player.y;
+        for dir in [-1.0_f32, 1.0] {
+            let proposed = x + dir * 40.0;
+            let result = GameSim::safe_hurt_knockback_x(&map, x, y, dir);
+            if map.stand_at(proposed, y + 40.0, 64.0).is_none() {
+                assert_eq!(result, x, "knockback off platform should not move player");
+            } else {
+                assert!((result - proposed).abs() < 0.01);
+            }
+        }
     }
 
     #[test]

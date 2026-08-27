@@ -1,6 +1,7 @@
 pub mod action;
 pub mod camera;
 pub mod config;
+pub mod self_anchor;
 pub mod fitness;
 pub mod input;
 pub mod map;
@@ -15,9 +16,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-pub use action::{action_to_input, actions_from_bits, Action};
+pub use action::{action_to_input, actions_from_bits, input_label, Action, NEAT_OUTPUT_BUTTONS};
 pub use camera::WorldCamera;
-pub use config::{GameSimConfig, TrainingPaceConfig};
+pub use config::{GameSimConfig, TrainingPaceConfig, VisionAnchorConfig, VisionAnchorMode};
+pub use self_anchor::{episode_anchor_offset, find_self_player_by_sim};
 pub use fitness::{FitnessShapingConfig, TrainingFitness};
 pub use input::InputFrame;
 pub use map::{GameMap, Portal};
@@ -27,9 +29,9 @@ pub use sim::{GameModal, GameSim, GameState, GroundTruth, MobState, PlayerState}
 pub use types::{
     DropKind, MobAnim, PlayerAnim, ATTACK_DURATION, DEFAULT_PLAYER_NAME, LOGIC_DT, LOGIC_HZ,
     NAME_TAG_BG_ALPHA, NAME_TAG_FONT_SIZE, NAME_TAG_GAP_BELOW_FEET, NAME_TAG_PAD_X, NAME_TAG_PAD_Y,
-    TRAINING_NPC_SPRITES, WINDOW_H, WINDOW_W, WORLD_VIEW_H,
+    TRAINING_NPC_COUNT, TRAINING_NPC_SPRITES, WINDOW_H, WINDOW_W, WORLD_VIEW_H,
 };
-pub use vision::{assert_training_frame, filter_detections, VisionPipeline, VisionStep};
+pub use vision::{assert_training_frame, filter_detections, SimVisionSnapshot, VisionPipeline, VisionStep};
 
 pub fn assets_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets")

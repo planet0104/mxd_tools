@@ -67,9 +67,8 @@ impl EvalProfileReport {
             };
             eprintln!("\n--- 感知 tick 均值（共 {} 次）---", vision_ticks.len());
             eprintln!(
-                "  GL draw={:.2}ms  present(next_frame)={:.2}ms  readback={:.2}ms  render合计={:.2}ms",
+                "  GL draw={:.2}ms  readback={:.2}ms  render合计={:.2}ms（headless 无 next_frame）",
                 avg(|t| t.render.as_ref().map(|r| r.draw_ms).unwrap_or(0.0)),
-                avg(|t| t.render.as_ref().map(|r| r.present_ms).unwrap_or(0.0)),
                 avg(|t| t.render.as_ref().map(|r| r.readback_ms).unwrap_or(0.0)),
                 avg(|t| t.render.as_ref().map(|r| r.total_ms).unwrap_or(0.0)),
             );

@@ -46,6 +46,15 @@ pub struct TrainingCheckpoint {
     /// 创新号映射；旧检查点缺省时从 `population` 重建。
     #[serde(default)]
     pub innovation: super::genome::InnovationState,
+    /// 已完成评估的个体数（持续进化模式进度）。
+    #[serde(default)]
+    pub spawns_completed: u32,
+    /// 下一个待分配的出生编号（`0..total_spawn_target`）。
+    #[serde(default)]
+    pub next_spawn_id: u32,
+    /// 训练目标个体总数（CLI `--generations`）。
+    #[serde(default)]
+    pub total_spawn_target: u32,
 }
 
 impl Population {
@@ -73,6 +82,17 @@ impl Population {
     }
 
     pub fn update_best(&mut self) {
+        self.update_best_with(None);
+    }
+
+    /// 用指定基因组或当前种群成员更新 `best_ever`。
+    pub fn update_best_with(&mut self, candidate: Option<&Genome>) {
+        if let Some(g) = candidate {
+            if g.fitness > self.best_ever.fitness {
+                self.best_ever = g.clone();
+            }
+            return;
+        }
         let best = self
             .species
             .iter()
@@ -83,6 +103,111 @@ impl Population {
                 self.best_ever = g.clone();
             }
         }
+    }
+
+    /// 单个体评估结束后写入种群（物种归类 + 裁剪规模 + 虚拟代计数）。
+    pub fn on_eval_complete(&mut self, genome: Genome) {
+        self.update_best_with(Some(&genome));
+        let compat = self.config.compat;
+        if let Some(sp) = self
+            .species
+            .iter_mut()
+            .find(|sp| sp.representative.compatibility_distance(&genome, &compat) < compat.threshold)
+        {
+            sp.members.push(genome);
+            if let Some(rep) = sp
+                .members
+                .iter()
+                .max_by(|a, b| a.fitness.partial_cmp(&b.fitness).unwrap())
+            {
+                sp.representative = rep.clone();
+            }
+        } else {
+            let fitness = genome.fitness;
+            self.species.push(Species {
+                representative: genome.clone(),
+                members: vec![genome],
+                stale: 0,
+                best: fitness,
+            });
+        }
+        self.trim_to_size();
+        self.cull_stale();
+    }
+
+    /// 从当前已评估个体中繁殖一个后代，供下一槽位立即开跑。
+    pub fn spawn_offspring<R: Rng + ?Sized>(&mut self, rng: &mut R, spawn_index: u32) -> Genome {
+        let pool: Vec<Genome> = self.genomes().cloned().collect();
+        if pool.is_empty() || pool.iter().all(|g| g.fitness == 0.0) {
+            return Genome::random_minimal(rng);
+        }
+        if spawn_index > 0 && rng.gen::<f32>() < FRESH_FRACTION {
+            return Genome::random_minimal(rng);
+        }
+        let parent_a = tournament_pick(&pool, rng);
+        let mut child = if rng.gen_bool(0.75) && pool.len() > 1 {
+            let parent_b = tournament_pick(&pool, rng);
+            crossover(parent_a, parent_b, rng)
+        } else {
+            parent_a.clone()
+        };
+        mutate(&mut child, rng);
+        child.fitness = 0.0;
+        child.adjusted_fitness = 0.0;
+        child
+    }
+
+    /// 每完成 `config.size` 次评估，虚拟代 +1（日志/检查点用）。
+    pub fn bump_virtual_generation(&mut self, spawns_completed: u32) {
+        let epoch = spawns_completed / self.config.size.max(1) as u32;
+        self.generation = epoch;
+    }
+
+    fn trim_to_size(&mut self) {
+        let mut all: Vec<Genome> = self.genomes().cloned().collect();
+        if all.len() <= self.config.size {
+            return;
+        }
+        all.sort_by(|a, b| {
+            b.fitness
+                .partial_cmp(&a.fitness)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        all.truncate(self.config.size);
+        self.species = speciate(all, &self.config.compat);
+    }
+
+    /// 续训时调整种群规模：保留现有基因组，不足则交叉变异补齐。
+    pub fn resize_to<R: Rng + ?Sized>(&mut self, new_size: usize, rng: &mut R) {
+        if new_size == self.config.size {
+            return;
+        }
+        self.config.size = new_size;
+        let mut flat: Vec<Genome> = self.genomes().cloned().collect();
+        if flat.is_empty() {
+            flat.push(self.best_ever.clone());
+        }
+        flat.sort_by(|a, b| b.fitness.partial_cmp(&a.fitness).unwrap());
+
+        if new_size < flat.len() {
+            flat.truncate(new_size);
+        } else {
+            while flat.len() < new_size {
+                let parent_a = tournament_pick(&flat, rng);
+                let child = if rng.gen_bool(0.75) {
+                    let parent_b = tournament_pick(&flat, rng);
+                    crossover(parent_a, parent_b, rng)
+                } else {
+                    parent_a.clone()
+                };
+                let mut child = child;
+                mutate(&mut child, rng);
+                child.fitness = 0.0;
+                child.adjusted_fitness = 0.0;
+                flat.push(child);
+            }
+        }
+        self.species = speciate(flat, &self.config.compat);
     }
 
     pub fn evolve<R: Rng + ?Sized>(&mut self, rng: &mut R) {
@@ -120,16 +245,7 @@ impl Population {
         }
 
         while children.len() < self.config.size {
-            let parent_a = tournament_pick(&flat, rng);
-            let child = if rng.gen_bool(0.75) {
-                let parent_b = tournament_pick(&flat, rng);
-                crossover(parent_a, parent_b, rng)
-            } else {
-                parent_a.clone()
-            };
-            let mut child = child;
-            mutate(&mut child, rng);
-            child.fitness = 0.0;
+            let child = self.spawn_offspring(rng, children.len() as u32);
             children.push(child);
         }
 

@@ -63,6 +63,49 @@ pub fn decode_yolo_output_flat(
     nms(candidates, iou_thres)
 }
 
+/// 批量 YOLO 输出解码：shape `[N, 4+nc, num_anchors]`。
+pub fn decode_yolo_batch_output(
+    shape: &[i64],
+    data: &[f32],
+    metas: &[LetterboxMeta],
+    conf_thres: f32,
+    iou_thres: f32,
+) -> Vec<Vec<Detection>> {
+    let (batch, channels, num) = match shape {
+        [b, c, n] => (*b as usize, *c as usize, *n as usize),
+        [b, _, c, n] if shape.len() == 4 => (*b as usize, *c as usize, *n as usize),
+        _ => return vec![],
+    };
+    if batch == 0 || channels < 5 || num == 0 {
+        return vec![];
+    }
+    let plane = channels * num;
+    let mut out = Vec::with_capacity(batch);
+    for b in 0..batch {
+        let start = b * plane;
+        if start + plane > data.len() {
+            out.push(Vec::new());
+            continue;
+        }
+        let slice = &data[start..start + plane];
+        let meta = metas.get(b).copied().unwrap_or(LetterboxMeta {
+            gain: 1.0,
+            pad_x: 0.0,
+            pad_y: 0.0,
+            orig_w: 0,
+            orig_h: 0,
+        });
+        out.push(decode_yolo_output_flat(
+            &[1, channels as i64, num as i64],
+            slice,
+            &meta,
+            conf_thres,
+            iou_thres,
+        ));
+    }
+    out
+}
+
 /// Ultralytics YOLO 输出: shape [1, 4+nc, num_anchors]，如 [1, 23, 8400]。
 pub fn decode_yolo_output(
     output: &ndarray::ArrayD<f32>,

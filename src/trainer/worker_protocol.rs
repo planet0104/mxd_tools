@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::neat::Genome;
 
-/// 主进程 → worker：评估任务。
+/// 主进程 → worker：单基因组评估任务。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerJobRequest {
     pub job_idx: usize,

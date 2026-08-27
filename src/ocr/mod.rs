@@ -2,11 +2,13 @@
 
 mod det;
 mod paddle;
+mod runtime;
 
 use anyhow::Result;
 use image::RgbImage;
 
 pub use det::TextBox;
+pub use runtime::OcrRuntime;
 
 /// 在图像中检测文本行区域。
 pub fn detect_text_boxes(img: &RgbImage) -> Result<Vec<TextBox>> {

@@ -1,0 +1,199 @@
+# NEAT training monitor: 30min interval; on stall/crash restart with pop=10 fallback.
+param(
+    [int]$IntervalMin = 30,
+    [int]$StuckMinutes = 45,
+    [int]$ZeroFitChecks = 8,
+    [int]$DefaultPop = 10,
+    [int]$FallbackPop = 10,
+    [int]$TotalGenerations = 2000,
+    [string]$ProjectRoot = (Split-Path $PSScriptRoot -Parent)
+)
+
+$ErrorActionPreference = "Continue"
+$LogDir = Join-Path $ProjectRoot "tmp"
+$MonitorLog = Join-Path $LogDir "train_monitor.log"
+$TrainLog = Join-Path $LogDir "neat_train_2000.log"
+$Checkpoint = Join-Path $LogDir "neat_checkpoint.json"
+$BestGenome = Join-Path $LogDir "neat_best_genome.json"
+$StateFile = Join-Path $LogDir "train_monitor_state.json"
+$PidFile = Join-Path $LogDir "neat_train.pid"
+
+function Write-Mon([string]$Msg) {
+    $line = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] $Msg"
+    Add-Content -Path $MonitorLog -Value $line -Encoding UTF8
+    Write-Host $line
+}
+
+function Get-TrainerProcs {
+    Get-Process -Name "neat_trainer" -ErrorAction SilentlyContinue
+}
+
+function Read-Json([string]$Path) {
+    if (-not (Test-Path $Path)) { return $null }
+    try { Get-Content $Path -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $null }
+}
+
+function Get-Snapshot {
+    $ck = Read-Json $Checkpoint
+    $best = Read-Json $BestGenome
+    $gen = if ($ck -and $ck.population) { [int]$ck.population.generation } else { -1 }
+    $pop = if ($ck -and $ck.population -and $ck.population.config) { [int]$ck.population.config.size } else { -1 }
+    $fit = if ($best -and $null -ne $best.fitness) { [double]$best.fitness } else { 0.0 }
+    $logAgeMin = if (Test-Path $TrainLog) {
+        ((Get-Date) - (Get-Item $TrainLog).LastWriteTime).TotalMinutes
+    } else { 9999.0 }
+    @{ Gen = $gen; Pop = $pop; Fit = $fit; LogAgeMin = $logAgeMin }
+}
+
+function Load-State {
+    $s = Read-Json $StateFile
+    if (-not $s) {
+        return @{
+            LastGen = -1
+            LastFit = 0.0
+            LastProgressUtc = (Get-Date).ToUniversalTime().ToString("o")
+            ZeroStreak = 0
+            Population = $DefaultPop
+        }
+    }
+    @{
+        LastGen = [int]$s.LastGen
+        LastFit = [double]$s.LastFit
+        LastProgressUtc = [string]$s.LastProgressUtc
+        ZeroStreak = [int]$s.ZeroStreak
+        Population = if ($null -ne $s.Population) { [int]$s.Population } else { $DefaultPop }
+    }
+}
+
+function Save-State($state) {
+    @{
+        LastGen = $state.LastGen
+        LastFit = $state.LastFit
+        LastProgressUtc = $state.LastProgressUtc
+        ZeroStreak = $state.ZeroStreak
+        Population = $state.Population
+    } | ConvertTo-Json | Set-Content $StateFile -Encoding UTF8
+}
+
+function Get-RemainingGenerations {
+    $ck = Read-Json $Checkpoint
+    if ($ck -and $ck.population) {
+        $done = [int]$ck.population.generation
+        $rem = $TotalGenerations - $done
+        if ($rem -lt 1) { return 1 }
+        return $rem
+    }
+    return $TotalGenerations
+}
+
+function Stop-Training {
+    Write-Mon "stop neat_trainer"
+    Get-TrainerProcs | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 4
+    if (Test-Path $PidFile) { Remove-Item $PidFile -Force -ErrorAction SilentlyContinue }
+}
+
+function Start-Training {
+    param(
+        [int]$Population,
+        [switch]$Fresh,
+        [string]$Reason = ""
+    )
+    Stop-Training
+    $gens = Get-RemainingGenerations
+    $tag = if ($Reason) { " ($Reason)" } else { "" }
+    Write-Mon "start training pop=$Population gens=$gens$tag log=$TrainLog"
+    $exe = Join-Path $ProjectRoot "target\release\neat_trainer.exe"
+    if (-not (Test-Path $exe)) {
+        Write-Mon "build neat_trainer"
+        Push-Location $ProjectRoot
+        cargo build --release --bin neat_trainer 2>&1 | Add-Content $TrainLog
+        Pop-Location
+    }
+    $cmd = "`"$exe`" --generations $gens --population $Population --pace 12 --max-ticks 18000"
+    if ($Fresh) { $cmd = $cmd + " --fresh" }
+    $cmd = $cmd + " >> `"$TrainLog`" 2>&1"
+    $p = Start-Process -FilePath "cmd.exe" -ArgumentList "/c", $cmd -WorkingDirectory $ProjectRoot -PassThru -WindowStyle Hidden
+    $p.Id | Set-Content $PidFile -Encoding ASCII
+    Write-Mon "train pid=$($p.Id)"
+}
+
+New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+Write-Mon "monitor start interval=${IntervalMin}min defaultPop=$DefaultPop fallbackPop=$FallbackPop"
+
+$state = Load-State
+if (-not (Get-TrainerProcs)) {
+    $needFresh = -not (Test-Path $Checkpoint)
+    if (-not $needFresh) {
+        $ck = Read-Json $Checkpoint
+        if ($ck -and $ck.population -and [int]$ck.population.generation -lt 2) {
+            $needFresh = $true
+        }
+    }
+    Start-Training -Population $state.Population -Fresh:$needFresh -Reason "no process"
+} else {
+    Write-Mon "neat_trainer already running procs=$((Get-TrainerProcs).Count)"
+}
+Start-Sleep -Seconds 20
+
+while ($true) {
+    $snap = Get-Snapshot
+    $alive = [bool](Get-TrainerProcs)
+    Write-Mon "check alive=$alive gen=$($snap.Gen) pop=$($snap.Pop) best=$($snap.Fit) logAge=$([math]::Round($snap.LogAgeMin,1))min zero=$($state.ZeroStreak) targetPop=$($state.Population)"
+
+    $progress = ($snap.Gen -gt $state.LastGen) -or ($snap.Fit -gt ($state.LastFit + 0.01))
+    if ($progress) {
+        $state.LastGen = $snap.Gen
+        $state.LastFit = $snap.Fit
+        $state.LastProgressUtc = (Get-Date).ToUniversalTime().ToString("o")
+        $state.ZeroStreak = 0
+        Write-Mon "progress gen=$($snap.Gen) best=$($snap.Fit)"
+    } elseif ($snap.Gen -ge 3 -and $snap.Fit -le 0.01) {
+        $state.ZeroStreak++
+        Write-Mon "warn fitness~0 streak=$($state.ZeroStreak)/$ZeroFitChecks"
+    }
+
+    $stuckMin = ((Get-Date).ToUniversalTime() - [datetime]::Parse($state.LastProgressUtc).ToUniversalTime()).TotalMinutes
+    $logStuck = $alive -and ($snap.LogAgeMin -ge $StuckMinutes)
+    $restart = $false
+    $why = ""
+    $useFallbackPop = $false
+
+    if ($snap.Gen -ge 1999 -and -not $alive) {
+        Write-Mon "done gen=$($snap.Gen) best=$($snap.Fit)"
+        Save-State $state
+        break
+    }
+    if (-not $alive) {
+        $restart = $true
+        $why = "process exited"
+        $useFallbackPop = $true
+    } elseif ($logStuck) {
+        $restart = $true
+        $why = "log no update ${StuckMinutes}min"
+        $useFallbackPop = $true
+    } elseif ($stuckMin -ge $StuckMinutes) {
+        $restart = $true
+        $why = "checkpoint no progress ${StuckMinutes}min"
+        $useFallbackPop = $true
+    } elseif ($state.ZeroStreak -ge $ZeroFitChecks) {
+        $restart = $true
+        $why = "fitness stuck at zero"
+        $useFallbackPop = $true
+    }
+
+    if ($restart) {
+        if ($useFallbackPop -and $state.Population -gt $FallbackPop) {
+            $state.Population = $FallbackPop
+            Write-Mon "fallback pop -> $FallbackPop"
+        }
+        Write-Mon "restart: $why"
+        Start-Training -Population $state.Population -Reason $why
+        $state.LastProgressUtc = (Get-Date).ToUniversalTime().ToString("o")
+        $state.ZeroStreak = 0
+    }
+    Save-State $state
+    Start-Sleep -Seconds ($IntervalMin * 60)
+}
+
+Write-Mon "monitor end"

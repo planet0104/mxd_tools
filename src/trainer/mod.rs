@@ -16,8 +16,11 @@ pub use eval::{
 };
 pub use profile::{EvalProfileReport, RenderStepTiming, TickProfile};
 pub use progress::{
-    log_pool_heartbeat, EvalProgressConfig, EvalStatus, HEARTBEAT_INTERVAL,
+    log_pool_heartbeat, log_steady_heartbeat, EvalProgressConfig, EvalStatus, HEARTBEAT_INTERVAL,
 };
 pub use log::{log_line, ts};
-pub use render::{capture_render_rgb, capture_render_rgb_fast, capture_render_rgb_timed};
+pub use render::{
+    capture_render_rgb, capture_render_rgb_fast, capture_render_rgb_headless,
+    capture_render_rgb_headless_timed, capture_render_rgb_timed, present_training_frame,
+};
 pub use worker_pool::{WorkerPool, WorkerPoolConfig};

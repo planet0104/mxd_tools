@@ -11,6 +11,8 @@ use super::genome::Genome;
 use super::population::Population;
 
 pub const DEFAULT_BEST_GENOME_FILE: &str = "tmp/neat_best_genome.json";
+/// 当前适应度规则下的 session 最优（不受历史 `neat_best_genome.json` 124.5 门槛影响）。
+pub const DEFAULT_SESSION_BEST_FILE: &str = "tmp/neat_session_best.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BestGenomeSnapshot {
@@ -79,6 +81,24 @@ pub fn save_best_if_improved(
         path.display()
     ));
     Ok(true)
+}
+
+/// 写入本 session / 本套适应度规则下的最优个体（供 preview 与续训对照）。
+pub fn save_session_best(
+    path: &Path,
+    genome: &Genome,
+    generation: u32,
+    training_seed: u64,
+) -> Result<()> {
+    let snap = BestGenomeSnapshot::from_genome(genome.clone(), generation, training_seed);
+    snap.save_atomic(path)?;
+    crate::trainer::log_line(format!(
+        "本规则最优已更新: fitness={:.2} gen={} → {}",
+        snap.fitness,
+        snap.generation,
+        path.display()
+    ));
+    Ok(())
 }
 
 #[cfg(test)]

@@ -1,14 +1,19 @@
 //! 可视化回放 NEAT 最优个体（与 `neat_trainer` 独立进程，可边训练边预览）。
 //!
+//! 视觉为本地 **CPU** YOLO+OCR（ONNX），与训练路径相同。
+//!
 //! ```powershell
 //! # 训练（另开终端）
-//! cargo run --release --bin neat_trainer -- --fresh --generations 100 --population 50 --pace 4
+//! cargo run --release --bin neat_trainer -- --generations 100 --population 10 --pace 4
 //!
-//! # 预览最优个体（热加载 tmp/neat_best_genome.json）
+//! # 预览最优个体（热加载 tmp/neat_best_genome.json，CPU 视觉）
 //! cargo run --release --bin neat_preview
 //! cargo run --release --bin neat_preview -- --pace 4 --no-watch
-//! cargo run --release --bin neat_preview -- --pace 1   # 全帧感知，CPU 上视觉线程仍慢但不卡模拟
+//! cargo run --release --bin neat_preview -- --pace 1   # 全帧感知
+//! cargo run --release --bin neat_preview -- --quiet    # 关闭事件日志
 //! ```
+
+mod preview_log;
 
 use std::env;
 use std::fs;
@@ -18,12 +23,14 @@ use std::time::SystemTime;
 use macroquad::prelude::*;
 use mxd_tools::game::view;
 use mxd_tools::game::{
-    self, action_to_input, Action, GameSim, LOGIC_DT, NEAT_CONF_THRESH, TrainingPaceConfig,
-    VisionPipeline, WINDOW_H, WINDOW_W,
+    self, GameSim, LOGIC_DT, NEAT_CONF_THRESH, TrainingPaceConfig, VisionPipeline, WINDOW_H,
+    WINDOW_W,
 };
-use mxd_tools::neat::{BestGenomeSnapshot, DEFAULT_BEST_GENOME_FILE};
+use mxd_tools::neat::{BestGenomeSnapshot, DEFAULT_BEST_GENOME_FILE, DEFAULT_SESSION_BEST_FILE};
 use mxd_tools::trainer::AgentController;
 use mxd_tools::yolo::YoloDevice;
+
+use preview_log::PreviewEventLog;
 
 fn window_conf() -> Conf {
     Conf {
@@ -42,15 +49,22 @@ struct Cli {
     episode_seed: u64,
     pace: TrainingPaceConfig,
     watch: bool,
+    quiet: bool,
 }
 
 impl Cli {
     fn parse(args: &[String]) -> Self {
         let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let pace_ticks = arg_u32(args, "--pace", 4);
+        let pace_ticks = arg_u32(args, "--pace", 12);
         Self {
-            genome: arg_path(args, "--genome")
-                .unwrap_or_else(|| manifest.join(DEFAULT_BEST_GENOME_FILE)),
+            genome: arg_path(args, "--genome").unwrap_or_else(|| {
+                let session = manifest.join(DEFAULT_SESSION_BEST_FILE);
+                if session.is_file() {
+                    session
+                } else {
+                    manifest.join(DEFAULT_BEST_GENOME_FILE)
+                }
+            }),
             model: arg_path(args, "--model")
                 .unwrap_or_else(|| manifest.join("models/yolo_nangang_e3000_best.onnx")),
             episode_seed: arg_u64(args, "--seed", 0),
@@ -58,6 +72,7 @@ impl Cli {
                 vision_interval_ticks: pace_ticks.max(1),
             },
             watch: !args.iter().any(|a| a == "--no-watch"),
+            quiet: args.iter().any(|a| a == "--quiet"),
         }
     }
 }
@@ -65,10 +80,11 @@ impl Cli {
 struct PreviewState {
     snapshot: BestGenomeSnapshot,
     sim: GameSim,
-    last_action: Action,
     logic_tick: u32,
     episode_seed: u64,
     restart_cooldown: f32,
+    episode_over_logged: bool,
+    last_logged_vision_tick: Option<u32>,
 }
 
 impl PreviewState {
@@ -77,10 +93,11 @@ impl PreviewState {
         Self {
             snapshot,
             sim,
-            last_action: Action::Noop,
             logic_tick: 0,
             episode_seed,
             restart_cooldown: 0.0,
+            episode_over_logged: false,
+            last_logged_vision_tick: None,
         }
     }
 
@@ -91,12 +108,13 @@ impl PreviewState {
             self.episode_seed
         };
         *self = Self::new(snapshot, map, seed);
+        self.episode_over_logged = false;
+        self.last_logged_vision_tick = None;
     }
 
     fn restart_episode(&mut self, map: &game::GameMap) {
         let seed = self.episode_seed.wrapping_add(self.logic_tick as u64);
         self.sim = GameSim::new_training(map.clone(), seed);
-        self.last_action = Action::Noop;
         self.logic_tick = 0;
         self.restart_cooldown = 0.0;
     }
@@ -122,21 +140,6 @@ fn arg_path(args: &[String], key: &str) -> Option<PathBuf> {
     arg_value(args, key).map(PathBuf::from)
 }
 
-fn begin_logical_viewport() {
-    let sw = screen_width();
-    let sh = screen_height();
-    let scale = f32::min(sw / WINDOW_W, sh / WINDOW_H);
-    let vw = (WINDOW_W * scale).round();
-    let vh = (WINDOW_H * scale).round();
-    let ox = ((sw - vw) * 0.5).round() as i32;
-    let oy_top = ((sh - vh) * 0.5).round() as i32;
-    let oy = sh.round() as i32 - oy_top - vh as i32;
-
-    let mut cam = view::logical_camera();
-    cam.viewport = Some((ox, oy, vw as i32, vh as i32));
-    set_camera(&cam);
-}
-
 fn file_mtime(path: &PathBuf) -> Option<SystemTime> {
     fs::metadata(path).ok().and_then(|m| m.modified().ok())
 }
@@ -156,14 +159,18 @@ async fn main() {
     };
 
     eprintln!(
-        "预览: fitness={:.2} gen={} pace={} watch={} file={}",
+        "预览: fitness={:.2} gen={} pace={} watch={} log={} file={}",
         snapshot.fitness,
         snapshot.generation,
         cli.pace.vision_interval_ticks,
         cli.watch,
+        !cli.quiet,
         cli.genome.display()
     );
-    eprintln!("视觉+NEAT 在后台线程运行，游戏模拟与绘制保持 60Hz");
+    eprintln!("按 R 重开本局；训练时默认热加载最优基因组");
+    if !cli.quiet {
+        eprintln!("事件日志: 战斗/掉落/拾取/NEAT决策 → stderr（--quiet 关闭）");
+    }
 
     let assets = match view::load_view_assets().await {
         Ok(a) => a,
@@ -196,6 +203,8 @@ async fn main() {
     };
 
     let mut state = PreviewState::new(snapshot.clone(), &map, episode_seed);
+    let mut event_log = PreviewEventLog::new(!cli.quiet);
+    event_log.begin_episode(&state.sim, episode_seed, snapshot.fitness);
     let mut agent = AgentController::spawn(pipeline, snapshot.genome);
     let rt = view::new_render_target();
     let mut acc = 0.0_f32;
@@ -221,8 +230,17 @@ async fn main() {
                                 "热加载最优基因组: fitness={:.2} gen={}",
                                 new_snap.fitness, new_snap.generation
                             );
+                            if !state.sim.is_episode_over() {
+                                event_log.end_episode(&state.sim, "热加载新基因组");
+                            }
                             agent.set_genome(new_snap.genome.clone());
-                            state.reload(new_snap, &map);
+                            state.reload(new_snap.clone(), &map);
+                            event_log.begin_episode(
+                                &state.sim,
+                                state.episode_seed,
+                                new_snap.fitness,
+                            );
+                            state.last_logged_vision_tick = None;
                             next_vision_at = 0;
                             pending_vision_capture = false;
                         }
@@ -234,17 +252,58 @@ async fn main() {
         frame_counter = frame_counter.wrapping_add(1);
 
         if is_key_pressed(KeyCode::R) {
+            if !state.sim.is_episode_over() {
+                state.sim.fitness.finalize_episode();
+                event_log.end_episode(&state.sim, "手动重开(R)");
+            }
             state.restart_episode(&map);
+            event_log.begin_episode(
+                &state.sim,
+                state.episode_seed.wrapping_add(state.logic_tick as u64),
+                state.snapshot.fitness,
+            );
+            state.last_logged_vision_tick = None;
+            state.episode_over_logged = false;
             next_vision_at = 0;
             pending_vision_capture = false;
         }
 
+        let vision_tick_before = agent.last_applied_tick();
         agent.poll(&mut state.sim);
+        if let Some(vtick) = agent.last_applied_tick() {
+            if vision_tick_before != Some(vtick)
+                && state.last_logged_vision_tick != Some(vtick)
+            {
+                if let Some(vision) = agent.vision() {
+                    event_log.on_neat_decision(
+                        vtick,
+                        &agent.input(),
+                        vision,
+                        agent.last_neat_outputs(),
+                    );
+                }
+                state.last_logged_vision_tick = Some(vtick);
+            }
+        }
 
         if state.sim.is_episode_over() {
+            if !state.episode_over_logged {
+                state.sim.fitness.finalize_episode();
+                let reason = if state.sim.fitness.idle_forfeit {
+                    "停滞早停"
+                } else {
+                    "HP归零"
+                };
+                event_log.end_episode(&state.sim, reason);
+                state.episode_over_logged = true;
+            }
             state.restart_cooldown -= dt;
             if state.restart_cooldown <= 0.0 {
+                let seed = state.episode_seed.wrapping_add(state.logic_tick as u64);
                 state.restart_episode(&map);
+                event_log.begin_episode(&state.sim, seed, state.snapshot.fitness);
+                state.last_logged_vision_tick = None;
+                state.episode_over_logged = false;
                 next_vision_at = 0;
                 pending_vision_capture = false;
                 state.restart_cooldown = 1.5;
@@ -258,9 +317,9 @@ async fn main() {
             }
 
             while acc >= LOGIC_DT {
-                let action = agent.action();
-                state.last_action = action;
-                state.sim.tick(&action_to_input(action));
+                let input = agent.input();
+                state.sim.tick(&input);
+                event_log.after_tick(state.logic_tick, &input, &state.sim);
                 state.logic_tick = state.logic_tick.wrapping_add(1);
                 acc -= LOGIC_DT;
 
@@ -277,54 +336,16 @@ async fn main() {
         }
 
         clear_background(Color::new(0.05, 0.05, 0.08, 1.0));
-        begin_logical_viewport();
+        view::begin_logical_viewport();
         view::draw_content(&assets, &state.sim);
-        if let Some(step) = agent.vision() {
-            view::draw_yolo_overlay(&step.detections, NEAT_CONF_THRESH);
-            if let Some(hit) = step.self_player.as_ref() {
-                view::draw_self_player_marker(hit);
-            }
-        }
         set_default_camera();
-        draw_hud(&state, &cli, agent.action());
 
         next_frame().await;
 
         if pending_vision_capture {
             let rgb = view::render_target_to_rgb(&rt);
-            agent.try_submit_frame(pending_vision_tick, rgb);
+            agent.try_submit_frame(pending_vision_tick, rgb, Some(state.sim.vision_snapshot()));
             pending_vision_capture = false;
         }
-    }
-}
-
-fn draw_hud(state: &PreviewState, cli: &Cli, action: Action) {
-    let over = state.sim.is_episode_over();
-    let lines = [
-        format!("NEAT 预览  fitness={:.1}", state.snapshot.fitness),
-        format!(
-            "代={}  tick={}  action={}  score={:.1}",
-            state.snapshot.generation,
-            state.logic_tick,
-            action.label(),
-            state.sim.fitness.score
-        ),
-        format!(
-            "pace={}  watch={}  [R]重开  (视觉后台)",
-            cli.pace.vision_interval_ticks,
-            cli.watch
-        ),
-    ];
-    for (i, line) in lines.iter().enumerate() {
-        draw_text(line, 12.0, 22.0 + i as f32 * 20.0, 18.0, WHITE);
-    }
-    if over {
-        draw_text(
-            "Game Over — 即将重开",
-            12.0,
-            screen_height() - 28.0,
-            20.0,
-            Color::new(1.0, 0.35, 0.35, 1.0),
-        );
     }
 }

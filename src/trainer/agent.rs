@@ -1,7 +1,4 @@
-//! 游戏主线程与 YOLO+OCR+NEAT 决策线程解耦。
-//!
-//! 主线程：渲染、读 RGB、按 60Hz `sim.tick`。
-//! 后台线程：`perceive` → NEAT 前向 → 回传 `Action` 与 `VisionStep`（非阻塞）。
+//! 游戏主线程与 YOLO+OCR+NEAT 决策线程解耦（本地 CPU 视觉）。
 
 use std::sync::{Arc, RwLock};
 use std::thread::{self, JoinHandle};
@@ -9,9 +6,9 @@ use std::time::{Duration, Instant};
 
 use image::RgbImage;
 
-use crate::game::action::Action;
-use crate::game::{GameSim, VisionPipeline, VisionStep};
-use crate::neat::{action_from_outputs, evaluate, Genome};
+use crate::game::InputFrame;
+use crate::game::{GameSim, SimVisionSnapshot, VisionPipeline, VisionStep};
+use crate::neat::{evaluate, input_from_outputs, Genome};
 
 const FRAME_QUEUE: usize = 2;
 
@@ -20,6 +17,7 @@ enum FrameMsg {
         tick: u32,
         rgb: RgbImage,
         submitted_ns: u64,
+        sim_snapshot: Option<SimVisionSnapshot>,
     },
     Shutdown,
 }
@@ -36,22 +34,22 @@ pub struct VisionWorkerTiming {
 struct VisionAgentResult {
     tick: u32,
     step: VisionStep,
-    action: Action,
+    input: InputFrame,
+    neat_outputs: Vec<f32>,
     timing: VisionWorkerTiming,
 }
 
-/// 后台视觉 + NEAT 控制器；`VisionPipeline` 仅在其工作线程内使用。
+/// 视觉 + NEAT 控制器。
 pub struct AgentController {
     frame_tx: std::sync::mpsc::SyncSender<FrameMsg>,
     result_rx: std::sync::mpsc::Receiver<VisionAgentResult>,
     genome: Arc<RwLock<Genome>>,
     join: Option<JoinHandle<()>>,
-    last_action: Action,
+    last_input: InputFrame,
     last_vision: Option<VisionStep>,
-    /// 尚无视觉结果时为 `None`。
     last_applied_tick: Option<u32>,
+    last_neat_outputs: Option<Vec<f32>>,
     worker_dead: bool,
-    /// `--profile`：最近一次 poll 收到的 worker 耗时。
     last_poll_timings: Vec<VisionWorkerTiming>,
 }
 
@@ -60,13 +58,10 @@ impl AgentController {
         let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel(FRAME_QUEUE);
         let (result_tx, result_rx) = std::sync::mpsc::channel();
         let genome = Arc::new(RwLock::new(genome));
-
         let genome_worker = Arc::clone(&genome);
         let join = thread::Builder::new()
             .name("vision-neat-agent".into())
-            .spawn(move || {
-                vision_agent_loop(frame_rx, result_tx, pipeline, genome_worker);
-            })
+            .spawn(move || vision_agent_loop(frame_rx, result_tx, pipeline, genome_worker))
             .expect("spawn vision-neat-agent");
 
         Self {
@@ -74,9 +69,10 @@ impl AgentController {
             result_rx,
             genome,
             join: Some(join),
-            last_action: Action::Noop,
+            last_input: InputFrame::default(),
             last_vision: None,
             last_applied_tick: None,
+            last_neat_outputs: None,
             worker_dead: false,
             last_poll_timings: Vec::new(),
         }
@@ -88,8 +84,7 @@ impl AgentController {
         }
     }
 
-    /// 非阻塞提交帧；队列满时丢弃（工人仍在处理上一帧）。
-    pub fn try_submit_frame(&self, tick: u32, rgb: RgbImage) -> bool {
+    pub fn try_submit_frame(&self, tick: u32, rgb: RgbImage, sim_snapshot: Option<SimVisionSnapshot>) -> bool {
         if self.worker_dead {
             return false;
         }
@@ -99,12 +94,13 @@ impl AgentController {
                 tick,
                 rgb,
                 submitted_ns,
+                sim_snapshot,
             })
             .is_ok()
     }
 
-    pub fn action(&self) -> Action {
-        self.last_action
+    pub fn input(&self) -> InputFrame {
+        self.last_input
     }
 
     pub fn vision(&self) -> Option<&VisionStep> {
@@ -115,11 +111,14 @@ impl AgentController {
         self.last_applied_tick
     }
 
+    pub fn last_neat_outputs(&self) -> Option<&[f32]> {
+        self.last_neat_outputs.as_deref()
+    }
+
     pub fn worker_dead(&self) -> bool {
         self.worker_dead
     }
 
-    /// 阻塞提交帧并等待该 tick 的视觉结果（训练 eval / capture 用，保证不丢帧）。
     pub fn submit_and_wait(
         &mut self,
         sim: &mut GameSim,
@@ -135,26 +134,31 @@ impl AgentController {
                 tick,
                 rgb,
                 submitted_ns: crate::trainer::profile::now_ns(),
+                sim_snapshot: Some(sim.vision_snapshot()),
             })
             .map_err(|_| anyhow::anyhow!("视觉线程已退出"))?;
         self.wait_for_tick(sim, tick, timeout)
     }
 
-    /// 收取后台结果并写入 `sim` 计分提示。
     pub fn poll(&mut self, sim: &mut GameSim) {
         self.last_poll_timings.clear();
-        loop {
-            match self.result_rx.try_recv() {
-                Ok(result) => {
-                    self.last_poll_timings.push(result.timing.clone());
-                    self.apply_result(sim, result);
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    self.worker_dead = true;
-                    break;
+        let batch: Vec<VisionAgentResult> = {
+            let mut batch = Vec::new();
+            loop {
+                match self.result_rx.try_recv() {
+                    Ok(result) => batch.push(result),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        self.worker_dead = true;
+                        break;
+                    }
                 }
             }
+            batch
+        };
+        for result in batch {
+            self.last_poll_timings.push(result.timing.clone());
+            self.apply_result(sim, result);
         }
     }
 
@@ -162,7 +166,6 @@ impl AgentController {
         std::mem::take(&mut self.last_poll_timings)
     }
 
-    /// 阻塞直到指定 tick 的视觉结果到达。
     pub fn wait_for_tick(
         &mut self,
         sim: &mut GameSim,
@@ -188,24 +191,21 @@ impl AgentController {
 
     fn apply_result(&mut self, sim: &mut GameSim, result: VisionAgentResult) {
         result.step.apply_fitness_hints(sim);
-        self.last_action = result.action;
+        self.last_input = result.input;
         self.last_vision = Some(result.step);
+        self.last_neat_outputs = Some(result.neat_outputs);
         self.last_applied_tick = Some(result.tick);
     }
 
-    /// 新一局 eval 前重置视觉状态（worker 线程不重启）。
     pub fn reset_vision_state(&mut self) {
-        self.last_action = Action::Noop;
+        self.last_input = InputFrame::default();
         self.last_vision = None;
+        self.last_neat_outputs = None;
         self.last_applied_tick = None;
         self.last_poll_timings.clear();
     }
 
-    /// 关闭视觉线程；队列满时阻塞直到 Shutdown 入队（不可 try_send）。
     pub fn shutdown(&mut self) {
-        if self.join.is_none() {
-            return;
-        }
         let _ = self.frame_tx.send(FrameMsg::Shutdown);
         if let Some(j) = self.join.take() {
             let _ = j.join();
@@ -232,25 +232,26 @@ fn vision_agent_loop(
                 tick,
                 rgb,
                 submitted_ns,
+                sim_snapshot,
             } => {
                 let worker_start = Instant::now();
                 let queue_wait_ms = crate::trainer::profile::now_ns()
                     .saturating_sub(submitted_ns) as f64
                     / 1_000_000.0;
                 let t0 = Instant::now();
-                let step = match pipeline.perceive(&rgb) {
+                let step = match pipeline.perceive_with_snapshot(&rgb, sim_snapshot) {
                     Ok(s) => s,
                     Err(e) => {
                         eprintln!("视觉线程推理失败 tick={tick}: {e}");
-                        continue;
+                        break;
                     }
                 };
                 let perceive_ms = t0.elapsed().as_secs_f64() * 1000.0;
                 let t1 = Instant::now();
-                let action = {
+                let (input, neat_outputs) = {
                     let g = genome.read().expect("genome lock");
                     let outputs = evaluate(&g, &step.observation.values);
-                    action_from_outputs(&outputs)
+                    (input_from_outputs(&outputs), outputs)
                 };
                 let neat_ms = t1.elapsed().as_secs_f64() * 1000.0;
                 let timing = VisionWorkerTiming {
@@ -264,7 +265,8 @@ fn vision_agent_loop(
                     .send(VisionAgentResult {
                         tick,
                         step,
-                        action,
+                        input,
+                        neat_outputs,
                         timing,
                     })
                     .is_err()

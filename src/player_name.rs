@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use image::{Rgb, RgbImage};
 
 use crate::image_util::{crop_rgb, mark_player_diamond};
-use crate::ocr;
+use crate::ocr::{self, OcrRuntime};
 use crate::yolo::Detection;
 
 /// 玩家脚点/中心坐标（像素，原图坐标系）。
@@ -49,6 +49,113 @@ pub fn find_named_player(
     min_player_conf: f32,
 ) -> Result<Option<NamedPlayerHit>> {
     find_named_player_verbose(img, detections, target_name, min_player_conf, false).map(|(hit, _)| hit)
+}
+
+/// 使用指定 OCR 运行时（GPU batch 服务用）。
+pub fn find_named_player_with_ocr(
+    ocr: &mut OcrRuntime,
+    img: &RgbImage,
+    detections: &[Detection],
+    target_name: &str,
+    min_player_conf: f32,
+) -> Result<Option<NamedPlayerHit>> {
+    find_named_player_with_ocr_verbose(ocr, img, detections, target_name, min_player_conf, false)
+        .map(|(hit, _)| hit)
+}
+
+pub fn find_named_player_with_ocr_verbose(
+    ocr: &mut OcrRuntime,
+    img: &RgbImage,
+    detections: &[Detection],
+    target_name: &str,
+    min_player_conf: f32,
+    verbose: bool,
+) -> Result<(Option<NamedPlayerHit>, Vec<PlayerOcrAttempt>)> {
+    let mut best: Option<(NamedPlayerHit, f32)> = None;
+    let mut attempts = Vec::new();
+    let img_w = img.width();
+    let img_h = img.height();
+
+    let mut players: Vec<&Detection> = detections
+        .iter()
+        .filter(|d| d.label == PLAYER_LABEL && d.conf >= min_player_conf)
+        .collect();
+    players.sort_by(|a, b| b.conf.partial_cmp(&a.conf).unwrap_or(std::cmp::Ordering::Equal));
+
+    'players: for det in players {
+        let (rx, ry, rw, rh) = name_search_region(det, img.width(), img.height());
+        if rw < 8 || rh < 8 {
+            continue;
+        }
+        let region = crop_rgb(img, rx, ry, rw, rh);
+        let Some((text, match_score, (bx, by, bw, bh))) =
+            ocr_and_match_region_det_runtime(ocr, &region, target_name)?
+        else {
+            if verbose {
+                attempts.push(PlayerOcrAttempt {
+                    player_conf: det.conf,
+                    player_xyxy: (det.x1, det.y1, det.x2, det.y2),
+                    roi: (rx, ry, rw, rh),
+                    ocr_text: String::new(),
+                    match_score: 0.0,
+                });
+            }
+            continue;
+        };
+        if verbose {
+            attempts.push(PlayerOcrAttempt {
+                player_conf: det.conf,
+                player_xyxy: (det.x1, det.y1, det.x2, det.y2),
+                roi: (rx + bx, ry + by, bw, bh),
+                ocr_text: text.clone(),
+                match_score,
+            });
+        }
+        if match_score < 0.45 {
+            continue;
+        }
+        let hit = NamedPlayerHit {
+            x: (det.x1 + det.x2) * 0.5,
+            y: det.y2,
+            ocr_text: text.clone(),
+            match_score,
+            partial: is_partial_name(&text, target_name),
+            player_conf: det.conf,
+            roi: (rx + bx, ry + by, bw, bh),
+        };
+        let det_cx = (det.x1 + det.x2) * 0.5;
+        let det_cy = (det.y1 + det.y2) * 0.5;
+        let dist = center_distance_norm(det_cx, det_cy, img_w, img_h);
+        let score = player_score(match_score, dist);
+        if best
+            .as_ref()
+            .map(|(b, bdist)| {
+                let b_score = player_score(b.match_score, *bdist);
+                score > b_score
+                    || (score == b_score
+                        && (dist < *bdist || hit.match_score > b.match_score))
+            })
+            .unwrap_or(true)
+        {
+            best = Some((hit, dist));
+        }
+        if match_score >= MATCH_STOP_SCORE {
+            break 'players;
+        }
+    }
+
+    if best.is_none() {
+        let (fallback, fb_attempts) =
+            scan_name_plates_fallback_runtime(ocr, img, target_name)?;
+        if verbose {
+            attempts.extend(fb_attempts);
+        }
+        if let Some((hit, dist)) = fallback {
+            best = Some((hit, dist));
+        }
+    }
+
+    Ok((best.map(|(h, _)| h), attempts))
 }
 
 pub fn find_named_player_verbose(
@@ -227,6 +334,119 @@ fn ocr_and_match_region_det(
         }
     }
     Ok(best)
+}
+
+fn ocr_and_match_region_det_runtime(
+    ocr: &mut OcrRuntime,
+    region: &RgbImage,
+    target_name: &str,
+) -> Result<Option<(String, f32, (u32, u32, u32, u32))>> {
+    let mut boxes = ocr.detect_text_boxes(region)?;
+    if boxes.is_empty() {
+        if let Some((text, score)) = ocr_and_match_roi_simple_runtime(ocr, region, target_name)? {
+            if score > 0.0 {
+                let (w, h) = region.dimensions();
+                return Ok(Some((text, score, (0, 0, w, h))));
+            }
+        }
+        return Ok(None);
+    }
+    boxes.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut best: Option<(String, f32, (u32, u32, u32, u32))> = None;
+    for tb in boxes {
+        let crop = crop_rgb(region, tb.x, tb.y, tb.w, tb.h);
+        let Some((text, score)) = ocr_and_match_roi_simple_runtime(ocr, &crop, target_name)? else {
+            continue;
+        };
+        if score >= MATCH_STOP_SCORE {
+            return Ok(Some((text, score, (tb.x, tb.y, tb.w, tb.h))));
+        }
+        if score > best.as_ref().map(|b| b.1).unwrap_or(0.0) {
+            best = Some((text, score, (tb.x, tb.y, tb.w, tb.h)));
+        }
+    }
+    Ok(best)
+}
+
+fn ocr_and_match_roi_simple_runtime(
+    ocr: &mut OcrRuntime,
+    roi: &RgbImage,
+    target_name: &str,
+) -> Result<Option<(String, f32)>> {
+    let invert = invert_rgb(roi);
+    let refs: [&RgbImage; 2] = [roi, &invert];
+    let texts = ocr
+        .recognize_rgb_batch(&refs)
+        .unwrap_or_else(|_| vec![String::new(); 2]);
+    let mut best_text = String::new();
+    let mut best_match = 0.0f32;
+    for text in texts {
+        let normalized = normalize_name(&text);
+        let m = name_similarity(&normalized, target_name);
+        if m > best_match {
+            best_match = m;
+            best_text = normalized;
+        }
+    }
+    if best_match > 0.0 {
+        Ok(Some((best_text, best_match)))
+    } else {
+        Ok(None)
+    }
+}
+
+fn scan_name_plates_fallback_runtime(
+    ocr: &mut OcrRuntime,
+    img: &RgbImage,
+    target_name: &str,
+) -> Result<(Option<(NamedPlayerHit, f32)>, Vec<PlayerOcrAttempt>)> {
+    let (w, h) = img.dimensions();
+    let mut attempts = Vec::new();
+    let mut best: Option<(NamedPlayerHit, f32)> = None;
+
+    let y_start = (h as f32 * 0.65) as u32;
+    let y_end = h.saturating_sub(90);
+    let x_start = w / 8;
+    let x_end = w * 7 / 8;
+    if y_end <= y_start + 20 || x_end <= x_start + 40 {
+        return Ok((None, attempts));
+    }
+
+    let region = crop_rgb(img, x_start, y_start, x_end - x_start, y_end - y_start);
+    if let Some((text, match_score, (bx, by, bw, bh))) =
+        ocr_and_match_region_det_runtime(ocr, &region, target_name)?
+    {
+        attempts.push(PlayerOcrAttempt {
+            player_conf: 0.0,
+            player_xyxy: (0.0, 0.0, 0.0, 0.0),
+            roi: (x_start + bx, y_start + by, bw, bh),
+            ocr_text: text.clone(),
+            match_score,
+        });
+        if match_score >= 0.45 {
+            let px = x_start + bx;
+            let py = y_start + by;
+            let hit = NamedPlayerHit {
+                x: px as f32 + bw as f32 * 0.5,
+                y: py as f32 - 4.0,
+                ocr_text: text,
+                match_score,
+                partial: is_partial_name(&attempts[0].ocr_text, target_name),
+                player_conf: 0.0,
+                roi: (px, py, bw, bh),
+            };
+            let plate_cx = px as f32 + bw as f32 * 0.5;
+            let plate_cy = py as f32 + bh as f32 * 0.5;
+            let dist = center_distance_norm(plate_cx, plate_cy, w, h);
+            best = Some((hit, dist));
+        }
+    }
+
+    Ok((best, attempts))
 }
 
 /// 对单个文本行 crop 做最多 2 次 rec（原图 + 反色）。

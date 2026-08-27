@@ -1,7 +1,11 @@
-use crate::game::Action;
+use crate::game::action::actions_from_bits;
+use crate::game::InputFrame;
 
 use super::genome::Genome;
 use super::{INPUT_SIZE, OUTPUT_NODE_START, OUTPUT_SIZE};
+
+/// sigmoid ≥ 此阈值视为该键按下（可多键同时按下）。
+pub const OUTPUT_THRESHOLD: f32 = 0.5;
 
 fn sigmoid(x: f32) -> f32 {
     1.0 / (1.0 + (-x).exp())
@@ -40,16 +44,13 @@ pub fn evaluate(genome: &Genome, inputs: &[f32]) -> Vec<f32> {
         .collect()
 }
 
-pub fn action_from_outputs(outputs: &[f32]) -> Action {
-    let mut best = 0usize;
-    let mut best_v = f32::NEG_INFINITY;
-    for (i, v) in outputs.iter().enumerate().take(OUTPUT_SIZE) {
-        if *v > best_v {
-            best_v = *v;
-            best = i;
-        }
-    }
-    Action::from_index(best)
+pub fn input_from_outputs(outputs: &[f32]) -> InputFrame {
+    let bits: Vec<bool> = outputs
+        .iter()
+        .take(OUTPUT_SIZE)
+        .map(|v| *v >= OUTPUT_THRESHOLD)
+        .collect();
+    actions_from_bits(&bits)
 }
 
 fn topological_layers(genome: &Genome) -> Vec<Vec<usize>> {
@@ -111,6 +112,16 @@ mod tests {
         let inputs = vec![0.5; INPUT_SIZE];
         let out = evaluate(&g, &inputs);
         assert_eq!(out.len(), OUTPUT_SIZE);
-        let _ = action_from_outputs(&out);
+        let inp = input_from_outputs(&out);
+        assert!(!inp.attack || out[3] >= OUTPUT_THRESHOLD);
+    }
+
+    #[test]
+    fn combo_left_jump() {
+        let outputs = vec![0.9, 0.1, 0.9, 0.1, 0.1, 0.1, 0.1, 0.1];
+        let inp = input_from_outputs(&outputs);
+        assert!(inp.left);
+        assert!(inp.jump);
+        assert!(!inp.right);
     }
 }

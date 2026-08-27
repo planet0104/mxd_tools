@@ -136,7 +136,7 @@ fn poll_input() -> InputFrame {
     InputFrame {
         left: is_key_down(KeyCode::Left) || is_key_down(KeyCode::A),
         right: is_key_down(KeyCode::Right) || is_key_down(KeyCode::D),
-        jump: is_key_pressed(KeyCode::Space) || is_key_pressed(KeyCode::LeftAlt),
+        jump: is_key_down(KeyCode::Space) || is_key_down(KeyCode::LeftAlt),
         attack: is_key_pressed(KeyCode::LeftControl) || is_key_pressed(KeyCode::J),
         up: is_key_down(KeyCode::Up) || is_key_down(KeyCode::W),
         down: is_key_down(KeyCode::Down) || is_key_down(KeyCode::S),

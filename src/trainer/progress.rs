@@ -25,6 +25,8 @@ pub struct EvalStatus {
     pub pickup_score: f32,
     pub vision_shaping_score: f32,
     pub memory_shaping_weighted: f32,
+    pub stagnation_penalty: f32,
+    pub idle_forfeit: bool,
     pub player_alive: bool,
     /// eval 循环已结束（可能在等视觉线程退出）。
     pub eval_done: bool,
@@ -57,6 +59,8 @@ impl EvalStatus {
             vision_shaping_score: sim.fitness.vision_shaping_score,
             memory_shaping_weighted: sim.fitness.shaping_config().memory_weight
                 * sim.fitness.memory_shaping_score,
+            stagnation_penalty: sim.fitness.stagnation_penalty,
+            idle_forfeit: sim.fitness.idle_forfeit,
             player_alive: !sim.is_episode_over(),
             eval_done: false,
         }
@@ -65,6 +69,8 @@ impl EvalStatus {
     pub fn life_tag(&self) -> &'static str {
         if self.eval_done {
             "完"
+        } else if self.idle_forfeit {
+            "早停"
         } else if self.tick >= self.max_ticks {
             "跑满"
         } else if self.player_alive {
@@ -103,7 +109,7 @@ impl EvalStatus {
             "已死亡"
         };
         log_line(format!(
-            "[评估 {}] tick {}/{} | 主角 {life} HP {}/{} | 药 {} 币 {} | 怪 {} | 装饰 {} | 适应度 {:.1} (拾取{:.1}+视觉{:.1}+内存{:.1})",
+            "[评估 {}] tick {}/{} | 主角 {life} HP {}/{} | 药 {} 币 {} | 怪 {} | 装饰 {} | 适应度 {:.1} (拾取{:.1}+视觉{:.1}+内存{:.1}−停滞{:.1})",
             self.label,
             self.tick,
             self.max_ticks,
@@ -117,6 +123,7 @@ impl EvalStatus {
             self.pickup_score,
             self.vision_shaping_score,
             self.memory_shaping_weighted,
+            self.stagnation_penalty,
         ));
     }
 
@@ -173,6 +180,8 @@ fn parse_status_line(line: &str) -> Option<EvalStatus> {
         pickup_score: 0.0,
         vision_shaping_score: 0.0,
         memory_shaping_weighted: 0.0,
+        stagnation_penalty: 0.0,
+        idle_forfeit: false,
         player_alive: fields.get("alive")?.parse::<u8>().ok()? != 0,
         eval_done: fields
             .get("done")
@@ -180,6 +189,74 @@ fn parse_status_line(line: &str) -> Option<EvalStatus> {
             .map(|v| v != 0)
             .unwrap_or(false),
     })
+}
+
+pub fn log_steady_heartbeat(
+    spawns_completed: u32,
+    total_spawns: u32,
+    in_flight: &[(usize, PathBuf)],
+    run_started: Instant,
+    session_best: f32,
+    global_best: f32,
+) {
+    let mut alive_workers = 0usize;
+    let mut running: Vec<(usize, EvalStatus)> = Vec::new();
+    for (spawn_id, path) in in_flight {
+        if let Some(s) = EvalStatus::read_file(path) {
+            if s.player_alive && !s.eval_done {
+                alive_workers += 1;
+            }
+            running.push((*spawn_id, s));
+        }
+    }
+    let pending = in_flight.len().saturating_sub(running.len());
+
+    log_line(format!(
+        "[训练心跳] 出生 {}/{} 完成 并行{}(活{}) 待读{} 已跑{:.0}s 最佳{:.1}/{:.1}",
+        spawns_completed + 1,
+        total_spawns,
+        in_flight.len(),
+        alive_workers,
+        pending,
+        run_started.elapsed().as_secs_f64(),
+        session_best,
+        global_best.max(session_best),
+    ));
+
+    let all_dead = running.iter().all(|(_, s)| !s.player_alive && !s.eval_done);
+    let mut leaders: Vec<_> = running
+        .iter()
+        .filter(|(_, s)| s.player_alive && !s.eval_done)
+        .collect();
+    if leaders.is_empty() {
+        leaders = running.iter().collect();
+    }
+    leaders.sort_by(|a, b| {
+        b.1.fitness
+            .partial_cmp(&a.1.fitness)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let top: Vec<String> = leaders
+        .iter()
+        .take(3)
+        .map(|(spawn_id, s)| {
+            format!(
+                "s{spawn_id} fit{:.0}@{}/{} {}",
+                s.fitness,
+                s.tick,
+                s.max_ticks,
+                s.life_tag()
+            )
+        })
+        .collect();
+    if !top.is_empty() {
+        let hint = if all_dead && !running.is_empty() {
+            " (均已死亡，等待 worker 退出)"
+        } else {
+            ""
+        };
+        log_line(format!("  领先: {}{}", top.join(" | "), hint));
+    }
 }
 
 pub fn log_pool_heartbeat(
@@ -272,6 +349,8 @@ mod tests {
             pickup_score: 100.0,
             vision_shaping_score: 15.0,
             memory_shaping_weighted: 5.5,
+            stagnation_penalty: 0.0,
+            idle_forfeit: false,
             player_alive: true,
             eval_done: false,
         };
