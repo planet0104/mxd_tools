@@ -182,12 +182,16 @@ pub fn obs_has_same_level_enemy(values: &[f32]) -> bool {
 const ATTACK_GATE_DX_FWD: f32 = 90.0 / 1368.0;
 const ATTACK_GATE_DX_BACK: f32 = 8.0 / 1368.0;
 const ATTACK_GATE_DY: f32 = 80.0 / 768.0;
+/// 敌人与玩家同层才可普攻；对齐 RuleBot SAME_PLATFORM_DY≈28px，略留 YOLO 容差。
+/// 过宽（如 70px）会把上层台怪当成同层，导致空砍/假农怪带。
 /// 敌人与玩家同层才可普攻；对齐 sim 攻击框并留 YOLO 容差。
 pub const ENEMY_SAME_LEVEL_DY: f32 = 70.0 / 768.0;
+/// 纯视觉决策用的更紧同层（约 32px）：排除上层台怪，避免空砍/假农怪带。
+pub const ENEMY_PLATFORM_DY: f32 = 32.0 / 768.0;
 
 /// 与 `sim::check_mob_touch` 对齐的玩家接触盒（归一化，以自身脚点为原点）。
 const PLAYER_CONTACT_HALF_W: f32 = 28.0 / 1368.0;
-const PLAYER_CONTACT_HALF_H: f32 = 36.0 / 768.0;
+const PLAYER_CONTACT_HALF_H: f32 = 70.0 / 768.0;
 /// YOLO 框偏差：略放大接触判定，避免「视觉上已贴脸但未重叠」。
 const CONTACT_YOLO_PAD_X: f32 = 12.0 / 1368.0;
 const CONTACT_YOLO_PAD_Y: f32 = 10.0 / 768.0;
@@ -283,10 +287,24 @@ pub fn obs_has_ladder_or_rope_signal(values: &[f32]) -> bool {
 ///
 /// 用框的水平覆盖 `[dx±w/2]` 与前方走廊相交判定，避免「大平台框心在脚下 → 永远判无前方地板」。
 pub fn obs_floor_ahead(values: &[f32], direction: f32) -> bool {
+    obs_floor_ahead_inner(values, direction, false)
+}
+
+/// 同 `obs_floor_ahead`，但要求地板与脚下平台衔接（纯视觉决策用，拒绝远处同高台假可走）。
+pub fn obs_floor_ahead_connected(values: &[f32], direction: f32) -> bool {
+    obs_floor_ahead_inner(values, direction, true)
+}
+
+fn obs_floor_ahead_inner(values: &[f32], direction: f32, require_connect: bool) -> bool {
     if direction.abs() <= f32::EPSILON {
         return false;
     }
     let right = direction > 0.0;
+    let under = if require_connect {
+        underfoot_floor_span(values)
+    } else {
+        None
+    };
     for i in 0..OBS_FLOOR_SLOTS {
         let base = OBS_FLOOR_START + i * OBS_SLOT_DIM;
         let Some((dx, dy, w, _)) = read_slot(values, base) else {
@@ -296,6 +314,9 @@ pub fn obs_floor_ahead(values: &[f32], direction: f32) -> bool {
             continue;
         }
         let half = (w * 0.5).max(0.0);
+        if require_connect && !floor_connects_underfoot(dx, half, under) {
+            continue;
+        }
         let box_l = dx - half;
         let box_r = dx + half;
         let overlaps = if right {
@@ -308,6 +329,50 @@ pub fn obs_floor_ahead(values: &[f32], direction: f32) -> bool {
         }
     }
     false
+}
+
+/// 前方地板须与脚下平台水平衔接的最大间隙（归一化）。
+const FLOOR_CONNECT_GAP: f32 = 28.0 / 1368.0;
+
+fn underfoot_floor_span(values: &[f32]) -> Option<(f32, f32)> {
+    let mut best: Option<(f32, f32, f32)> = None;
+    for i in 0..OBS_FLOOR_SLOTS {
+        let base = OBS_FLOOR_START + i * OBS_SLOT_DIM;
+        let Some((dx, dy, w, _)) = read_slot(values, base) else {
+            continue;
+        };
+        if dy.abs() > FLOOR_UNDER_DY {
+            continue;
+        }
+        let half = (w * 0.5).max(0.0);
+        if !(box_l_r_covers_zero(dx, half) || dx.abs() <= FLOOR_UNDER_DX) {
+            continue;
+        }
+        let score = dy.abs() + dx.abs() * 0.25;
+        if best.map(|(bs, _, _)| score < bs).unwrap_or(true) {
+            best = Some((score, dx - half, dx + half));
+        }
+    }
+    best.map(|(_, l, r)| (l, r))
+}
+
+fn floor_connects_underfoot(dx: f32, half: f32, under: Option<(f32, f32)>) -> bool {
+    let box_l = dx - half;
+    let box_r = dx + half;
+    if box_l <= FLOOR_CONNECT_GAP && box_r >= -FLOOR_CONNECT_GAP {
+        return true;
+    }
+    let Some((ul, ur)) = under else {
+        return false;
+    };
+    let gap = if box_r < ul {
+        ul - box_r
+    } else if ur < box_l {
+        box_l - ur
+    } else {
+        0.0
+    };
+    gap <= FLOOR_CONNECT_GAP
 }
 
 pub fn obs_floor_underfoot(values: &[f32]) -> bool {
@@ -326,6 +391,243 @@ pub fn obs_floor_underfoot(values: &[f32]) -> bool {
         }
     }
     false
+}
+
+/// 前方无同层地板，但更低处有地板框可接住 → 可落下缘。
+pub fn obs_floor_drop_ahead(values: &[f32], direction: f32) -> bool {
+    if direction.abs() <= f32::EPSILON {
+        return false;
+    }
+    if obs_floor_ahead(values, direction) {
+        return false;
+    }
+    const DROP_DY_MIN: f32 = 40.0 / 768.0;
+    const DROP_DY_MAX: f32 = 280.0 / 768.0;
+    let right = direction > 0.0;
+    for i in 0..OBS_FLOOR_SLOTS {
+        let base = OBS_FLOOR_START + i * OBS_SLOT_DIM;
+        let Some((dx, dy, w, _)) = read_slot(values, base) else {
+            continue;
+        };
+        if dy < DROP_DY_MIN || dy > DROP_DY_MAX {
+            continue;
+        }
+        let half = (w * 0.5).max(0.0);
+        let box_l = dx - half;
+        let box_r = dx + half;
+        let overlaps = if right {
+            box_r >= WALK_FLOOR_DX_MIN && box_l <= WALK_FLOOR_DX_MAX
+        } else {
+            box_l <= -WALK_FLOOR_DX_MIN && box_r >= -WALK_FLOOR_DX_MAX
+        };
+        if overlaps {
+            return true;
+        }
+    }
+    false
+}
+
+/// 同层敌人数量（脚点垂直差在同层阈值内）。
+pub fn obs_same_level_enemy_count(values: &[f32]) -> u32 {
+    let mut n = 0u32;
+    for i in 0..OBS_ENEMY_SLOTS {
+        let base = OBS_ENEMY_START + i * OBS_SLOT_DIM;
+        if obs_slot_active(values, base, 1) && enemy_slot_same_level(values, base) {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// 最近同层敌人相对像素位移（以 1368×768 视口还原）。
+pub fn obs_nearest_same_level_enemy_px(
+    values: &[f32],
+    img_w: f32,
+    img_h: f32,
+) -> Option<(f32, f32)> {
+    let mut best: Option<(f32, f32, f32)> = None;
+    for i in 0..OBS_ENEMY_SLOTS {
+        let base = OBS_ENEMY_START + i * OBS_SLOT_DIM;
+        if !obs_slot_active(values, base, 1) || !enemy_slot_same_level(values, base) {
+            continue;
+        }
+        let Some((dx, dy, _, _)) = read_slot(values, base) else {
+            continue;
+        };
+        let dx_px = dx * img_w;
+        let dy_px = dy * img_h;
+        let dist = dx_px.abs() + dy_px.abs() * 0.25;
+        if best.map(|(bd, _, _)| dist < bd).unwrap_or(true) {
+            best = Some((dist, dx_px, dy_px));
+        }
+    }
+    best.map(|(_, dx, dy)| (dx, dy))
+}
+
+/// 宽接战：含略低一层的最近敌人。
+pub fn obs_nearest_enemy_wide_px(
+    values: &[f32],
+    img_w: f32,
+    img_h: f32,
+    max_dy_px: f32,
+) -> Option<(f32, f32)> {
+    let mut best: Option<(f32, f32, f32)> = None;
+    for i in 0..OBS_ENEMY_SLOTS {
+        let base = OBS_ENEMY_START + i * OBS_SLOT_DIM;
+        let Some((dx, dy, _, _)) = read_slot(values, base) else {
+            continue;
+        };
+        let dx_px = dx * img_w;
+        let dy_px = dy * img_h;
+        if dy_px.abs() > max_dy_px {
+            continue;
+        }
+        let dist = dx_px.abs() + dy_px.abs() * 0.25;
+        if best.map(|(bd, _, _)| dist < bd).unwrap_or(true) {
+            best = Some((dist, dx_px, dy_px));
+        }
+    }
+    best.map(|(_, dx, dy)| (dx, dy))
+}
+
+/// 同层水平半径内是否仍有敌人（农怪带近似；用紧同层，排除邻台）。
+pub fn obs_farm_band_enemies(values: &[f32], img_w: f32, local_dx_px: f32) -> bool {
+    for i in 0..OBS_ENEMY_SLOTS {
+        let base = OBS_ENEMY_START + i * OBS_SLOT_DIM;
+        let Some((dx, dy, _, _)) = read_slot(values, base) else {
+            continue;
+        };
+        if dy.abs() > ENEMY_PLATFORM_DY {
+            continue;
+        }
+        if (dx * img_w).abs() <= local_dx_px {
+            return true;
+        }
+    }
+    false
+}
+
+/// 从绳/梯框推导可上/下爬提示（框心相对脚点；同距优先上爬）。
+pub fn obs_climb_hint(values: &[f32], img_w: f32, img_h: f32) -> Option<super::map::ClimbHint> {
+    use super::map::{ClimbDir, ClimbHint};
+
+    const UP_REACH: f32 = 80.0;
+    const UP_BELOW_SLACK: f32 = 28.0;
+    const DOWN_TOP_SLACK: f32 = 40.0;
+    const DOWN_MIN_LEN: f32 = 36.0;
+    const DOWN_DIST_PENALTY: f32 = 400.0;
+    const MAX_DX: f32 = 120.0;
+
+    let mut best: Option<(f32, ClimbHint)> = None;
+    for start in [OBS_LADDER_START, OBS_ROPE_START] {
+        let count = if start == OBS_LADDER_START {
+            OBS_LADDER_SLOTS
+        } else {
+            OBS_ROPE_SLOTS
+        };
+        for i in 0..count {
+            let base = start + i * OBS_SLOT_DIM;
+            let Some((dx, dy, _, h)) = read_slot(values, base) else {
+                continue;
+            };
+            let dx_px = dx * img_w;
+            if dx_px.abs() > MAX_DX {
+                continue;
+            }
+            let dy_px = dy * img_h;
+            let half_h = (h * img_h * 0.5).max(1.0);
+            let top = dy_px - half_h;
+            let bot = dy_px + half_h;
+            let dist = dx_px.abs();
+
+            let up_ok = bot <= UP_BELOW_SLACK && -bot <= UP_REACH;
+            if up_ok {
+                let hint = ClimbHint {
+                    dx: dx_px,
+                    dir: ClimbDir::Up,
+                };
+                if best.map(|(bd, _)| dist < bd).unwrap_or(true) {
+                    best = Some((dist, hint));
+                }
+            }
+
+            let down_ok =
+                top.abs() <= DOWN_TOP_SLACK && bot >= DOWN_MIN_LEN && top <= DOWN_TOP_SLACK;
+            if down_ok {
+                let hint = ClimbHint {
+                    dx: dx_px,
+                    dir: ClimbDir::Down,
+                };
+                let score = dist + DOWN_DIST_PENALTY;
+                if best.map(|(bd, _)| score < bd).unwrap_or(true) {
+                    best = Some((score, hint));
+                }
+            }
+        }
+    }
+    best.map(|(_, h)| h)
+}
+
+/// 更高一层地板：跳跃可达的台阶相对 dx（像素）。
+/// 相对脚下地板框心抬升，避免 YOLO 框心偏上把本台地板误成台阶。
+pub fn obs_step_up_dx(values: &[f32], img_w: f32, img_h: f32) -> Option<f32> {
+    const MAX_UP: f32 = 80.0;
+    const MIN_UP: f32 = 16.0;
+    const MAX_APPROACH: f32 = 280.0;
+
+    let base_dy = underfoot_floor_dy(values).unwrap_or(0.0);
+    let mut best: Option<(f32, f32)> = None;
+    for i in 0..OBS_FLOOR_SLOTS {
+        let base = OBS_FLOOR_START + i * OBS_SLOT_DIM;
+        let Some((dx, dy, w, _)) = read_slot(values, base) else {
+            continue;
+        };
+        let rise = -(dy - base_dy) * img_h;
+        if rise < MIN_UP || rise > MAX_UP {
+            continue;
+        }
+        let dx_px = dx * img_w;
+        let half = (w * img_w * 0.5).max(4.0);
+        let x0 = dx_px - half;
+        let x1 = dx_px + half;
+        let target_x = if 0.0 < x0 {
+            x0 + 6.0
+        } else if 0.0 > x1 {
+            x1 - 6.0
+        } else {
+            0.0
+        };
+        let approach = target_x.abs();
+        if approach > MAX_APPROACH {
+            continue;
+        }
+        if best.map(|(ba, _)| approach < ba).unwrap_or(true) {
+            best = Some((approach, target_x));
+        }
+    }
+    best.map(|(_, dx)| dx)
+}
+
+fn underfoot_floor_dy(values: &[f32]) -> Option<f32> {
+    let mut best: Option<(f32, f32)> = None;
+    for i in 0..OBS_FLOOR_SLOTS {
+        let base = OBS_FLOOR_START + i * OBS_SLOT_DIM;
+        let Some((dx, dy, w, _)) = read_slot(values, base) else {
+            continue;
+        };
+        if dy.abs() > FLOOR_UNDER_DY {
+            continue;
+        }
+        let half = (w * 0.5).max(0.0);
+        if !(box_l_r_covers_zero(dx, half) || dx.abs() <= FLOOR_UNDER_DX) {
+            continue;
+        }
+        let score = dy.abs() + dx.abs() * 0.25;
+        if best.map(|(bs, _)| score < bs).unwrap_or(true) {
+            best = Some((score, dy));
+        }
+    }
+    best.map(|(_, dy)| dy)
 }
 
 fn box_l_r_covers_zero(dx: f32, half: f32) -> bool {
@@ -397,20 +699,32 @@ pub fn obs_vertical_nav_allowed(values: &[f32], climbing: bool) -> bool {
 
 /// 同层敌人是否在攻击距离内（需结合朝向：敌人在身前且够近）。
 pub fn obs_enemy_in_attack_range(values: &[f32], facing: f32) -> bool {
+    obs_enemy_in_attack_range_with_dy(values, facing, ENEMY_SAME_LEVEL_DY)
+}
+
+/// 纯视觉站砍：仅本台（紧同层），避免对上层台空挥。
+pub fn obs_enemy_in_attack_range_platform(values: &[f32], facing: f32) -> bool {
+    obs_enemy_in_attack_range_with_dy(values, facing, ENEMY_PLATFORM_DY)
+}
+
+fn obs_enemy_in_attack_range_with_dy(values: &[f32], facing: f32, max_dy: f32) -> bool {
     let facing_right = facing >= 0.0;
     for i in 0..OBS_ENEMY_SLOTS {
         let base = OBS_ENEMY_START + i * OBS_SLOT_DIM;
-        if !obs_slot_active(values, base, 1) || !enemy_slot_same_level(values, base) {
+        if !obs_slot_active(values, base, 1) {
             continue;
         }
         let dx = values[base];
         let dy = values[base + 1];
+        if dy.abs() > max_dy {
+            continue;
+        }
         let horiz_ok = if facing_right {
             dx >= -ATTACK_GATE_DX_BACK && dx <= ATTACK_GATE_DX_FWD
         } else {
             dx <= ATTACK_GATE_DX_BACK && dx >= -ATTACK_GATE_DX_FWD
         };
-        if horiz_ok && dy.abs() <= ATTACK_GATE_DY {
+        if horiz_ok {
             return true;
         }
     }

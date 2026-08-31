@@ -7,8 +7,8 @@ use image::RgbImage;
 
 use super::input::InputFrame;
 use super::observation::OBS_DIM;
-use super::rule_bot::{RuleBot, RuleBotCtx};
-use super::{inject_physics_walk_flags, GameSim, SimVisionSnapshot, VisionPipeline, VisionStep};
+use super::rule_bot::{RuleBot, RuleBotCtx, VisionSenseState};
+use super::{GameSim, SimVisionSnapshot, VisionPipeline, VisionStep};
 
 const FRAME_QUEUE: usize = 2;
 
@@ -50,6 +50,7 @@ pub struct AgentController {
     result_rx: std::sync::mpsc::Receiver<VisionAgentResult>,
     join: Option<JoinHandle<()>>,
     bot: RuleBot,
+    sense: VisionSenseState,
     last_input: InputFrame,
     last_vision: Option<VisionStep>,
     last_applied_tick: Option<u32>,
@@ -71,6 +72,7 @@ impl AgentController {
             result_rx,
             join: Some(join),
             bot: RuleBot::default(),
+            sense: VisionSenseState::default(),
             last_input: InputFrame::default(),
             last_vision: None,
             last_applied_tick: None,
@@ -180,8 +182,6 @@ impl AgentController {
 
     fn apply_result(&mut self, sim: &mut GameSim, mut result: VisionAgentResult) {
         let t0 = Instant::now();
-        let (pr, pl) = sim.physics_walk_ok_pair();
-        inject_physics_walk_flags(&mut result.step.observation.values, pr, pl);
 
         let mut obs = [0.0_f32; OBS_DIM];
         let n = result.step.observation.values.len().min(OBS_DIM);
@@ -189,8 +189,10 @@ impl AgentController {
 
         sim.movement_gate.set_last_observation(&obs);
 
-        let ctx = RuleBotCtx::from_sim_with_farm_y(sim, &obs, self.bot.farm_y);
+        self.sense.prepare(&obs);
+        let ctx = RuleBotCtx::from_vision(&obs, &self.sense, self.bot.farm_y);
         self.last_input = self.bot.decide(ctx);
+        self.sense.after_decide(&self.last_input, &obs);
         result.timing.policy_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
         self.last_vision = Some(result.step);
@@ -200,6 +202,7 @@ impl AgentController {
 
     pub fn reset_vision_state(&mut self) {
         self.bot.reset();
+        self.sense = VisionSenseState::default();
         self.last_input = InputFrame::default();
         self.last_vision = None;
         self.last_applied_tick = None;

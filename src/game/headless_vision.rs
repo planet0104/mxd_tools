@@ -14,7 +14,7 @@ use macroquad::prelude::*;
 use crate::yolo::YoloDevice;
 
 use super::config::VisionAnchorConfig;
-use super::observation::{inject_physics_walk_flags, OBS_DIM};
+use super::observation::OBS_DIM;
 use super::sim::GameSim;
 use super::view::{self, GameViewAssets};
 use super::vision::{SimVisionSnapshot, VisionPipeline, VisionStep};
@@ -284,11 +284,9 @@ impl HeadlessVisionEnv {
     }
 }
 
-pub fn obs_from_step(sim: &GameSim, step: &VisionStep) -> [f32; OBS_DIM] {
+pub fn obs_from_step(_sim: &GameSim, step: &VisionStep) -> [f32; OBS_DIM] {
     let mut obs = [0.0_f32; OBS_DIM];
     let n = step.observation.values.len().min(OBS_DIM);
     obs[..n].copy_from_slice(&step.observation.values[..n]);
-    let (pr, pl) = sim.physics_walk_ok_pair();
-    inject_physics_walk_flags(&mut obs, pr, pl);
     obs
 }

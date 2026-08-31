@@ -41,15 +41,17 @@ pub use camera::WorldCamera;
 pub use config::{GameSimConfig, VisionAnchorConfig, VisionPaceConfig};
 pub use self_anchor::{apply_anchor_jitter, episode_anchor_offset};
 pub use movement_gate::{MovementGate, MovementGateCtx};
-pub use rule_bot::{visit_key, RuleBot, RuleBotCtx};
+pub use rule_bot::{visit_key, RuleBot, RuleBotCtx, VisionSenseState};
 pub use input::InputFrame;
 pub use map::{ClimbDir, ClimbHint, GameMap, Portal};
 pub use npc::NpcPlayerState;
 pub use observation::{
-    inject_physics_walk_flags, VisionObservation, VISION_CONF_THRESH, OBS_DIM, OBS_DROP_SLOTS,
-    OBS_DROP_START, OBS_ENEMY_SLOTS, OBS_ENEMY_START, OBS_FLOOR_SLOTS, OBS_FLOOR_START,
-    OBS_LADDER_SLOTS, OBS_LADDER_START, OBS_PHYSICS, OBS_PHYSICS_START, OBS_ROPE_SLOTS,
-    OBS_ROPE_START, OBS_SLOT_DIM,
+    inject_physics_walk_flags, obs_climb_hint, obs_enemy_in_attack_range, obs_farm_band_enemies,
+    obs_floor_ahead, obs_floor_ahead_connected, obs_floor_drop_ahead, obs_floor_underfoot,
+    obs_has_same_level_enemy, obs_nearest_same_level_enemy_px, obs_step_up_dx, VisionObservation,
+    VISION_CONF_THRESH, OBS_DIM, OBS_DROP_SLOTS, OBS_DROP_START, OBS_ENEMY_SLOTS, OBS_ENEMY_START,
+    OBS_FLOOR_SLOTS, OBS_FLOOR_START, OBS_LADDER_SLOTS, OBS_LADDER_START, OBS_PHYSICS,
+    OBS_PHYSICS_START, OBS_ROPE_SLOTS, OBS_ROPE_START, OBS_SLOT_DIM,
 };
 pub use sim::{EngageHint, GameModal, GameSim, GameState, GroundTruth, MobState, PlayerState};
 pub use types::{

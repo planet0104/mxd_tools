@@ -8,10 +8,10 @@ use super::config::VisionPaceConfig;
 use super::headless_vision::HeadlessVisionEnv;
 use super::input::InputFrame;
 use super::observation::{
-    obs_assess_enemy_contact, obs_enemy_in_attack_range,
+    obs_assess_enemy_contact, obs_enemy_in_attack_range, obs_enemy_in_attack_range_platform,
     obs_has_enemy, obs_platform_edge, OBS_DIM, OBS_ENEMY_SLOTS, OBS_ENEMY_START, OBS_SLOT_DIM,
 };
-use super::rule_bot::{visit_key, RuleBot, RuleBotCtx};
+use super::rule_bot::{visit_key, RuleBot, RuleBotCtx, VisionSenseState};
 use super::human_pace::HumanPace;
 use super::sim::GameSim;
 use super::types::{LOGIC_DT, LOGIC_HZ};
@@ -34,6 +34,7 @@ pub struct ProbeDriver {
     pace: HumanPace,
     input: InputFrame,
     last_obs: [f32; OBS_DIM],
+    sense: VisionSenseState,
     wall_clock_pacing: bool,
 }
 
@@ -53,6 +54,7 @@ impl ProbeDriver {
             pace: HumanPace::new(seed),
             input: InputFrame::default(),
             last_obs: [0.0_f32; OBS_DIM],
+            sense: VisionSenseState::default(),
             wall_clock_pacing,
         }
     }
@@ -62,6 +64,7 @@ impl ProbeDriver {
         self.pace.reset(seed);
         self.input = InputFrame::default();
         self.last_obs = [0.0_f32; OBS_DIM];
+        self.sense = VisionSenseState::default();
     }
 
     pub fn bot(&self) -> &RuleBot {
@@ -76,11 +79,23 @@ impl ProbeDriver {
         &self.last_obs
     }
 
+    pub fn sense(&self) -> &VisionSenseState {
+        &self.sense
+    }
+
+    /// sim.tick 之后用真值坐标覆盖推算，避免撞墙虚走导致 stuck 失效。
+    pub fn after_sim_tick(&mut self, sim: &GameSim) {
+        self.sense
+            .sync_truth_pos(sim.state.player.x, sim.state.player.y);
+    }
+
     pub fn apply_observation(&mut self, sim: &mut GameSim, vtick: u32, obs: [f32; OBS_DIM]) {
         self.last_obs = obs;
         sim.movement_gate.set_last_observation(&obs);
-        let ctx = RuleBotCtx::from_sim_with_farm_y(sim, &obs, self.bot.farm_y);
+        self.sense.prepare(&obs);
+        let ctx = RuleBotCtx::from_vision(&obs, &self.sense, self.bot.farm_y);
         self.input = self.bot.decide(ctx);
+        self.sense.after_decide(&self.input, &obs);
         self.pace.on_intent(self.input, vtick);
     }
 
@@ -134,19 +149,21 @@ impl ProbeDriver {
 
     /// 经 HumanPace 后按 sim 门控核对；若攻击被剥掉则退回 refractory。
     pub fn paced_input_for_sim(&mut self, sim: &GameSim, tick: u32) -> InputFrame {
-        // 视觉帧间隙（5–10Hz）内按 sim 刷新站砍，避免怪走进可砍带仍冻在 noop。
-        self.refresh_melee_hold(sim);
+        // 视觉帧间隙（5–10Hz）内按最近观测刷新站砍，避免怪走进可砍带仍冻在 noop。
+        self.refresh_melee_hold();
         let paced = self.pace.apply(self.input, tick);
         let effective = sim.effective_bot_input(&paced);
         if paced.attack && !effective.attack {
             self.pace.refund_attack();
         }
+        // 推算坐标只跟生效输入，避免 intent=right effective=noop 时虚走。
+        self.sense.note_effective(&effective);
         paced
     }
 
     /// 可砍带内强制站砍（不走路），覆盖过期的视觉意图。
-    fn refresh_melee_hold(&mut self, sim: &GameSim) {
-        if !sim.mob_in_strike_band() {
+    fn refresh_melee_hold(&mut self) {
+        if !obs_enemy_in_attack_range_platform(&self.last_obs, self.sense.facing) {
             return;
         }
         self.input.attack = true;
@@ -159,6 +176,7 @@ impl ProbeDriver {
         let tick_start = Instant::now();
         let paced = self.paced_input_for_sim(sim, tick);
         sim.tick(&paced);
+        self.after_sim_tick(sim);
         if self.wall_clock_pacing {
             Self::sleep_to_logic_hz(tick_start);
         }

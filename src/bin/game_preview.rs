@@ -309,6 +309,7 @@ async fn run_first_platform_probe_loop(
             }
         }
         state.sim.tick(&input);
+        driver.after_sim_tick(&state.sim);
         fp_tracker.on_tick(&state.sim);
         if let Some(rest) = Duration::from_secs_f32(LOGIC_DT).checked_sub(tick_start.elapsed()) {
             std::thread::sleep(rest);
@@ -325,19 +326,33 @@ fn log_decision(
     driver: &ProbeDriver,
     detections: &[mxd_tools::yolo::Detection],
 ) {
+    use mxd_tools::game::{
+        obs_enemy_in_attack_range, obs_farm_band_enemies, obs_floor_ahead_connected,
+        obs_floor_drop_ahead, obs_has_same_level_enemy, obs_nearest_same_level_enemy_px,
+        obs_step_up_dx, RuleBotCtx,
+    };
+
     let p = &sim.state.player;
-    let engage = sim.nearest_engage_hint();
-    let (mob_dx, mob_dy, mob_dir) = engage
+    let bot = driver.bot();
+    let sense = driver.sense();
+    let obs = driver.last_obs();
+    let ctx = RuleBotCtx::from_vision(obs, sense, bot.farm_y);
+    let (mob_dx, mob_dy, mob_dir) = ctx
+        .engage
         .map(|e| (e.dx, e.dy, e.mob_dir))
         .unwrap_or((0.0, 0.0, 0.0));
     let alive = sim.state.mobs.iter().filter(|m| m.alive).count();
-    let (pr, pl) = sim.physics_walk_ok_pair();
-    let (pdr, pdl) = sim.physics_drop_ok_pair();
-    let bot = driver.bot();
-    let farm_local = bot.farm_y > 0.0 && sim.mobs_near_xy(bot.farm_y, 55.0, p.x, 260.0);
-    let farm_y_any = bot.farm_y > 0.0 && sim.mobs_near_y(bot.farm_y, 55.0);
+    let iw = WINDOW_W as f32;
+    let ih = WINDOW_H as f32;
+    let pr = Some(obs_floor_ahead_connected(obs, 1.0));
+    let pl = Some(obs_floor_ahead_connected(obs, -1.0));
+    let pdr = Some(obs_floor_drop_ahead(obs, 1.0));
+    let pdl = Some(obs_floor_drop_ahead(obs, -1.0));
+    let farm_local = obs_farm_band_enemies(obs, iw, 260.0);
+    let farm_y_any = farm_local;
+    let _ = obs_nearest_same_level_enemy_px(obs, iw, ih);
     eprintln!(
-        "BOT tick={} intent={} effective={} reason={} seek={} flips={} farm_local={} farm_y_any={} perch={} kills={} alive={} pos=({:.0},{:.0}) engage_dx={:.0} dy={:.0} dir={:.0} walkR={:?} walkL={:?} dropR={:?} dropL={:?} step={:?} cliffR={} cliffL={}",
+        "BOT sense=yolo+ocr ctx=vision tick={} intent={} effective={} reason={} seek={} flips={} farm_local={} farm_y_any={} perch={} kills={} sense_kills={} alive={} sim_pos=({:.0},{:.0}) est_pos=({:.0},{:.0}) engage_dx={:.0} dy={:.0} dir={:.0} walkR={:?} walkL={:?} dropR={:?} dropL={:?} step={:?} cliffR={} cliffL={}",
         tick,
         input_label(intended),
         input_label(effective),
@@ -348,9 +363,12 @@ fn log_decision(
         farm_y_any,
         bot.perching,
         sim.state.kills,
+        sense.kills,
         alive,
         p.x,
         p.y,
+        sense.est_x,
+        sense.est_y,
         mob_dx,
         mob_dy,
         mob_dir,
@@ -358,7 +376,7 @@ fn log_decision(
         pl,
         pdr,
         pdl,
-        sim.nearest_step_up_dx(),
+        obs_step_up_dx(obs, iw, ih),
         pr == Some(false),
         pl == Some(false),
     );
@@ -379,9 +397,9 @@ fn log_decision(
     }
     eprintln!(
         "  NOOP diag: facing={} strike={} footing={} farm_y={:.0}",
-        if p.facing >= 0.0 { "R" } else { "L" },
-        sim.mob_in_strike_band(),
-        sim.mob_on_attackable_footing(),
+        if sense.facing >= 0.0 { "R" } else { "L" },
+        obs_enemy_in_attack_range(obs, sense.facing),
+        obs_has_same_level_enemy(obs),
         bot.farm_y,
     );
     // 最近地板检测框（像素，视口坐标）+ obs 归一化槽
@@ -592,6 +610,7 @@ async fn main() {
                     }
                 }
                 state.sim.tick(&input);
+                driver.after_sim_tick(&state.sim);
                 if let Some(probe) = auto_probe.as_mut() {
                     probe.on_tick(state.sim.state.player.x);
                     if probe.sample_n >= probe.limit {
