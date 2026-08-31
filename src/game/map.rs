@@ -478,6 +478,8 @@ impl GameMap {
         // 下爬：绳顶贴在当前脚点附近，且绳身继续向下。
         const DOWN_TOP_SLACK: f32 = 40.0;
         const DOWN_MIN_LEN: f32 = 36.0;
+        // 同距时优先上爬；下爬额外惩罚，避免近处下绳盖过稍远上绳（换层死循环主因）。
+        const DOWN_DIST_PENALTY: f32 = 400.0;
 
         let mut best: Option<(f32, ClimbHint)> = None;
         for r in &self.ropes {
@@ -492,8 +494,9 @@ impl GameMap {
                     dx,
                     dir: ClimbDir::Up,
                 };
-                if best.map(|(bd, _)| dist < bd).unwrap_or(true) {
-                    best = Some((dist, hint));
+                let score = dist;
+                if best.map(|(bd, _)| score < bd).unwrap_or(true) {
+                    best = Some((score, hint));
                 }
             }
 
@@ -505,13 +508,9 @@ impl GameMap {
                     dx,
                     dir: ClimbDir::Down,
                 };
-                // 同距时优先上爬。
-                let better = match &best {
-                    None => true,
-                    Some((bd, h)) => dist < *bd || (dist <= *bd + 1.0 && h.dir == ClimbDir::Down),
-                };
-                if better {
-                    best = Some((dist, hint));
+                let score = dist + DOWN_DIST_PENALTY;
+                if best.map(|(bd, _)| score < bd).unwrap_or(true) {
+                    best = Some((score, hint));
                 }
             }
         }
@@ -906,6 +905,21 @@ mod tests {
         let ladder = map.nearest_adjacent_climb(1477.0, 1225.0).expect("ladder");
         assert_eq!(ladder.dir, ClimbDir::Up);
         assert!(ladder.dx.abs() < 2.0);
+    }
+
+    #[test]
+    fn adjacent_climb_prefers_up_rope_over_nearer_down() {
+        let map = load_default_map().expect("default map");
+        // y=865：近处绳 1020 可下爬，稍远绳 1092 可上爬 → 必须优先上爬。
+        let hint = map
+            .nearest_adjacent_climb(961.0, 865.0)
+            .expect("should see climb");
+        assert_eq!(hint.dir, ClimbDir::Up, "must prefer Up over nearer Down");
+        assert!(
+            hint.dx > 50.0,
+            "should walk right toward rope@1092, dx={}",
+            hint.dx
+        );
     }
 
     #[test]

@@ -4,7 +4,7 @@
 //!   cargo run --release --bin mini_game_headless -- --screenshot screen_caps/.../out.png
 //!
 //! 实时 YOLO+OCR 预览（手动操作）：
-//!   cargo run --release --bin mini_game -- --vision-preview --model models/yolo_nangang_e3000_best.onnx
+//!   cargo run --release --bin mini_game -- --vision-preview --model onnx/yolo_nangang_e3000_best.onnx
 //!
 //! 规则 Bot 自动玩（另开终端）：
 //!   cargo run --release --bin game_preview
@@ -14,8 +14,8 @@ use std::path::PathBuf;
 
 use macroquad::prelude::*;
 use mxd_tools::game::{
-    self, GameSim, InputFrame, LOGIC_DT, VISION_CONF_THRESH, VisionPipeline, VisionStep, WINDOW_H,
-    WINDOW_W,
+    self, default_yolo_model_path, GameSim, InputFrame, LOGIC_DT, VISION_CONF_THRESH, VisionPipeline,
+    VisionStep, WINDOW_H, WINDOW_W,
 };
 use mxd_tools::game::view;
 use mxd_tools::yolo::YoloDevice;
@@ -80,7 +80,8 @@ async fn main() {
 
     if vision_preview {
         let model = arg_value(&args, "--model")
-            .unwrap_or_else(|| "models/yolo_nangang_e3000_best.onnx".to_string());
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| default_yolo_model_path().display().to_string());
         match VisionPipeline::load(
             PathBuf::from(&model).as_path(),
             YoloDevice::Cpu,

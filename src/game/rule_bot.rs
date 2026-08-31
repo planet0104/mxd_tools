@@ -426,11 +426,18 @@ impl RuleBot {
                 self.note_move_dir(&out);
                 return out;
             }
-            // 本段已清：换层跳优先，远处怪不得挡住。
-            if !melee_hold && self.try_edge_jump(ctx, &mut out) {
-                self.last_reason = "seek_edge_jump";
-                self.note_move_dir(&out);
-                return out;
+            // 本段已清：可落缘先走下；真虚空边再换层跳。远处怪不得挡住。
+            if !melee_hold {
+                if self.try_drop_walk(ctx, &mut out) {
+                    self.last_reason = "seek_drop";
+                    self.note_move_dir(&out);
+                    return out;
+                }
+                if self.try_edge_jump(ctx, &mut out) {
+                    self.last_reason = "seek_edge_jump";
+                    self.note_move_dir(&out);
+                    return out;
+                }
             }
             self.try_seek_vertical_walk(ctx, &mut out);
             self.ensure_locomotion(ctx, &mut out);
@@ -493,6 +500,11 @@ impl RuleBot {
 
     /// 同台近距有怪时禁止朝怪方向走。腾空/跳跃/攀爬时绝不禁走（否则换层跳会被撕掉）。
     fn strip_chase_toward_mob(&self, ctx: RuleBotCtx<'_>, out: &mut InputFrame) {
+        // 已离首台换层探索：不要禁走，否则贴崖+怪在可走侧会 noop 卡死。
+        if self.explore_mode == ExploreMode::SeekVertical && self.left_first_platform_layer(ctx)
+        {
+            return;
+        }
         if !ctx.on_ground || out.jump || out.up || out.down {
             return;
         }
@@ -555,10 +567,14 @@ impl RuleBot {
         }
     }
 
-    /// 与 movement_gate.walk_allowed 对齐：物理悬崖或 YOLO 前方无地板 → 不可走。
+    /// 与 movement_gate.walk_allowed 对齐：物理悬崖挡死；可落下缘允许走下去。
     fn can_walk_dir(ctx: RuleBotCtx<'_>, dir: f32) -> bool {
         if dir == 0.0 {
             return false;
+        }
+        // 下方有平台的落缘：主动走下去换层，不要当成虚空。
+        if Self::physics_drop_ahead(ctx, dir) {
+            return true;
         }
         if Self::at_cliff(ctx, dir) {
             return false;
@@ -609,13 +625,19 @@ impl RuleBot {
         let _ = self.try_leave_edge(ctx, -dir, out);
     }
 
-    /// 贴边换层：台阶跳 / 悬崖跳 / 可落点走出。
+    /// 贴边换层：可落先走下 → 台阶跳 / 悬崖跳。
     fn try_leave_edge(
         &mut self,
         ctx: RuleBotCtx<'_>,
         dir: f32,
         out: &mut InputFrame,
     ) -> bool {
+        // 右/左下方有平台：走下去，禁止在可落缘瞎跳（永远够不着右上高台）。
+        if Self::physics_drop_ahead(ctx, dir) {
+            set_move_dir(out, dir, false);
+            self.patrol_dir = dir;
+            return true;
+        }
         if ctx.step_up_dx.is_some()
             && self.try_edge_jump_dir(ctx, dir, JumpPurpose::StepUp, out)
         {
@@ -1300,6 +1322,7 @@ impl RuleBot {
             return false;
         }
         if ctx.climbing {
+            // 已在绳上：优先继续上；到顶由 sim 落平台。
             out.up = true;
             return true;
         }
@@ -1310,10 +1333,28 @@ impl RuleBot {
             return false;
         };
 
-        self.climb_attempt_ticks = self.climb_attempt_ticks.saturating_add(1);
+        // 站在绳顶平台时会一直收到 Down：若本层还能走/跳，禁止立刻下爬（日志里卡死主因）。
+        if climb.dir == ClimbDir::Down && ctx.on_ground {
+            let can_explore = Self::can_walk_dir(ctx, 1.0)
+                || Self::can_walk_dir(ctx, -1.0)
+                || ctx.step_up_dx.is_some();
+            if can_explore || self.ticks_on_band < BAND_STAGNATION_DECISIONS {
+                self.climb_attempt_ticks = 0;
+                return false;
+            }
+        }
+
         if climb.dx.abs() > CLIMB_ALIGN_PX {
+            self.climb_attempt_ticks = 0;
             set_move_dir(out, climb.dx.signum(), false);
             return true;
+        }
+
+        // 已对准仍卡住：放弃本轮抓绳，改走路。
+        self.climb_attempt_ticks = self.climb_attempt_ticks.saturating_add(1);
+        if self.climb_attempt_ticks > 20 {
+            self.climb_attempt_ticks = 0;
+            return false;
         }
 
         match climb.dir {
@@ -1365,7 +1406,23 @@ impl RuleBot {
 
     fn try_edge_jump(&self, ctx: RuleBotCtx<'_>, out: &mut InputFrame) -> bool {
         let facing = if self.patrol_dir >= 0.0 { 1.0 } else { -1.0 };
+        // 可落缘不要跳：跳出去够不着右上高台，只会反复空跳。
+        if Self::physics_drop_ahead(ctx, facing) {
+            return false;
+        }
         self.try_edge_jump_dir(ctx, facing, JumpPurpose::PlatformChange, out)
+    }
+
+    /// 走向可落下缘（下方有更低平台），不跳。
+    fn try_drop_walk(&mut self, ctx: RuleBotCtx<'_>, out: &mut InputFrame) -> bool {
+        for dir in [self.patrol_dir.signum(), -self.patrol_dir.signum()] {
+            if Self::physics_drop_ahead(ctx, dir) {
+                set_move_dir(out, dir, false);
+                self.patrol_dir = dir;
+                return true;
+            }
+        }
+        false
     }
 
     fn try_edge_jump_dir(
@@ -1434,29 +1491,36 @@ impl RuleBot {
     /// SeekVertical：优先紧邻绳梯 / 台阶；否则找可落边，不再追远处上层绳。
     fn try_seek_vertical_walk(&mut self, ctx: RuleBotCtx<'_>, out: &mut InputFrame) {
         if let Some(climb) = ctx.climb {
-            if climb.dx.abs() > CLIMB_ALIGN_PX {
-                let dir = climb.dx.signum();
-                if Self::can_walk_dir(ctx, dir) {
-                    set_move_dir(out, dir, false);
-                    self.patrol_dir = dir;
-                } else if self.try_leave_edge(ctx, dir, out) {
-                    return;
-                } else if Self::can_walk_dir(ctx, -dir) {
-                    self.patrol_dir = -dir;
-                    set_move_dir(out, -dir, false);
-                }
-            } else {
-                match climb.dir {
-                    ClimbDir::Up => {
-                        out.up = true;
-                        if ctx.on_ground {
-                            out.jump = true;
-                        }
+            // 地面上的 Down 提示交给 try_climb 统一过滤；这里只处理需对齐的走位/上爬。
+            let take = match climb.dir {
+                ClimbDir::Down if ctx.on_ground => false,
+                _ => true,
+            };
+            if take {
+                if climb.dx.abs() > CLIMB_ALIGN_PX {
+                    let dir = climb.dx.signum();
+                    if Self::can_walk_dir(ctx, dir) {
+                        set_move_dir(out, dir, false);
+                        self.patrol_dir = dir;
+                    } else if self.try_leave_edge(ctx, dir, out) {
+                        return;
+                    } else if Self::can_walk_dir(ctx, -dir) {
+                        self.patrol_dir = -dir;
+                        set_move_dir(out, -dir, false);
                     }
-                    ClimbDir::Down => out.down = true,
+                } else {
+                    match climb.dir {
+                        ClimbDir::Up => {
+                            out.up = true;
+                            if ctx.on_ground {
+                                out.jump = true;
+                            }
+                        }
+                        ClimbDir::Down => out.down = true,
+                    }
                 }
+                return;
             }
-            return;
         }
 
         if self.try_step_up(ctx, out) {
@@ -2067,7 +2131,7 @@ mod tests {
             kills: 3,
             physics_right_ok: Some(false),
             physics_left_ok: Some(true),
-            physics_drop_right: Some(true),
+            physics_drop_right: Some(false),
             physics_drop_left: None,
             sim_mob_in_melee: false,
             sim_mob_on_attackable_footing: true,
@@ -2441,7 +2505,8 @@ mod tests {
             kills: 2,
             physics_right_ok: Some(false),
             physics_left_ok: Some(true),
-            physics_drop_right: Some(true),
+            // 真虚空/隔空跳：无落下平台。可落缘应走下去而不是跳。
+            physics_drop_right: Some(false),
             physics_drop_left: None,
             sim_mob_in_melee: false,
             sim_mob_on_attackable_footing: true,
@@ -3057,6 +3122,153 @@ mod tests {
         let inp = bot.decide(ctx);
         assert!(inp.left, "should walk toward left step-up ledge");
         assert!(!inp.jump, "not yet aligned; no blind jump");
+    }
+
+    #[test]
+    fn rope_top_ground_ignores_down_climb_and_walks() {
+        // 复现日志：爬绳到 (1020,865) 后 climb=Down，一直按 down 不动。
+        let mut bot = RuleBot::default();
+        bot.initialized = true;
+        bot.farm_y = 1105.0;
+        bot.spawn_y = 1225.0;
+        bot.spawn_y_band = visit_key(400.0, 1225.0).1;
+        bot.last_y_band = visit_key(1020.0, 865.0).1;
+        bot.ticks_on_band = 5;
+        bot.explore_mode = ExploreMode::SeekVertical;
+        bot.stuck_phase = StuckPhase::Reverse;
+        bot.stuck_phase_ticks = 10;
+        bot.patrol_dir = 1.0;
+        let obs = [0.0_f32; OBS_DIM];
+        let ctx = RuleBotCtx {
+            obs: &obs,
+            facing: 1.0,
+            on_ground: true,
+            climbing: false,
+            hp: 100,
+            max_hp: 100,
+            potions: 0,
+            player_x: 1020.0,
+            player_y: 865.0,
+            kills: 7,
+            physics_right_ok: Some(true),
+            physics_left_ok: Some(true),
+            physics_drop_right: Some(false),
+            physics_drop_left: Some(false),
+            sim_mob_in_melee: false,
+            sim_mob_on_attackable_footing: false,
+            engage: None,
+            engage_wide: None,
+            climb: Some(ClimbHint {
+                dx: 0.0,
+                dir: ClimbDir::Down,
+            }),
+            step_up_dx: Some(-100.0),
+            farm_band_mobs: false,
+        };
+        let inp = bot.decide(ctx);
+        assert!(
+            !inp.down,
+            "must not hold down at rope top; reason={}",
+            bot.last_reason
+        );
+        assert!(
+            inp.left || inp.right || inp.jump || inp.up,
+            "should explore horizontally / step-up instead of standing; reason={}",
+            bot.last_reason
+        );
+    }
+
+    #[test]
+    fn seek_prefers_drop_walk_over_edge_jump() {
+        // 次高台右崖：下方有平台可落，禁止对着右上方空跳。
+        let mut bot = RuleBot::default();
+        bot.initialized = true;
+        bot.farm_y = 805.0;
+        bot.spawn_y = 1225.0;
+        bot.spawn_y_band = visit_key(400.0, 1225.0).1;
+        bot.last_y_band = visit_key(902.0, 805.0).1;
+        bot.ticks_on_band = 20;
+        bot.explore_mode = ExploreMode::SeekVertical;
+        bot.patrol_dir = 1.0;
+        let obs = [0.0_f32; OBS_DIM];
+        let ctx = RuleBotCtx {
+            obs: &obs,
+            facing: 1.0,
+            on_ground: true,
+            climbing: false,
+            hp: 100,
+            max_hp: 100,
+            potions: 0,
+            player_x: 902.0,
+            player_y: 805.0,
+            kills: 7,
+            physics_right_ok: Some(false),
+            physics_left_ok: Some(true),
+            physics_drop_right: Some(true),
+            physics_drop_left: Some(false),
+            sim_mob_in_melee: false,
+            sim_mob_on_attackable_footing: false,
+            engage: None,
+            engage_wide: None,
+            climb: None,
+            step_up_dx: None,
+            farm_band_mobs: false,
+        };
+        let inp = bot.decide(ctx);
+        assert!(
+            inp.right && !inp.jump,
+            "must walk off drop ledge, not jump; reason={} right={} jump={}",
+            bot.last_reason,
+            inp.right,
+            inp.jump
+        );
+        assert_eq!(bot.last_reason, "seek_drop");
+    }
+
+    #[test]
+    fn seek_walks_to_up_climb_instead_of_step_back() {
+        // 落到 y=865 后应走向右上绳，而不是 step_up 跳回左边 805。
+        let mut bot = RuleBot::default();
+        bot.initialized = true;
+        bot.farm_y = 865.0;
+        bot.spawn_y = 1225.0;
+        bot.spawn_y_band = visit_key(400.0, 1225.0).1;
+        bot.last_y_band = visit_key(961.0, 865.0).1;
+        bot.explore_mode = ExploreMode::SeekVertical;
+        bot.patrol_dir = -1.0;
+        let obs = [0.0_f32; OBS_DIM];
+        let ctx = RuleBotCtx {
+            obs: &obs,
+            facing: -1.0,
+            on_ground: true,
+            climbing: false,
+            hp: 100,
+            max_hp: 100,
+            potions: 0,
+            player_x: 961.0,
+            player_y: 865.0,
+            kills: 7,
+            physics_right_ok: Some(true),
+            physics_left_ok: Some(true),
+            physics_drop_right: Some(false),
+            physics_drop_left: Some(false),
+            sim_mob_in_melee: false,
+            sim_mob_on_attackable_footing: false,
+            engage: None,
+            engage_wide: None,
+            climb: Some(ClimbHint {
+                dx: 131.0,
+                dir: ClimbDir::Up,
+            }),
+            step_up_dx: Some(-41.0),
+            farm_band_mobs: false,
+        };
+        let inp = bot.decide(ctx);
+        assert!(
+            inp.right && !inp.left && !inp.jump,
+            "must walk toward Up climb, not step_up left; reason={}",
+            bot.last_reason
+        );
     }
 
     #[test]

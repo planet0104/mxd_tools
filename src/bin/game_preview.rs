@@ -18,8 +18,8 @@ use macroquad::prelude::*;
 use mxd_tools::game::action::input_label;
 use mxd_tools::game::view;
 use mxd_tools::game::{
-    self, DeferredCaptureVision, FirstPlatformTracker, GameSim, InputFrame, LOGIC_DT,
-    ProbeDriver, VisionAnchorConfig, VisionPaceConfig, VisionPipeline, VISION_CONF_THRESH,
+    self, default_yolo_model_path, DeferredCaptureVision, FirstPlatformTracker, GameSim, InputFrame,
+    LOGIC_DT, ProbeDriver, VisionAnchorConfig, VisionPaceConfig, VisionPipeline, VISION_CONF_THRESH,
     FIRST_PLATFORM_PROBE_TICKS, evaluate_first_platform_report, format_first_platform_preview_done,
     OBS_FLOOR_SLOTS, OBS_FLOOR_START, OBS_SLOT_DIM, WINDOW_H, WINDOW_W,
 };
@@ -69,7 +69,6 @@ impl Cli {
             );
             std::process::exit(2);
         }
-        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let detect_hz = arg_f32(args, "--detect-hz", 10.0);
         let probe = args
             .iter()
@@ -82,8 +81,7 @@ impl Cli {
             arg_u64(args, "--auto-ticks", 0) as u32
         };
         Self {
-            model: arg_path(args, "--model")
-                .unwrap_or_else(|| manifest.join("models/yolo_nangang_e3000_best.onnx")),
+            model: arg_path(args, "--model").unwrap_or_else(default_yolo_model_path),
             episode_seed: arg_u64(args, "--seed", 0),
             pace: VisionPaceConfig::from_detect_hz(detect_hz),
             quiet: probe.is_some() || args.iter().any(|a| a == "--quiet"),
