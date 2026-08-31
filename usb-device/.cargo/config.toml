@@ -1,0 +1,20 @@
+[target.xtensa-esp32s2-none-elf]
+runner = "espflash flash --monitor --chip esp32s2"
+
+# 阻断父目录 mxd_tools/.cargo/config.toml 的主机端 env 继承，保持本项目独立。
+[env]
+LIBCLANG_PATH = { unset = true }
+OPENCV_INCLUDE_PATHS = { unset = true }
+OPENCV_LINK_PATHS = { unset = true }
+OPENCV_LINK_LIBS = { unset = true }
+OPENCV_MSVC_CRT = { unset = true }
+
+[build]
+rustflags = [
+  "-C", "link-arg=-nostartfiles",
+]
+
+target = "xtensa-esp32s2-none-elf"
+
+[unstable]
+build-std = ["core"]
