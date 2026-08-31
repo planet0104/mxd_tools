@@ -2,10 +2,9 @@
 //!
 //! WGL 仍需要绑定 HWND，无法完全无窗；此处把占位窗隐藏并从任务栏移除，
 //! 实际 1368×768 画面仍由 `game::view` 的离屏 `RenderTarget` 产出。
+//! 可视化请用 `game_preview`。
 
 use macroquad::miniquad::conf::{Conf, Platform};
-
-use crate::game::{WINDOW_H, WINDOW_W};
 
 /// miniquad 在 Windows 上注册的窗口类名（固定值）。
 const MINIQUAD_CLASS: &str = "MINIQUADAPP";
@@ -25,30 +24,6 @@ pub fn headless_window_conf(window_title: impl Into<String>) -> Conf {
         },
         ..Default::default()
     }
-}
-
-/// 训练可视化窗口（缩放显示，关 VSync 避免拖慢 eval）。
-pub fn visible_training_window_conf(window_title: impl Into<String>) -> Conf {
-    Conf {
-        window_title: window_title.into(),
-        window_width: (WINDOW_W / 3.0).round() as i32,
-        window_height: (WINDOW_H / 3.0).round() as i32,
-        window_resizable: true,
-        high_dpi: true,
-        platform: Platform {
-            swap_interval: Some(0),
-            ..Default::default()
-        },
-        ..Default::default()
-    }
-}
-
-/// 是否应隐藏 GL 占位窗（worker 子进程恒为 true；主进程仅非 `--visible` 时隐藏）。
-pub fn should_hide_gl_window(args: &[String]) -> bool {
-    if args.iter().any(|a| a == "--worker-daemon" || a == "--worker-eval") {
-        return true;
-    }
-    !args.iter().any(|a| a == "--visible")
 }
 
 /// 在 `#[macroquad::main]` 进入 `async fn main` 后立刻调用：隐藏 GL 占位窗。

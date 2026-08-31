@@ -34,12 +34,15 @@ serde_json = "1"
 urlencoding = "2"
 macroquad = "0.4.14"
 rand = "0.8.5"
+ctrlc = "3.4"
+pollster = "0.4"
 
 [target.'cfg(windows)'.dependencies]
 raw-window-handle = "0.6"
 windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    "Win32_System_Console",
     "Win32_System_LibraryLoader",
     "Win32_System_ProcessStatus",
     "Win32_System_Threading",
@@ -56,3 +59,13 @@ rev = "2024.12.16"
 
 [package.metadata.vcpkg.target]
 x86_64-pc-windows-msvc = { triplet = "x64-windows-static-md", dependencies = ["opencv4"] }
+
+[[test]]
+name = "bot_yolo_probe"
+path = "tests/bot_yolo_probe.rs"
+harness = false
+
+[[test]]
+name = "game_preview_first_platform"
+path = "tests/game_preview_first_platform.rs"
+harness = true

@@ -1,0 +1,106 @@
+# Detached max-5 loop. Launched via cmd start so it survives IDE kills.
+$ErrorActionPreference = "Continue"
+Set-Location "C:\Users\glsa-\Desktop\mxd_classic\mxd_tools"
+$outLog = "tmp\max5_supervisor.log"
+function L($m) {
+  $line = "[{0}] {1}" -f (Get-Date -Format "HH:mm:ss"), $m
+  Add-Content $outLog $line -Encoding UTF8
+  Write-Host $line
+}
+
+$maxRounds = 5
+$exe = ".\target\release\neat_trainer.exe"
+$preview = ".\target\release\neat_preview.exe"
+New-Item -ItemType Directory -Force -Path tmp | Out-Null
+L "START maxRounds=$maxRounds"
+
+function Stop-All {
+  Get-Process neat_trainer,neat_preview -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
+  Start-Sleep 2
+}
+
+function Probe0 {
+  $pr = Start-Process -FilePath $preview -ArgumentList @(
+    "--auto-ticks","7200","--seed","0","--detect-hz","5","--quiet","--no-watch","--anchor-offset","0"
+  ) -WorkingDirectory (Get-Location) -PassThru -WindowStyle Minimized
+  if (-not $pr.WaitForExit(180000)) {
+    Stop-Process -Id $pr.Id -Force -EA SilentlyContinue
+    return 2
+  }
+  if ($null -eq $pr.ExitCode) { return 2 }
+  return [int]$pr.ExitCode
+}
+
+function Run-OneTrain($fresh, $log) {
+  $arg = @("--sim-detect")
+  if ($fresh) { $arg += "--fresh" }
+  $arg += @(
+    "--population","40","--workers","12","--generations","90000",
+    "--detect-hz","10","--max-ticks","36000",
+    "--sim-dropout","0.32","--sim-jitter","20","--sim-class-noise","0.14","--sim-size-jitter","0.25",
+    "--log-file", $log
+  )
+  Stop-All
+  $p = Start-Process -FilePath $exe -ArgumentList $arg -WorkingDirectory (Get-Location) -PassThru -WindowStyle Hidden
+  L ("train pid={0} fresh={1} log={2}" -f $p.Id, $fresh, $log)
+  $deadline = (Get-Date).AddMinutes(22)
+  while ((Get-Date) -lt $deadline) {
+    Start-Sleep 25
+    # kill foreign mains
+    Get-CimInstance Win32_Process -Filter "Name='neat_trainer.exe'" -EA SilentlyContinue | ForEach-Object {
+      $c = $_.CommandLine
+      if (-not $c) { return }
+      if ($c -match '--worker-daemon') {
+        if ($_.ParentProcessId -ne $p.Id) {
+          Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue
+        }
+        return
+      }
+      if ($_.ProcessId -ne $p.Id) {
+        L ("kill foreign main {0}" -f $_.ProcessId)
+        Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue
+      }
+    }
+    $alive = $null -ne (Get-Process -Id $p.Id -EA SilentlyContinue)
+    $done = (Test-Path $log) -and (Select-String -Path $log -Pattern "训练完成" -Quiet -EA SilentlyContinue)
+    $tail = if (Test-Path $log) { (Get-Content $log -Tail 1 -EA SilentlyContinue) } else { "" }
+    L ("n={0} alive={1} done={2} | {3}" -f @(Get-Process neat_trainer -EA SilentlyContinue).Count, $alive, $done, $tail)
+    if ($done) { Stop-All; return $true }
+    if (-not $alive) {
+      L "MAIN_DIED resume"
+      Stop-All
+      $argR = @("--sim-detect","--population","40","--workers","12","--generations","90000",
+        "--detect-hz","10","--max-ticks","36000",
+        "--sim-dropout","0.32","--sim-jitter","20","--sim-class-noise","0.14","--sim-size-jitter","0.25",
+        "--log-file", $log)
+      $p = Start-Process -FilePath $exe -ArgumentList $argR -WorkingDirectory (Get-Location) -PassThru -WindowStyle Hidden
+      L ("resumed pid={0}" -f $p.Id)
+    }
+  }
+  Stop-All
+  return ((Test-Path $log) -and (Select-String -Path $log -Pattern "训练完成" -Quiet -EA SilentlyContinue))
+}
+
+for ($r = 1; $r -le $maxRounds; $r++) {
+  L "======== ROUND $r / $maxRounds ========"
+  $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
+  $log = "tmp\max5_train_r${r}_$stamp.log"
+  $ok = Run-OneTrain $true $log
+  if (-not $ok) {
+    L "ROUND $r TRAIN_FAIL"
+    continue
+  }
+  L "TRAIN_DONE probe seed=0"
+  $e0 = Probe0
+  L "ROUND $r PROBE0=$e0"
+  if ($e0 -eq 0) {
+    L "VERDICT=OK round=$r"
+    Set-Content tmp\max5_result.txt "OK round=$r" -Encoding UTF8
+    exit 0
+  }
+  L "ROUND $r STAGNANT"
+}
+
+L "STOP after $maxRounds rounds — GIVE_UP"
+Set-Content tmp\max5_result.txt "GIVE_UP" -Encoding UTF8
+exit 1

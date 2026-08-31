@@ -1,0 +1,397 @@
+# NEAT 训练 autopilot：30 分钟巡检；停滞则停训 → 诊断(preview) → 续跑。
+param(
+    [int]$IntervalMin = 30,
+    [int]$StuckMinutes = 45,
+    [int]$StartupGraceMin = 10,
+    [int]$TotalGenerations = 25000,
+    [int]$Population = 40,
+    [float]$DetectHz = 5,
+    [int]$MaxTicks = 18000,
+    [switch]$SimDetect,
+    [float]$AnchorOffset = 10.0,
+    [string]$StopAt = "2026-08-28T10:00:00",
+    [string]$ProjectRoot = (Split-Path $PSScriptRoot -Parent),
+    [string]$TrainLog = ""
+)
+
+$ErrorActionPreference = "Continue"
+$LogDir = Join-Path $ProjectRoot "tmp"
+$AutoLog = Join-Path $LogDir "train_autopilot.log"
+$PidFile = Join-Path $LogDir "train_autopilot.pid"
+$StateFile = Join-Path $LogDir "train_autopilot_state.json"
+$DiagDir = Join-Path $LogDir "autopilot_diag"
+$Checkpoint = Join-Path $LogDir "neat_checkpoint.json"
+$BestGenome = Join-Path $LogDir "neat_best_genome.json"
+$SessionBest = Join-Path $LogDir "neat_session_best.json"
+$TrainerExe = Join-Path $ProjectRoot "target\release\neat_trainer.exe"
+$PreviewExe = Join-Path $ProjectRoot "target\release\neat_preview.exe"
+$StopTime = [datetime]::Parse($StopAt)
+
+function Write-Auto([string]$Msg) {
+    $line = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] $Msg"
+    Add-Content -Path $AutoLog -Value $line -Encoding UTF8
+    Write-Host $line
+}
+
+function Read-Json([string]$Path) {
+    if (-not (Test-Path $Path)) { return $null }
+    try { Get-Content $Path -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $null }
+}
+
+function Get-TrainerProcs {
+    # Get-Process 在大量 neat_trainer 子进程时会极慢/卡死，改用 WMI
+    Get-CimInstance Win32_Process -Filter "Name='neat_trainer.exe'" -ErrorAction SilentlyContinue
+}
+
+function Find-LatestTrainLog {
+    if ($TrainLog -and (Test-Path $TrainLog)) { return (Resolve-Path $TrainLog).Path }
+    $files = Get-ChildItem -Path $LogDir -Filter "neat_train_*.log" -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending
+    if ($files) { return $files[0].FullName }
+    return $null
+}
+
+function Parse-TrainLog([string]$Path) {
+    $result = @{
+        SpawnsCompleted = -1
+        TotalTarget = $TotalGenerations
+        BestFitness = -1.0
+        LastLine = ""
+        LogAgeMin = 9999.0
+    }
+    if (-not $Path -or -not (Test-Path $Path)) { return $result }
+    $result.LogAgeMin = ((Get-Date) - (Get-Item $Path).LastWriteTime).TotalMinutes
+    try {
+        $tail = Get-Content -Path $Path -Tail 400 -Encoding UTF8 -ErrorAction Stop
+    } catch {
+        return $result
+    }
+    if (-not $tail) { return $result }
+    $result.LastLine = $tail[-1]
+    foreach ($line in ($tail | Select-Object -Last 120)) {
+        # completion: ... fitness=X (spawn/total)
+        if ($line -match '\(\D*(\d+)\/(\d+)\)') {
+            $result.SpawnsCompleted = [int]$Matches[1]
+            $result.TotalTarget = [int]$Matches[2]
+        }
+        # heartbeat: ... N/total ... parallel40 ... bestA/B
+        if ($line -match '并行\d+' -or $line -match 'parallel') {
+            if ($line -match '\s(\d+)\/(\d+)\s') {
+                $c = [int]$Matches[1] - 1
+                if ($c -gt $result.SpawnsCompleted) {
+                    $result.SpawnsCompleted = $c
+                    $result.TotalTarget = [int]$Matches[2]
+                }
+            }
+            if ($line -match '([\d.]+)\/([\d.]+)\s*$') {
+                $result.BestFitness = [double]$Matches[1]
+            }
+        }
+    }
+    return $result
+}
+
+function Load-State {
+    $s = Read-Json $StateFile
+    if (-not $s) {
+        return @{
+            LastSpawns = -1
+            LastBest = 0.0
+            LastProgressUtc = (Get-Date).ToUniversalTime().ToString("o")
+            StallCount = 0
+            FitnessShaping = 0.10
+            TrainLog = ""
+            LastAction = "init"
+        }
+    }
+    @{
+        LastSpawns = [int]$s.LastSpawns
+        LastBest = [double]$s.LastBest
+        LastProgressUtc = [string]$s.LastProgressUtc
+        StallCount = [int]$s.StallCount
+        FitnessShaping = if ($null -ne $s.FitnessShaping) { [double]$s.FitnessShaping } else { 0.10 }
+        TrainLog = [string]$s.TrainLog
+        LastAction = [string]$s.LastAction
+    }
+}
+
+function Save-State($state) {
+    @{
+        LastSpawns = $state.LastSpawns
+        LastBest = $state.LastBest
+        LastProgressUtc = $state.LastProgressUtc
+        StallCount = $state.StallCount
+        FitnessShaping = $state.FitnessShaping
+        TrainLog = $state.TrainLog
+        LastAction = $state.LastAction
+    } | ConvertTo-Json | Set-Content $StateFile -Encoding UTF8
+}
+
+function Stop-Training {
+    Write-Auto "stop all neat_trainer processes"
+    foreach ($proc in @(Get-TrainerProcs)) {
+        Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+    Start-Sleep -Seconds 5
+    $left = @(Get-TrainerProcs)
+    if ($left.Count -gt 0) {
+        Write-Auto "warn: $($left.Count) neat_trainer still alive, kill again"
+        foreach ($proc in $left) {
+            Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+        Start-Sleep -Seconds 3
+    }
+}
+
+function Invoke-PreviewDiag([string]$Tag) {
+    New-Item -ItemType Directory -Force -Path $DiagDir | Out-Null
+    $stderrLog = Join-Path $DiagDir "preview_$Tag.log"
+    $stdoutLog = Join-Path $DiagDir "preview_${Tag}_out.log"
+    if (-not (Test-Path $PreviewExe)) {
+        Write-Auto "build neat_preview"
+        Push-Location $ProjectRoot
+        cargo build --release --bin neat_preview 2>&1 | Out-Null
+        Pop-Location
+    }
+    if (-not (Test-Path $PreviewExe)) {
+        Write-Auto "skip preview: exe missing"
+        return $stderrLog
+    }
+    $genome = if (Test-Path $SessionBest) { $SessionBest } else { $BestGenome }
+    # auto-ticks 探针通常 10–20s 结束；45s 超时即可，勿等数分钟。
+    $timeoutMs = 45000
+    Write-Auto "preview diag -> $stderrLog (genome=$genome, auto-ticks=3600, timeout ${timeoutMs}ms)"
+    $args = @(
+        "--genome", $genome,
+        "--no-watch",
+        "--quiet",
+        "--detect-hz", "$DetectHz",
+        "--seed", "445",
+        "--auto-ticks", "3600",
+        "--anchor-offset", "$AnchorOffset"
+    )
+    $p = Start-Process -FilePath $PreviewExe -ArgumentList $args `
+        -WorkingDirectory $ProjectRoot `
+        -RedirectStandardError $stderrLog `
+        -RedirectStandardOutput $stdoutLog `
+        -PassThru -WindowStyle Hidden
+    $done = $p.WaitForExit($timeoutMs)
+    if (-not $done) {
+        Write-Auto "preview timeout, kill pid=$($p.Id)"
+        Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+    } else {
+        Write-Auto "preview done exit=$($p.ExitCode) in <${timeoutMs}ms budget"
+    }
+    return $stderrLog
+}
+
+function Analyze-Diag([string]$PreviewLog, $snap, $logSnap) {
+    $lines = @()
+    $lines += "spawns=$($logSnap.SpawnsCompleted)/$($logSnap.TotalTarget) best=$($logSnap.BestFitness) logAge=$([math]::Round($logSnap.LogAgeMin,1))min"
+    if ($snap) {
+        $lines += "checkpoint gen=$($snap.population.generation) best_ever=$($snap.population.best_ever.fitness)"
+    }
+    if ($PreviewLog -and (Test-Path $PreviewLog)) {
+        $pt = Get-Content $PreviewLog -Tail 80 -Encoding UTF8 -ErrorAction SilentlyContinue
+        $verdict = ($pt | Select-String -Pattern "AUTO_VERDICT=|PREVIEW_DONE").Line | Select-Object -Last 2
+        $probe = ($pt | Select-String -Pattern "AUTO_PROBE").Line | Select-Object -Last 1
+        if ($probe) { $lines += "  $probe" }
+        foreach ($v in $verdict) { $lines += "  $v" }
+        $kills = ($pt | Select-String -Pattern "kill|mob_kill|KIL" -CaseSensitive:$false).Count
+        $pickups = ($pt | Select-String -Pattern "pickup|meso|PickUp" -CaseSensitive:$false).Count
+        $idle = ($pt | Select-String -Pattern "forfeit|idle|stagn" -CaseSensitive:$false).Count
+        $lines += "preview_tail: kill_lines~$kills pickup_lines~$pickups idle_lines~$idle"
+    }
+    return ($lines -join "`n")
+}
+
+function Start-Training([string]$Reason, [string]$LogPath, [double]$FitnessShaping) {
+    Stop-Training
+    if (-not (Test-Path $TrainerExe)) {
+        Write-Auto "build neat_trainer"
+        Push-Location $ProjectRoot
+        cargo build --release --bin neat_trainer 2>&1 | Out-Null
+        Pop-Location
+    }
+    $fresh = -not (Test-Path $Checkpoint)
+    $args = @(
+        "--generations", "$TotalGenerations",
+        "--population", "$Population",
+        "--detect-hz", "$DetectHz",
+        "--max-ticks", "$MaxTicks",
+        "--fitness-shaping", "$FitnessShaping",
+        "--log-file", $LogPath
+    )
+    if ($SimDetect) {
+        $args += @(
+            "--sim-detect",
+            "--sim-jitter", "12",
+            "--sim-size-jitter", "0.15",
+            "--sim-dropout", "0.15",
+            "--sim-fp-rate", "0.03",
+            "--sim-conf-noise", "0.12",
+            "--sim-class-noise", "0.06",
+            "--anchor-offset", "$AnchorOffset"
+        )
+    }
+    if ($fresh) {
+        $args += "--fresh"
+    }
+    Write-Auto "start training reason=$Reason fresh=$fresh shaping=$FitnessShaping log=$LogPath"
+    Write-Auto "args: $($args -join ' ')"
+    $p = Start-Process -FilePath $TrainerExe -ArgumentList $args `
+        -WorkingDirectory $ProjectRoot -PassThru -WindowStyle Hidden
+    Write-Auto "train pid=$($p.Id)"
+}
+
+function Test-TrainingDone($logSnap) {
+    if ($logSnap.SpawnsCompleted -ge 0 -and $logSnap.SpawnsCompleted -ge $TotalGenerations) {
+        return $true
+    }
+    $ck = Read-Json $Checkpoint
+    if ($ck -and $ck.spawns_completed -ge $TotalGenerations) { return $true }
+    return $false
+}
+
+New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+New-Item -ItemType Directory -Force -Path $DiagDir | Out-Null
+$PID | Set-Content $PidFile -Encoding ASCII
+Write-Auto "autopilot boot pid=$PID"
+
+$state = Load-State
+$trainLogPath = if ($state.TrainLog) { $state.TrainLog } else { Find-LatestTrainLog }
+if (-not $trainLogPath) {
+    $trainLogPath = Join-Path $LogDir ("neat_train_{0}.log" -f (Get-Date -Format "yyyyMMdd_HHmmss"))
+}
+$state.TrainLog = $trainLogPath
+$startupUtc = (Get-Date).ToUniversalTime()
+
+# sync baseline from checkpoint so attach mode does not false-stall
+$ckBoot = Read-Json $Checkpoint
+if ($ckBoot -and $null -ne $ckBoot.spawns_completed) {
+    $bootSpawns = [int]$ckBoot.spawns_completed
+    if ($bootSpawns -gt $state.LastSpawns) {
+        $state.LastSpawns = $bootSpawns
+        $state.LastProgressUtc = (Get-Date).ToUniversalTime().ToString("o")
+    }
+    if ($ckBoot.population -and $ckBoot.population.best_ever) {
+        $bootBest = [double]$ckBoot.population.best_ever.fitness
+        if ($bootBest -gt $state.LastBest) { $state.LastBest = $bootBest }
+    }
+}
+
+Write-Auto "autopilot start interval=${IntervalMin}min stuck=${StuckMinutes}min grace=${StartupGraceMin}min stopAt=$StopAt"
+Write-Auto "trainLog=$trainLogPath generations=$TotalGenerations simDetect=$SimDetect baselineSpawns=$($state.LastSpawns)"
+
+if (-not (Get-TrainerProcs)) {
+    Write-Auto "no trainer running, start resume"
+    Start-Training -Reason "autopilot bootstrap" -LogPath $trainLogPath -FitnessShaping $state.FitnessShaping
+    $state.LastProgressUtc = (Get-Date).ToUniversalTime().ToString("o")
+} else {
+    Write-Auto "trainer already running count=$((Get-TrainerProcs).Count) (monitor-only attach)"
+}
+
+Start-Sleep -Seconds 60
+
+while ((Get-Date) -lt $StopTime) {
+    try {
+    $trainLogPath = Find-LatestTrainLog
+    if ($trainLogPath) { $state.TrainLog = $trainLogPath }
+
+    $logSnap = Parse-TrainLog $state.TrainLog
+    $ck = Read-Json $Checkpoint
+    if ($ck -and $ck.spawns_completed -ge 0) {
+        if ($logSnap.SpawnsCompleted -lt 0 -or [int]$ck.spawns_completed -gt $logSnap.SpawnsCompleted) {
+            $logSnap.SpawnsCompleted = [int]$ck.spawns_completed
+        }
+        if ($ck.total_spawn_target -gt 0) { $logSnap.TotalTarget = [int]$ck.total_spawn_target }
+    }
+    $best = Read-Json $SessionBest
+    if ($best -and $best.fitness -gt $logSnap.BestFitness) {
+        $logSnap.BestFitness = [double]$best.fitness
+    }
+
+    $alive = [bool](Get-TrainerProcs)
+    $progress = ($logSnap.SpawnsCompleted -gt $state.LastSpawns) -or
+        ($logSnap.BestFitness -gt ($state.LastBest + 0.01))
+
+    Write-Auto "check alive=$alive spawns=$($logSnap.SpawnsCompleted)/$($logSnap.TotalTarget) best=$($logSnap.BestFitness) logAge=$([math]::Round($logSnap.LogAgeMin,1))min stall=$($state.StallCount)"
+
+    if ($progress) {
+        Write-Auto "progress spawns $($state.LastSpawns)->$($logSnap.SpawnsCompleted) best $($state.LastBest)->$($logSnap.BestFitness)"
+        $state.LastSpawns = $logSnap.SpawnsCompleted
+        $state.LastBest = $logSnap.BestFitness
+        $state.LastProgressUtc = (Get-Date).ToUniversalTime().ToString("o")
+        $state.StallCount = 0
+        $state.LastAction = "progress"
+    }
+
+    if (Test-TrainingDone $logSnap) {
+        Write-Auto "training target reached spawns=$($logSnap.SpawnsCompleted)"
+        Save-State $state
+        break
+    }
+
+    $stuckMin = ((Get-Date).ToUniversalTime() - [datetime]::Parse($state.LastProgressUtc).ToUniversalTime()).TotalMinutes
+    $inGrace = ((Get-Date).ToUniversalTime() - $startupUtc).TotalMinutes -lt $StartupGraceMin
+    $stalled = $false
+    $why = ""
+
+    if (-not $alive) {
+        if ($logSnap.LogAgeMin -lt 5 -and $progress) {
+            Write-Auto "skip stall: process handle missing but log still progressing (logAge=$([math]::Round($logSnap.LogAgeMin,1))min)"
+        } elseif ($inGrace -and $logSnap.LogAgeMin -lt 5) {
+            Write-Auto "grace: process not detected, log fresh - wait next cycle"
+        } else {
+            $stalled = $true
+            $why = "process exited unexpectedly"
+        }
+    } elseif ($logSnap.LogAgeMin -ge $StuckMinutes) {
+        $stalled = $true
+        $why = "train log no update >= ${StuckMinutes}min"
+    } elseif ($stuckMin -ge $StuckMinutes -and $logSnap.SpawnsCompleted -ge 0) {
+        $stalled = $true
+        $why = "no spawns/best progress >= ${StuckMinutes}min (last=$($state.LastSpawns) best=$($state.LastBest))"
+    }
+
+    if ($stalled) {
+        $state.StallCount++
+        $tag = Get-Date -Format "yyyyMMdd_HHmmss"
+        Write-Auto "STALL #$($state.StallCount): $why"
+
+        Stop-Training
+        $previewLog = Invoke-PreviewDiag -Tag $tag
+        $analysis = Analyze-Diag -PreviewLog $previewLog -snap $ck -logSnap $logSnap
+        $analysisFile = Join-Path $DiagDir "analysis_$tag.txt"
+        @(
+            "time=$(Get-Date -Format 'o')",
+            "reason=$why",
+            "stall_count=$($state.StallCount)",
+            "",
+            $analysis
+        ) | Set-Content $analysisFile -Encoding UTF8
+        Write-Auto "analysis saved $analysisFile"
+
+        $shaping = $state.FitnessShaping
+        if ($state.StallCount -ge 2 -and $logSnap.BestFitness -lt 50 -and $shaping -gt 0.10) {
+            $shaping = [math]::Max(0.10, $shaping - 0.05)
+            Write-Auto "auto-tweak: fitness-shaping -> $shaping (plateau suspected kill-only)"
+            $state.FitnessShaping = $shaping
+        }
+
+        Start-Training -Reason $why -LogPath $state.TrainLog -FitnessShaping $shaping
+        $state.LastProgressUtc = (Get-Date).ToUniversalTime().ToString("o")
+        $state.LastAction = "restart:$why"
+    }
+
+    Save-State $state
+    Start-Sleep -Seconds ($IntervalMin * 60)
+    } catch {
+        Write-Auto "ERROR loop: $($_.Exception.Message)"
+        Start-Sleep -Seconds 60
+    }
+}
+
+Write-Auto "autopilot end (stop time reached or training done)"
+if (Test-Path $PidFile) { Remove-Item $PidFile -Force -ErrorAction SilentlyContinue }
+Save-State $state

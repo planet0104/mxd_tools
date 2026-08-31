@@ -44,6 +44,22 @@ pub struct StandInfo {
     pub group: i32,
 }
 
+/// 相对当前脚点可用的绳/梯方向。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClimbDir {
+    /// 绳/梯底端紧邻当前层上方 → 上爬
+    Up,
+    /// 绳/梯顶端紧邻当前层且向下延伸 → 下爬
+    Down,
+}
+
+/// 仅「紧邻当前层」的绳梯目标（不含远处上层绳）。
+#[derive(Debug, Clone, Copy)]
+pub struct ClimbHint {
+    pub dx: f32,
+    pub dir: ClimbDir,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct RopeSeg {
     pub x: f32,
@@ -319,7 +335,6 @@ impl GameMap {
         fh: Option<(i32, i32)>,
     ) -> WalkAhead {
         use crate::game::types::{FALL_PROBE, SAME_LEVEL_TOL, WALL_HIT_H};
-        const EDGE_FALL_PROBE: f32 = 64.0;
 
         let y_hi = feet_y - WALL_HIT_H;
         let blocked_x = self.resolve_wall_x(x, to_x, y_hi, feet_y - 2.0, fh);
@@ -327,8 +342,13 @@ impl GameMap {
             return WalkAhead::Blocked;
         }
 
+        // 同层脚点必须用 strict_stand_at：stand_at 会跳过当前高度平台，
+        // 平地会永远到不了 SameLevel，落地稳定后整图无法走路。
+        if let Some(st) = self.strict_stand_at(to_x, feet_y) {
+            return WalkAhead::SameLevel(st.y);
+        }
         if let Some(st) = self.stand_at(to_x, feet_y, SAME_LEVEL_TOL) {
-            if (st.y - feet_y).abs() <= SAME_LEVEL_TOL && self.strict_stand_at(to_x, feet_y).is_some() {
+            if (st.y - feet_y).abs() <= SAME_LEVEL_TOL {
                 return WalkAhead::SameLevel(st.y);
             }
         }
@@ -346,17 +366,9 @@ impl GameMap {
             }
         }
 
-        if self.ground_below_at(to_x, feet_y + 2.0, EDGE_FALL_PROBE).is_some() {
-            return WalkAhead::Fall;
-        }
+        // 前方无同层脚点：下方有可接住的平台则自然下落；否则视为地图/虚空边缘挡死。
         if self.ground_below_at(to_x, feet_y + 2.0, FALL_PROBE).is_some() {
-            if let Some((lo, hi)) = self.platform_span_at(x, feet_y) {
-                if to_x >= lo && to_x <= hi {
-                    return WalkAhead::Fall;
-                }
-            } else {
-                return WalkAhead::Fall;
-            }
+            return WalkAhead::Fall;
         }
 
         WalkAhead::Blocked
@@ -431,6 +443,123 @@ impl GameMap {
         best.map(|(r, _)| r)
     }
 
+    /// 攀爬到顶落脚：顶端平台通常略高于绳顶（y 更小），`stand_at` 只向下找会漏掉。
+    pub fn stand_at_climb_exit(&self, x: f32, rope_top_y: f32) -> Option<StandInfo> {
+        const TOL_UP: f32 = 40.0;
+        const TOL_DOWN: f32 = 16.0;
+        let mut best: Option<(f32, StandInfo)> = None;
+        for p in &self.platforms {
+            let Some(py) = platform_y_at_x(p, x) else {
+                continue;
+            };
+            if py < rope_top_y - TOL_UP || py > rope_top_y + TOL_DOWN {
+                continue;
+            }
+            let dist = (py - rope_top_y).abs();
+            let info = StandInfo {
+                y: py,
+                id: p.id,
+                layer: p.layer,
+                group: p.group,
+            };
+            if best.map(|(bd, _)| dist < bd).unwrap_or(true) {
+                best = Some((dist, info));
+            }
+        }
+        best.map(|(_, info)| info)
+    }
+
+    /// 相对当前脚点：绳/梯底部紧邻上方 → 可上爬；顶部紧邻当前层且向下延伸 → 可下爬。
+    /// 远处上层绳梯不算（下层跳不上去）。
+    pub fn nearest_adjacent_climb(&self, feet_x: f32, feet_y: f32) -> Option<ClimbHint> {
+        // 上爬：绳底在脚点上方可跳跃抓取范围内。
+        const UP_REACH: f32 = 80.0;
+        const UP_BELOW_SLACK: f32 = 28.0;
+        // 下爬：绳顶贴在当前脚点附近，且绳身继续向下。
+        const DOWN_TOP_SLACK: f32 = 40.0;
+        const DOWN_MIN_LEN: f32 = 36.0;
+
+        let mut best: Option<(f32, ClimbHint)> = None;
+        for r in &self.ropes {
+            let top = r.y1.min(r.y2);
+            let bot = r.y1.max(r.y2);
+            let dx = r.x - feet_x;
+            let dist = dx.abs();
+
+            let up_ok = bot <= feet_y + UP_BELOW_SLACK && feet_y - bot <= UP_REACH;
+            if up_ok {
+                let hint = ClimbHint {
+                    dx,
+                    dir: ClimbDir::Up,
+                };
+                if best.map(|(bd, _)| dist < bd).unwrap_or(true) {
+                    best = Some((dist, hint));
+                }
+            }
+
+            let down_ok = (top - feet_y).abs() <= DOWN_TOP_SLACK
+                && bot >= feet_y + DOWN_MIN_LEN
+                && top <= feet_y + DOWN_TOP_SLACK;
+            if down_ok {
+                let hint = ClimbHint {
+                    dx,
+                    dir: ClimbDir::Down,
+                };
+                // 同距时优先上爬。
+                let better = match &best {
+                    None => true,
+                    Some((bd, h)) => dist < *bd || (dist <= *bd + 1.0 && h.dir == ClimbDir::Down),
+                };
+                if better {
+                    best = Some((dist, hint));
+                }
+            }
+        }
+        best.map(|(_, h)| h)
+    }
+
+    /// 当前层可跳上的最近更高平台（一层台阶，高度在跳跃可达内）。返回目标 x 相对脚点的 dx。
+    pub fn nearest_step_up_dx(&self, feet_x: f32, feet_y: f32) -> Option<f32> {
+        const MAX_UP: f32 = 80.0;
+        const MIN_UP: f32 = 16.0;
+        const MAX_APPROACH: f32 = 280.0;
+
+        let mut best: Option<(f32, f32)> = None;
+        for p in &self.platforms {
+            // 近似水平平台：取两端 y 均作为站立高度。
+            if (p.y1 - p.y2).abs() > 6.0 {
+                continue;
+            }
+            let py = (p.y1 + p.y2) * 0.5;
+            let rise = feet_y - py;
+            if rise < MIN_UP || rise > MAX_UP {
+                continue;
+            }
+            let x0 = p.x1.min(p.x2);
+            let x1 = p.x1.max(p.x2);
+            if x1 - x0 < 4.0 {
+                continue;
+            }
+            // 目标点：已在平台水平范围内则原地跳；否则走向最近端。
+            let target_x = if feet_x < x0 {
+                x0 + 6.0
+            } else if feet_x > x1 {
+                x1 - 6.0
+            } else {
+                feet_x
+            };
+            let dx = target_x - feet_x;
+            if dx.abs() > MAX_APPROACH {
+                continue;
+            }
+            let score = dx.abs() + rise * 0.15;
+            if best.map(|(bs, _)| score < bs).unwrap_or(true) {
+                best = Some((score, dx));
+            }
+        }
+        best.map(|(_, dx)| dx)
+    }
+
     pub fn portal_near(&self, x: f32, y: f32) -> Option<&Portal> {
         let mut best: Option<(&Portal, f32)> = None;
         for p in &self.portals {
@@ -469,9 +598,93 @@ impl GameMap {
         max_y
     }
 
-    /// 跌出最低平台后触发重生的 y 阈值。
+    /// 跌出最低平台后触发救援的 y 阈值。
     pub fn death_y(&self) -> f32 {
         self.max_stand_y() + 40.0
+    }
+
+    /// 该竖直列是否仍有可站/可接住的脚点（含略高于脚底的平台，用于腾空判虚空）。
+    /// 无落点则禁止水平飞入，避免跳上二台前掉进空隙。
+    pub fn has_support_column(&self, x: f32, feet_y: f32) -> bool {
+        let death = self.death_y();
+        // 已远高于脚的平台视为错过；仅保留脚下可落 + 脚上方擦边吸附带。
+        const SNAP_ABOVE: f32 = 28.0;
+        for p in &self.platforms {
+            let Some(py) = platform_y_at_x(p, x) else {
+                continue;
+            };
+            if py < feet_y - SNAP_ABOVE || py > death {
+                continue;
+            }
+            return true;
+        }
+        for slope in &self.slopes {
+            let Some(py) = slope_ground_y(slope, x) else {
+                continue;
+            };
+            if py < feet_y - SNAP_ABOVE || py > death {
+                continue;
+            }
+            return true;
+        }
+        false
+    }
+
+    /// 脚略低于平台顶时吸附上去（擦边未 land_at 时防掉虚空）。
+    pub fn ledge_snap_at(&self, x: f32, feet_y: f32) -> Option<StandInfo> {
+        const SNAP_UP: f32 = 28.0;
+        const SNAP_DOWN: f32 = 6.0;
+        let mut best: Option<StandInfo> = None;
+        for p in &self.platforms {
+            let Some(py) = platform_y_at_x(p, x) else {
+                continue;
+            };
+            // 平台顶在脚上方不远，或刚没过脚底一点点
+            if py < feet_y - SNAP_UP || py > feet_y + SNAP_DOWN {
+                continue;
+            }
+            let info = StandInfo {
+                y: py,
+                id: p.id,
+                layer: p.layer,
+                group: p.group,
+            };
+            // 取最接近脚底的平台顶
+            if best.map(|b| (py - feet_y).abs() < (b.y - feet_y).abs()).unwrap_or(true) {
+                best = Some(info);
+            }
+        }
+        best
+    }
+
+    /// 虚空救援：找离 (x,y) 最近的可站立脚点。
+    pub fn nearest_stand(&self, x: f32, y: f32) -> Option<(f32, StandInfo)> {
+        let mut best: Option<(f32, f32, StandInfo)> = None;
+        for p in &self.platforms {
+            let (xmin, xmax) = if p.x1 <= p.x2 {
+                (p.x1, p.x2)
+            } else {
+                (p.x2, p.x1)
+            };
+            if xmax - xmin < 8.0 || (p.y1 - p.y2).abs() >= 2.0 {
+                continue;
+            }
+            let sx = x.clamp(xmin + 4.0, xmax - 4.0);
+            let Some(py) = platform_y_at_x(p, sx) else {
+                continue;
+            };
+            let dist = (sx - x).abs() + (py - y).abs() * 0.5;
+            let info = StandInfo {
+                y: py,
+                id: p.id,
+                layer: p.layer,
+                group: p.group,
+            };
+            if best.map(|(bd, _, _)| dist < bd).unwrap_or(true) {
+                best = Some((dist, sx, info));
+            }
+        }
+        best.map(|(_, sx, info)| (sx, info))
     }
 
     /// 可站立平台（含斜坡顶边）在 x 方向上的范围；用于空中贴图边界，不外扩 padding。
@@ -680,6 +893,32 @@ mod tests {
     use crate::game::load_default_map;
 
     #[test]
+    fn adjacent_climb_ignores_upper_rope_from_spawn_ground() {
+        let map = load_default_map().expect("default map");
+        // 出生地 y=1225：绳 488 底在 1068，非紧邻，不应给出上爬目标。
+        let hint = map.nearest_adjacent_climb(416.0, 1225.0);
+        assert!(
+            hint.is_none()
+                || hint.map(|h| (h.dx + 416.0 - 488.0).abs() > 1.0).unwrap_or(true),
+            "spawn ground must not chase rope@488"
+        );
+        // 右岛梯子底 1191，脚点 1225 → 可上爬。
+        let ladder = map.nearest_adjacent_climb(1477.0, 1225.0).expect("ladder");
+        assert_eq!(ladder.dir, ClimbDir::Up);
+        assert!(ladder.dx.abs() < 2.0);
+    }
+
+    #[test]
+    fn step_up_from_spawn_finds_mid_ledge() {
+        let map = load_default_map().expect("default map");
+        let dx = map
+            .nearest_step_up_dx(416.0, 1225.0)
+            .expect("spawn should see 1165 ledges");
+        // 左侧 218–308 或右侧 617–656 的 1165 台阶。
+        assert!(dx.abs() > 10.0, "should walk toward a ledge, dx={dx}");
+    }
+
+    #[test]
     fn playable_x_bounds_inside_image() {
         let map = load_default_map().expect("default map");
         let (lo, hi) = map.playable_x_bounds();
@@ -699,6 +938,66 @@ mod tests {
         assert!(
             matches!(ahead, WalkAhead::Blocked),
             "walking past left map edge should block, got {ahead:?}"
+        );
+    }
+
+    #[test]
+    fn upper_platform_edge_allows_fall_when_ground_below() {
+        let map = load_default_map().expect("default map");
+        // 上层小平台右缘：下方有更低地面时应允许走出去下落
+        let y = 565.0;
+        let x = 1826.0;
+        let ahead = map.walk_ahead(x - 2.0, y, x + 6.0, Some((0, 33)));
+        assert!(
+            matches!(ahead, WalkAhead::Fall),
+            "walk off upper ledge with ground below should Fall, got {ahead:?}"
+        );
+        assert!(
+            map.ground_below_at(x + 6.0, y + 2.0, 720.0).is_some(),
+            "fixture expects catchable ground below"
+        );
+    }
+
+    #[test]
+    fn ground_right_edge_blocks_when_no_ground_below() {
+        let map = load_default_map().expect("default map");
+        let y = 1225.0;
+        let span = map.platform_span_at(400.0, y).expect("ground span");
+        let ahead = map.walk_ahead(span.1 - 5.0, y, span.1 + 5.0, Some((2, 0)));
+        assert!(
+            matches!(ahead, WalkAhead::Blocked),
+            "ground floor void edge should block, got {ahead:?}"
+        );
+    }
+
+    #[test]
+    fn void_gap_between_floor_and_upper_has_no_support() {
+        let map = load_default_map().expect("default map");
+        // 一层右缘 758，二台从 758@1165 起；脚已落到 1200 且 x>758 → 虚空列
+        assert!(
+            !map.has_support_column(780.0, 1200.0),
+            "past first-floor end and below upper deck must be unsupported"
+        );
+        assert!(
+            map.has_support_column(740.0, 1180.0),
+            "over first floor should still have catchable ground"
+        );
+        assert!(
+            map.has_support_column(780.0, 1160.0),
+            "at upper deck height should have support"
+        );
+    }
+
+    #[test]
+    fn ledge_snap_pulls_feet_slightly_below_deck() {
+        let map = load_default_map().expect("default map");
+        let snap = map
+            .ledge_snap_at(780.0, 1175.0)
+            .expect("should snap onto y=1165 deck");
+        assert!(
+            (snap.y - 1165.0).abs() < 1.0,
+            "snap y={}, want ~1165",
+            snap.y
         );
     }
 }

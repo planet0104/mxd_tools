@@ -22,6 +22,14 @@ pub struct AnimFrames {
     pub fps: f32,
 }
 
+/// 原版 Character.wz 常见 delay（ms）→ fps。
+/// stand1/alert ≈ 500ms；walk1 ≈ 180ms。
+const PLAYER_STAND_FPS: f32 = 1000.0 / 500.0;
+const PLAYER_WALK_FPS: f32 = 1000.0 / 180.0;
+const PLAYER_ALERT_FPS: f32 = 1000.0 / 500.0;
+const PLAYER_ATTACK_FPS: f32 = 12.0;
+const PLAYER_CLIMB_FPS: f32 = 8.0;
+
 pub struct GameViewAssets {
     pub map_bg: Texture2D,
     pub ui: HashMap<String, Texture2D>,
@@ -308,11 +316,11 @@ async fn load_player_anims(dir: &PathBuf) -> Result<HashMap<String, AnimFrames>,
     let mut player = HashMap::new();
     player.insert(
         "stand1".into(),
-        load_anim_dir(dir, "stand1", 4, 6.0).await?,
+        load_anim_dir(dir, "stand1", 4, PLAYER_STAND_FPS).await?,
     );
     player.insert(
         "walk1".into(),
-        load_anim_dir(dir, "walk1", 4, 8.0).await?,
+        load_anim_dir(dir, "walk1", 4, PLAYER_WALK_FPS).await?,
     );
     player.insert(
         "jump".into(),
@@ -320,33 +328,33 @@ async fn load_player_anims(dir: &PathBuf) -> Result<HashMap<String, AnimFrames>,
     );
     player.insert(
         "alert".into(),
-        load_anim_dir(dir, "alert", 3, 10.0).await?,
+        load_anim_dir(dir, "alert", 3, PLAYER_ALERT_FPS).await?,
     );
     player.insert(
         "swingO1".into(),
-        load_anim_dir(dir, "swingO1", 3, 12.0)
+        load_anim_dir(dir, "swingO1", 3, PLAYER_ATTACK_FPS)
             .await
             .unwrap_or_else(|_| AnimFrames {
                 textures: vec![],
-                fps: 12.0,
+                fps: PLAYER_ATTACK_FPS,
             }),
     );
     player.insert(
         "ladder".into(),
-        load_anim_dir(dir, "ladder", 4, 8.0)
+        load_anim_dir(dir, "ladder", 4, PLAYER_CLIMB_FPS)
             .await
             .unwrap_or_else(|_| AnimFrames {
                 textures: vec![],
-                fps: 8.0,
+                fps: PLAYER_CLIMB_FPS,
             }),
     );
     player.insert(
         "rope".into(),
-        load_anim_dir(dir, "rope", 4, 8.0)
+        load_anim_dir(dir, "rope", 4, PLAYER_CLIMB_FPS)
             .await
             .unwrap_or_else(|_| AnimFrames {
                 textures: vec![],
-                fps: 8.0,
+                fps: PLAYER_CLIMB_FPS,
             }),
     );
     Ok(player)
@@ -354,22 +362,96 @@ async fn load_player_anims(dir: &PathBuf) -> Result<HashMap<String, AnimFrames>,
 
 async fn load_texture(path: &PathBuf) -> Result<Texture2D, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("{path:?}: {e}"))?;
-    Ok(Texture2D::from_file_with_format(&bytes, None))
+    let tex = Texture2D::from_file_with_format(&bytes, None);
+    tex.set_filter(FilterMode::Nearest);
+    Ok(tex)
+}
+
+/// IO 合成立绘各帧画布与内容裁切不一致；按不透明像素脚底中心对齐到统一画布，
+/// 避免站立呼吸时整身左右抖出叠影。
+fn pad_frames_foot_center(frames: Vec<image::RgbaImage>) -> Vec<image::RgbaImage> {
+    if frames.is_empty() {
+        return frames;
+    }
+
+    let metas: Vec<(image::RgbaImage, u32, u32, u32, u32)> = frames
+        .into_iter()
+        .map(|src| {
+            let (bx, by, bw, bh) = opaque_bbox(&src).unwrap_or((0, 0, src.width(), src.height()));
+            (src, bx, by, bw, bh)
+        })
+        .collect();
+
+    let max_bw = metas.iter().map(|(_, _, _, bw, _)| *bw).max().unwrap_or(1);
+    let max_bh = metas.iter().map(|(_, _, _, _, bh)| *bh).max().unwrap_or(1);
+    // 左右各留 1px，避免贴边采样发糊
+    let canvas_w = max_bw + 2;
+    let canvas_h = max_bh + 1;
+    let foot_x = (canvas_w / 2) as i64;
+    let foot_y = (canvas_h - 1) as i64;
+
+    metas
+        .into_iter()
+        .map(|(src, bx, by, bw, bh)| {
+            let mut canvas = image::RgbaImage::new(canvas_w, canvas_h);
+            let src_foot_x = bx as i64 + (bw as i64) / 2;
+            let src_foot_y = by as i64 + bh as i64 - 1;
+            let ox = foot_x - src_foot_x;
+            let oy = foot_y - src_foot_y;
+            image::imageops::overlay(&mut canvas, &src, ox, oy);
+            canvas
+        })
+        .collect()
+}
+
+fn opaque_bbox(img: &image::RgbaImage) -> Option<(u32, u32, u32, u32)> {
+    let mut min_x = img.width();
+    let mut min_y = img.height();
+    let mut max_x = 0u32;
+    let mut max_y = 0u32;
+    let mut any = false;
+    for (x, y, p) in img.enumerate_pixels() {
+        if p.0[3] > 8 {
+            any = true;
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+        }
+    }
+    if !any {
+        return None;
+    }
+    Some((min_x, min_y, max_x - min_x + 1, max_y - min_y + 1))
+}
+
+fn texture_from_rgba(img: image::RgbaImage) -> Texture2D {
+    let w = img.width();
+    let h = img.height();
+    let tex = Texture2D::from_rgba8(w as u16, h as u16, img.as_raw());
+    tex.set_filter(FilterMode::Nearest);
+    tex
 }
 
 async fn load_anim_dir(dir: &PathBuf, prefix: &str, count: usize, fps: f32) -> Result<AnimFrames, String> {
-    let mut textures = Vec::new();
+    let mut raw: Vec<image::RgbaImage> = Vec::new();
     for i in 0..count {
         let name = format!("{prefix}_{i}.png");
         let path = dir.join(&name);
         if !path.is_file() {
             continue;
         }
-        textures.push(load_texture(&path).await?);
+        let bytes = std::fs::read(&path).map_err(|e| format!("{path:?}: {e}"))?;
+        let img = image::load_from_memory(&bytes)
+            .map_err(|e| format!("{path:?}: {e}"))?
+            .to_rgba8();
+        raw.push(img);
     }
-    if textures.is_empty() {
+    if raw.is_empty() {
         return Err(format!("{dir:?} 无 {prefix} 帧"));
     }
+    let padded = pad_frames_foot_center(raw);
+    let textures = padded.into_iter().map(texture_from_rgba).collect();
     Ok(AnimFrames { textures, fps })
 }
 
@@ -466,13 +548,13 @@ fn draw_npc_player(assets: &GameViewAssets, npc: &NpcPlayerState, cam_x: f32, ca
     };
     let fi = frame_index(anim_t.max(0.0), anim.fps, anim.textures.len());
     let tex = &anim.textures[fi];
-    let sx = npc.x - cam_x;
-    let sy = npc.y - cam_y;
+    let sx = (npc.x - cam_x).round();
+    let sy = (npc.y - cam_y).round();
     let w = tex.width();
     let h = tex.height();
     draw_texture_ex(
         tex,
-        sx - w * 0.5,
+        sx - (w * 0.5).floor(),
         sy - h + 8.0,
         WHITE,
         DrawTextureParams {
@@ -518,8 +600,8 @@ fn draw_player(assets: &GameViewAssets, p: &PlayerState, cam_x: f32, cam_y: f32)
     };
     let fi = frame_index(anim_t, anim.fps, anim.textures.len());
     let tex = &anim.textures[fi];
-    let sx = p.x - cam_x;
-    let sy = p.y - cam_y;
+    let sx = (p.x - cam_x).round();
+    let sy = (p.y - cam_y).round();
     let w = tex.width();
     let h = tex.height();
     let alpha = if p.invuln_t > 0.0 && (p.invuln_t * 20.0) as i32 % 2 == 0 {
@@ -529,7 +611,7 @@ fn draw_player(assets: &GameViewAssets, p: &PlayerState, cam_x: f32, cam_y: f32)
     };
     draw_texture_ex(
         tex,
-        sx - w * 0.5,
+        sx - (w * 0.5).floor(),
         sy - h + 8.0,
         Color::new(1.0, 1.0, 1.0, alpha),
         DrawTextureParams {
@@ -708,6 +790,30 @@ pub fn draw_yolo_overlay(detections: &[crate::yolo::Detection], min_conf: f32) {
         let label = format!("{} {:.0}%", d.label, d.conf * 100.0);
         draw_text(&label, d.x1, d.y1 - 4.0, 14.0, Color::new(0.2, 1.0, 0.35, 1.0));
     }
+}
+
+/// 仅绘制地板类（class_id=0）检测框，便于核对离台/寻路是否被地板观测卡住。
+pub fn draw_yolo_floor_overlay(detections: &[crate::yolo::Detection], min_conf: f32) {
+    let floor_color = Color::new(0.15, 0.95, 1.0, 0.95);
+    let mut n = 0u32;
+    for d in detections {
+        if d.class_id != 0 || d.conf < min_conf {
+            continue;
+        }
+        n += 1;
+        let w = (d.x2 - d.x1).max(1.0);
+        let h = (d.y2 - d.y1).max(1.0);
+        draw_rectangle_lines(d.x1, d.y1, w, h, 2.5, floor_color);
+        let label = format!("地板 {:.0}%", d.conf * 100.0);
+        draw_text(&label, d.x1, (d.y1 - 4.0).max(12.0), 14.0, floor_color);
+    }
+    draw_text(
+        &format!("YOLO 地板框: {n}"),
+        12.0,
+        22.0,
+        18.0,
+        floor_color,
+    );
 }
 
 /// 标记 OCR 匹配到的自身玩家脚点。

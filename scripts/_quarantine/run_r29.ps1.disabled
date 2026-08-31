@@ -1,0 +1,85 @@
+# Fresh 90k with hardened fitness; kill foreign trainers; then seed0 probe.
+$ErrorActionPreference = "Continue"
+Set-Location $PSScriptRoot\..
+if (-not (Test-Path "Cargo.toml")) { Set-Location (Split-Path $PSScriptRoot -Parent) }
+
+New-Item -ItemType Directory -Force -Path tmp | Out-Null
+Set-Content tmp\train.lock ("owner=r29 pid=$PID") -Encoding ASCII
+
+function Kill-Foreign([int]$keep) {
+  Get-CimInstance Win32_Process -Filter "Name='neat_trainer.exe'" -EA SilentlyContinue | ForEach-Object {
+    if ($_.ProcessId -eq $keep -or $_.ParentProcessId -eq $keep) { return }
+    Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue
+  }
+}
+
+try {
+  Get-Process neat_trainer -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
+  Start-Sleep 2
+  $exe = (Resolve-Path "target\release\neat_trainer.exe").Path
+  $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
+  $log = "tmp\auto_train_r29_$stamp.log"
+  Write-Host "[r29] FRESH train log=$log"
+  $p = Start-Process -FilePath $exe -ArgumentList @(
+    "--sim-detect","--fresh",
+    "--population","40","--workers","16","--generations","90000",
+    "--detect-hz","10","--max-ticks","36000",
+    "--sim-dropout","0.32","--sim-jitter","20","--sim-class-noise","0.14","--sim-size-jitter","0.25",
+    "--log-file", $log
+  ) -WorkingDirectory (Get-Location) -PassThru -WindowStyle Hidden
+  Write-Host "[r29] pid=$($p.Id)"
+  $deadline = (Get-Date).AddMinutes(30)
+  $done = $false
+  while ((Get-Date) -lt $deadline) {
+    Start-Sleep 20
+    Kill-Foreign $p.Id
+    $alive = $null -ne (Get-Process -Id $p.Id -EA SilentlyContinue)
+    $n = @(Get-Process neat_trainer -EA SilentlyContinue).Count
+    $marker = (Test-Path $log) -and (Select-String -Path $log -Pattern "训练完成" -Quiet -EA SilentlyContinue)
+    $tail = if (Test-Path $log) { Get-Content $log -Tail 1 -EA SilentlyContinue } else { "" }
+    Write-Host ("[r29] n={0} alive={1} done={2} | {3}" -f $n, $alive, $marker, $tail)
+    if ($marker) { $done = $true; break }
+    if (-not $alive) {
+      Write-Host "[r29] MAIN_DIED resume"
+      Get-Process neat_trainer -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
+      Start-Sleep 2
+      $p = Start-Process -FilePath $exe -ArgumentList @(
+        "--sim-detect",
+        "--population","40","--workers","16","--generations","90000",
+        "--detect-hz","10","--max-ticks","36000",
+        "--sim-dropout","0.32","--sim-jitter","20","--sim-class-noise","0.14","--sim-size-jitter","0.25",
+        "--log-file", $log
+      ) -WorkingDirectory (Get-Location) -PassThru -WindowStyle Hidden
+      Write-Host "[r29] resumed pid=$($p.Id)"
+    }
+  }
+  if (-not $done) {
+    # also accept near-complete
+    if ((Test-Path $log) -and (Select-String -Path $log -Pattern "训练完成" -Quiet)) { $done = $true }
+  }
+  Get-Process neat_trainer -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
+  if (-not $done) { Write-Host "[r29] TRAIN_TIMEOUT"; exit 2 }
+  Write-Host "[r29] TRAIN_DONE"
+
+  # direct preview (no cmd redirect)
+  function Probe([int]$ticks, [int]$seed, [float]$hz, [float]$anchor, [int]$timeout) {
+    $pr = Start-Process -FilePath ".\target\release\neat_preview.exe" -ArgumentList @(
+      "--auto-ticks","$ticks","--seed","$seed","--detect-hz","$hz","--quiet","--no-watch","--anchor-offset","$anchor"
+    ) -WorkingDirectory (Get-Location) -PassThru
+    if (-not $pr.WaitForExit($timeout * 1000)) {
+      Stop-Process -Id $pr.Id -Force -EA SilentlyContinue
+      return 2
+    }
+    return [int]$pr.ExitCode
+  }
+  $e0 = Probe 7200 0 5 0 180
+  Write-Host "[r29] PROBE0=$e0"
+  $e445 = Probe 3600 445 10 14 120
+  Write-Host "[r29] PROBE445=$e445"
+  if ($e0 -eq 0) { Write-Host "[r29] VERDICT=OK"; exit 0 }
+  if ($e0 -eq 1) { Write-Host "[r29] VERDICT=STAGNANT"; exit 1 }
+  Write-Host "[r29] VERDICT=FAIL"; exit 2
+}
+finally {
+  Remove-Item tmp\train.lock -Force -EA SilentlyContinue
+}

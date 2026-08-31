@@ -6,15 +6,15 @@
 //! 实时 YOLO+OCR 预览（手动操作）：
 //!   cargo run --release --bin mini_game -- --vision-preview --model models/yolo_nangang_e3000_best.onnx
 //!
-//! NEAT 最优个体回放（训练时另开终端）：
-//!   cargo run --release --bin neat_preview
+//! 规则 Bot 自动玩（另开终端）：
+//!   cargo run --release --bin game_preview
 
 use std::env;
 use std::path::PathBuf;
 
 use macroquad::prelude::*;
 use mxd_tools::game::{
-    self, GameSim, InputFrame, LOGIC_DT, NEAT_CONF_THRESH, VisionPipeline, VisionStep, WINDOW_H,
+    self, GameSim, InputFrame, LOGIC_DT, VISION_CONF_THRESH, VisionPipeline, VisionStep, WINDOW_H,
     WINDOW_W,
 };
 use mxd_tools::game::view;
@@ -26,7 +26,7 @@ fn window_conf() -> Conf {
         window_width: (WINDOW_W / 3.0).round() as i32,
         window_height: (WINDOW_H / 3.0).round() as i32,
         window_resizable: true,
-        high_dpi: true,
+        high_dpi: false,
         ..Default::default()
     }
 }
@@ -84,10 +84,10 @@ async fn main() {
         match VisionPipeline::load(
             PathBuf::from(&model).as_path(),
             YoloDevice::Cpu,
-            NEAT_CONF_THRESH,
+            VISION_CONF_THRESH,
         ) {
             Ok(p) => {
-                eprintln!("视觉预览: YOLO conf>={NEAT_CONF_THRESH} model={model}");
+                eprintln!("视觉预览: YOLO conf>={VISION_CONF_THRESH} model={model}");
                 vision = Some(p);
             }
             Err(e) => eprintln!("加载 YOLO 失败，预览关闭: {e}"),
@@ -96,12 +96,40 @@ async fn main() {
 
     let mut sim = GameSim::new(map, 42);
     let mut acc = 0.0f32;
+    // 攻击边沿缓冲：渲染帧按下时逻辑 tick 可能还没跑，不能只用 is_key_pressed。
+    let mut attack_buf = false;
+    let mut potion_buf = false;
 
     loop {
-        let input = poll_input();
+        if is_key_pressed(KeyCode::LeftControl) || is_key_pressed(KeyCode::J) {
+            attack_buf = true;
+        }
+        if is_key_pressed(KeyCode::Key1) {
+            potion_buf = true;
+        }
+
         acc += get_frame_time();
         while acc >= LOGIC_DT {
+            let attack_held =
+                is_key_down(KeyCode::LeftControl) || is_key_down(KeyCode::J);
+            let potion_held = is_key_down(KeyCode::Key1);
+            let mut input = poll_input();
+            input.attack = attack_buf || attack_held;
+            input.use_potion = potion_buf || potion_held;
+
+            let attack_ready =
+                sim.state.player.attack_cd <= 0.0 && sim.state.player.attack_t <= 0.0;
             sim.tick(&input);
+            // 仅在「本帧已就绪并送出攻击」时消费缓冲；CD 中按键会保留到可砍。
+            if attack_ready && input.attack {
+                attack_buf = false;
+            }
+            if input.use_potion {
+                potion_buf = false;
+            }
+            if attack_held {
+                attack_buf = false;
+            }
             acc -= LOGIC_DT;
         }
 
@@ -121,7 +149,7 @@ async fn main() {
         begin_logical_viewport();
         view::draw_content(&assets, &sim);
         if let Some(step) = last_vision.as_ref() {
-            view::draw_yolo_overlay(&step.detections, NEAT_CONF_THRESH);
+            view::draw_yolo_overlay(&step.detections, VISION_CONF_THRESH);
             if let Some(hit) = step.self_player.as_ref() {
                 view::draw_self_player_marker(hit);
             }
@@ -137,11 +165,12 @@ fn poll_input() -> InputFrame {
         left: is_key_down(KeyCode::Left) || is_key_down(KeyCode::A),
         right: is_key_down(KeyCode::Right) || is_key_down(KeyCode::D),
         jump: is_key_down(KeyCode::Space) || is_key_down(KeyCode::LeftAlt),
-        attack: is_key_pressed(KeyCode::LeftControl) || is_key_pressed(KeyCode::J),
+        // 攻击由主循环缓冲/按住写入，这里保持 false 以免丢边沿。
+        attack: false,
         up: is_key_down(KeyCode::Up) || is_key_down(KeyCode::W),
         down: is_key_down(KeyCode::Down) || is_key_down(KeyCode::S),
         pick_up: is_key_down(KeyCode::Z),
-        use_potion: is_key_pressed(KeyCode::Key1),
+        use_potion: false,
         open_inventory: is_key_pressed(KeyCode::I),
         inventory_click: None,
         restart: is_key_pressed(KeyCode::R),

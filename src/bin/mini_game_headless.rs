@@ -1,7 +1,7 @@
 //! 无头模式：固定步进逻辑 + 离屏渲染截图（供 YOLO / find_player 测试）。
 //!
 //! ```powershell
-//! cargo run --release --bin mini_game_headless -- --training --screenshot screen_caps/.../out.png
+//! cargo run --release --bin mini_game_headless -- --bot-play --screenshot screen_caps/.../out.png
 //! cargo run --release --bin mini_game_headless -- --seed 42 --ticks 600 --dump-every 60
 //! ```
 
@@ -36,7 +36,7 @@ fn arg_u64(args: &[String], key: &str, default: u64) -> u64 {
 async fn main() {
     let _ = headless_gl::hide_gl_window();
     let args: Vec<String> = env::args().collect();
-    let training = args.iter().any(|a| a == "--training");
+    let bot_play = args.iter().any(|a| a == "--bot-play");
     let seed = arg_u64(&args, "--seed", 42);
     let ticks = arg_u64(&args, "--ticks", 120) as usize;
     let dump_every = arg_u64(&args, "--dump-every", 0) as usize;
@@ -59,8 +59,8 @@ async fn main() {
         }
     };
 
-    let mut sim = if training {
-        GameSim::new_training(map, seed)
+    let mut sim = if bot_play {
+        GameSim::new_bot_play(map, seed)
     } else {
         GameSim::new(map, seed)
     };

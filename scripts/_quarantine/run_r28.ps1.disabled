@@ -1,0 +1,113 @@
+# Exclusive resume train to 90k then seed0 probe.
+$ErrorActionPreference = "Continue"
+Set-Location $PSScriptRoot\..
+if (-not (Test-Path "Cargo.toml")) { Set-Location (Split-Path $PSScriptRoot -Parent) }
+
+$lock = Join-Path (Get-Location) "tmp\train.lock"
+New-Item -ItemType Directory -Force -Path (Join-Path (Get-Location) "tmp") | Out-Null
+Set-Content -Path $lock -Value ("owner=r28 pid={0} at={1}" -f $PID, (Get-Date -Format o)) -Encoding ASCII
+
+function Stop-ForeignTrainers([int]$keepPid) {
+  Get-CimInstance Win32_Process -Filter "Name='neat_trainer.exe'" -ErrorAction SilentlyContinue | ForEach-Object {
+    $cmd = $_.CommandLine
+    if ($null -eq $cmd) { return }
+    # keep our main and its worker children
+    if ($_.ProcessId -eq $keepPid -or $_.ParentProcessId -eq $keepPid) { return }
+    # kill other mains (have --sim-detect or --generations, not --worker-daemon)
+    if ($cmd -match '--worker-daemon') {
+      # orphan worker whose parent is dead / foreign
+      $pp = Get-Process -Id $_.ParentProcessId -ErrorAction SilentlyContinue
+      if ($null -eq $pp -or ($_.ParentProcessId -ne $keepPid)) {
+        if ($_.ParentProcessId -ne $keepPid) {
+          Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+      }
+      return
+    }
+    Write-Host ("[r28] kill foreign trainer pid={0}" -f $_.ProcessId)
+    Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+  }
+}
+
+try {
+  Get-Process neat_trainer -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+  Start-Sleep 3
+
+  $round = 28
+  $target = 90000
+  $logDir = Join-Path (Get-Location) "tmp"
+  $exe = Join-Path (Get-Location) "target\release\neat_trainer.exe"
+  $deadline = (Get-Date).AddMinutes(35)
+  $fresh = -not (Test-Path (Join-Path (Get-Location) "tmp\neat_checkpoint.json"))
+  $done = $false
+  $run = 0
+
+  while ((Get-Date) -lt $deadline -and -not $done) {
+    $run++
+    Get-Process neat_trainer -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep 2
+
+    $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
+    $log = Join-Path $logDir ("auto_train_r{0}_run_{1}.log" -f $round, $stamp)
+    $argList = @("--sim-detect")
+    if ($fresh) { $argList += "--fresh" }
+    $argList += @(
+      "--population","40","--workers","16","--generations","$target",
+      "--detect-hz","10","--max-ticks","36000",
+      "--sim-dropout","0.32","--sim-jitter","20","--sim-class-noise","0.14","--sim-size-jitter","0.25",
+      "--log-file", $log
+    )
+    Write-Host ("[r28] start run={0} fresh={1} log={2}" -f $run, $fresh, $log)
+    $p = Start-Process -FilePath $exe -ArgumentList $argList -WorkingDirectory (Get-Location) -PassThru -WindowStyle Hidden
+    Write-Host ("[r28] main_pid={0}" -f $p.Id)
+    $fresh = $false
+    $sawWorkers = $false
+
+    while ((Get-Date) -lt $deadline) {
+      Start-Sleep 15
+      Stop-ForeignTrainers -keepPid $p.Id
+      $mainAlive = $null -ne (Get-Process -Id $p.Id -ErrorAction SilentlyContinue)
+      $workers = @(Get-Process neat_trainer -ErrorAction SilentlyContinue).Count
+      if ($workers -gt 1) { $sawWorkers = $true }
+      $marker = $false
+      if (Test-Path $log) {
+        $marker = Select-String -Path $log -Pattern "训练完成" -Quiet -ErrorAction SilentlyContinue
+      }
+      $tail = ""
+      if (Test-Path $log) { $tail = (Get-Content $log -Tail 1 -ErrorAction SilentlyContinue) }
+      Write-Host ("[r28] workers={0} main={1} done={2} | {3}" -f $workers, $mainAlive, $marker, $tail)
+      if ($marker) { $done = $true; break }
+      if (-not $mainAlive) {
+        Write-Host "[r28] MAIN_DIED — resume"
+        Get-Process neat_trainer -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+        Start-Sleep 2
+        if (-not $sawWorkers) { Write-Host "[r28] died before workers"; exit 2 }
+        break
+      }
+    }
+  }
+
+  if (-not $done) {
+    Write-Host "[r28] TRAIN_TIMEOUT"
+    Get-Process neat_trainer -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    exit 2
+  }
+
+  Write-Host "[r28] TRAIN_DONE"
+  Start-Sleep 3
+  Get-Process neat_trainer -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+
+  & "$PSScriptRoot\preview_probe.ps1" -AutoTicks 7200 -Seed 0 -DetectHz 5 -AnchorOffset 0 -TimeoutSec 180
+  $e0 = $LASTEXITCODE
+  Write-Host "[r28] PROBE0=$e0"
+  & "$PSScriptRoot\preview_probe.ps1" -AutoTicks 3600 -Seed 445 -DetectHz 10 -AnchorOffset 14 -TimeoutSec 120
+  $e445 = $LASTEXITCODE
+  Write-Host "[r28] PROBE445=$e445"
+
+  if ($e0 -eq 0) { Write-Host "[r28] VERDICT=OK"; exit 0 }
+  if ($e0 -eq 1) { Write-Host "[r28] VERDICT=STAGNANT"; exit 1 }
+  Write-Host "[r28] VERDICT=FAIL"; exit 2
+}
+finally {
+  Remove-Item $lock -Force -ErrorAction SilentlyContinue
+}

@@ -1,0 +1,110 @@
+# At most 5 train+probe rounds; stop on OK or after 5 failures.
+$ErrorActionPreference = "Continue"
+Set-Location $PSScriptRoot\..
+if (-not (Test-Path "Cargo.toml")) { Set-Location (Split-Path $PSScriptRoot -Parent) }
+
+$maxRounds = 5
+$exe = (Resolve-Path "target\release\neat_trainer.exe").Path
+$preview = (Resolve-Path "target\release\neat_preview.exe").Path
+New-Item -ItemType Directory -Force -Path tmp | Out-Null
+
+function Stop-AllTrainers {
+  Get-Process neat_trainer,neat_preview -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
+  Start-Sleep 2
+}
+
+function Kill-Foreign([int]$keep) {
+  Get-CimInstance Win32_Process -Filter "Name='neat_trainer.exe'" -EA SilentlyContinue | ForEach-Object {
+    if ($_.ProcessId -eq $keep -or $_.ParentProcessId -eq $keep) { return }
+    Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue
+  }
+}
+
+function Start-Train([bool]$fresh, [string]$log) {
+  $args = @("--sim-detect")
+  if ($fresh) { $args += "--fresh" }
+  $args += @(
+    "--population","40","--workers","16","--generations","90000",
+    "--detect-hz","10","--max-ticks","36000",
+    "--sim-dropout","0.32","--sim-jitter","20","--sim-class-noise","0.14","--sim-size-jitter","0.25",
+    "--log-file", $log
+  )
+  return Start-Process -FilePath $exe -ArgumentList $args -WorkingDirectory (Get-Location) -PassThru -WindowStyle Hidden
+}
+
+function Wait-Train([string]$log, [int]$minutes) {
+  $deadline = (Get-Date).AddMinutes($minutes)
+  $mainPid = $null
+  $procs = @(Get-Process neat_trainer -EA SilentlyContinue | Where-Object {
+    try {
+      $c = (Get-CimInstance Win32_Process -Filter "ProcessId=$($_.Id)").CommandLine
+      $c -and ($c -notmatch '--worker-daemon')
+    } catch { $false }
+  })
+  if ($procs.Count -gt 0) { $mainPid = $procs[0].Id }
+
+  while ((Get-Date) -lt $deadline) {
+    Start-Sleep 20
+    if ($null -ne $mainPid) { Kill-Foreign $mainPid }
+    $alive = ($null -ne $mainPid) -and ($null -ne (Get-Process -Id $mainPid -EA SilentlyContinue))
+    $marker = (Test-Path $log) -and (Select-String -Path $log -Pattern "训练完成" -Quiet -EA SilentlyContinue)
+    $n = @(Get-Process neat_trainer -EA SilentlyContinue).Count
+    $tail = if (Test-Path $log) { Get-Content $log -Tail 1 -EA SilentlyContinue } else { "" }
+    Write-Host ("  train n={0} alive={1} done={2} | {3}" -f $n, $alive, $marker, $tail)
+    if ($marker) { return $true }
+    if (-not $alive) {
+      Write-Host "  MAIN_DIED -> resume"
+      Stop-AllTrainers
+      $np = Start-Train $false $log
+      $mainPid = $np.Id
+      Write-Host ("  resumed pid={0}" -f $mainPid)
+    }
+  }
+  return ((Test-Path $log) -and (Select-String -Path $log -Pattern "训练完成" -Quiet -EA SilentlyContinue))
+}
+
+function Probe-Seed0 {
+  $pr = Start-Process -FilePath $preview -ArgumentList @(
+    "--auto-ticks","7200","--seed","0","--detect-hz","5","--quiet","--no-watch","--anchor-offset","0"
+  ) -WorkingDirectory (Get-Location) -PassThru
+  if (-not $pr.WaitForExit(180000)) {
+    Stop-Process -Id $pr.Id -Force -EA SilentlyContinue
+    return 2
+  }
+  if ($null -eq $pr.ExitCode) { return 2 }
+  return [int]$pr.ExitCode
+}
+
+Stop-AllTrainers
+$failures = 0
+
+for ($round = 1; $round -le $maxRounds; $round++) {
+  Write-Host ""
+  Write-Host "======== ROUND $round / $maxRounds ========"
+  $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
+  $log = "tmp\auto_train_max5_r${round}_$stamp.log"
+  Write-Host "[max5] fresh train log=$log"
+  $p = Start-Train $true $log
+  Write-Host "[max5] pid=$($p.Id)"
+  $okTrain = Wait-Train $log 25
+  Stop-AllTrainers
+  if (-not $okTrain) {
+    Write-Host "[max5] ROUND $round TRAIN_FAIL"
+    $failures++
+    continue
+  }
+  Write-Host "[max5] TRAIN_DONE -> probe seed=0"
+  $e0 = Probe-Seed0
+  Write-Host "[max5] ROUND $round PROBE0=$e0"
+  if ($e0 -eq 0) {
+    Write-Host "[max5] VERDICT=OK round=$round"
+    exit 0
+  }
+  Write-Host "[max5] ROUND $round STAGNANT/FAIL"
+  $failures++
+}
+
+Write-Host ""
+Write-Host "[max5] STOP after $maxRounds rounds, all failed (failures=$failures)"
+Write-Host "[max5] VERDICT=GIVE_UP"
+exit 1

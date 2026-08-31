@@ -1,0 +1,68 @@
+# Round 26: fresh 90k train + seed0 probe (no stdout pipe to trainer).
+$ErrorActionPreference = "Continue"
+Set-Location $PSScriptRoot\..
+if (-not (Test-Path "Cargo.toml")) { Set-Location (Split-Path $PSScriptRoot -Parent) }
+
+$round = 26
+$logDir = Join-Path (Get-Location) "tmp"
+New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+$stamp = Get-Date -Format "yyyyMMdd_HHmmss"
+$trainLog = Join-Path $logDir "auto_train_r${round}_${stamp}.log"
+
+Write-Host "[r26] build..."
+cargo build --release --bin neat_trainer --bin neat_preview
+if ($LASTEXITCODE -ne 0) { Write-Host "[r26] build failed"; exit 2 }
+
+Get-Process neat_trainer -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 2
+
+$exe = Join-Path (Get-Location) "target\release\neat_trainer.exe"
+Write-Host "[r26] start train log=$trainLog"
+$p = Start-Process -FilePath $exe -ArgumentList @(
+  "--sim-detect","--fresh",
+  "--population","40","--workers","20","--generations","90000",
+  "--detect-hz","10","--max-ticks","36000",
+  "--sim-dropout","0.32","--sim-jitter","20","--sim-class-noise","0.14","--sim-size-jitter","0.25",
+  "--log-file", $trainLog
+) -WorkingDirectory (Get-Location) -PassThru -WindowStyle Hidden
+
+Write-Host "[r26] trainer pid=$($p.Id)"
+$deadline = (Get-Date).AddMinutes(28)
+do {
+  Start-Sleep -Seconds 20
+  $mainAlive = $null -ne (Get-Process -Id $p.Id -ErrorAction SilentlyContinue)
+  $workers = @(Get-Process neat_trainer -ErrorAction SilentlyContinue).Count
+  $marker = $false
+  if (Test-Path $trainLog) {
+    $marker = Select-String -Path $trainLog -Pattern "训练完成" -Quiet -ErrorAction SilentlyContinue
+  }
+  Write-Host ("[r26] workers={0} main={1} done={2}" -f $workers, $mainAlive, $marker)
+  if ($marker) { break }
+  if (-not $mainAlive -and $workers -eq 0) {
+    Write-Host "[r26] MAIN_DIED"
+    if (Test-Path $trainLog) { Get-Content $trainLog -Tail 15 }
+    exit 2
+  }
+} while ((Get-Date) -lt $deadline)
+
+if (-not (Select-String -Path $trainLog -Pattern "训练完成" -Quiet -ErrorAction SilentlyContinue)) {
+  Write-Host "[r26] TRAIN_TIMEOUT"
+  Get-Process neat_trainer -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+  exit 2
+}
+
+Write-Host "[r26] TRAIN_DONE"
+Start-Sleep -Seconds 3
+Get-Process neat_trainer -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+
+Write-Host "[r26] probe seed=0..."
+& "$PSScriptRoot\preview_probe.ps1" -AutoTicks 7200 -Seed 0 -DetectHz 5 -AnchorOffset 0 -TimeoutSec 120
+$prev0 = $LASTEXITCODE
+Write-Host "[r26] PROBE0=$prev0"
+& "$PSScriptRoot\preview_probe.ps1" -AutoTicks 3600 -Seed 445 -DetectHz 10 -AnchorOffset 14 -TimeoutSec 90
+$prev445 = $LASTEXITCODE
+Write-Host "[r26] PROBE445=$prev445"
+
+if ($prev0 -eq 0) { Write-Host "[r26] VERDICT=OK"; exit 0 }
+if ($prev0 -eq 1) { Write-Host "[r26] VERDICT=STAGNANT"; exit 1 }
+Write-Host "[r26] VERDICT=FAIL"; exit 2

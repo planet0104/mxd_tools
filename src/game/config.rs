@@ -1,26 +1,14 @@
-/// 自身玩家锚点来源（NEAT 观测原点）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum VisionAnchorMode {
-    /// YOLO 玩家框 + 名牌 OCR（部署一致）。
-    #[default]
-    Ocr,
-    /// 训练加速：用 sim 投影脚点匹配最近 YOLO「玩家」框，跳过 OCR。
-    SimMatch,
-}
-
-/// 自身锚点配置（仅影响 NEAT 观测原点，不改变 YOLO 检测与拾取计分）。
+/// 自身锚点配置（YOLO+OCR 模式：OCR 脚点 ± 抖动，模拟定位偏差）。
 #[derive(Debug, Clone, Copy)]
 pub struct VisionAnchorConfig {
-    pub mode: VisionAnchorMode,
-    /// SimMatch 模式下锚点 ± 像素随机偏移，模拟 OCR/检测偏差（0=关闭）。
-    pub sim_offset_px: f32,
+    /// 脚点 ± 像素随机偏移（按 `episode_seed` 整局固定）；0=关闭。
+    pub anchor_jitter_px: f32,
 }
 
 impl Default for VisionAnchorConfig {
     fn default() -> Self {
         Self {
-            mode: VisionAnchorMode::Ocr,
-            sim_offset_px: 0.0,
+            anchor_jitter_px: 0.0,
         }
     }
 }
@@ -30,47 +18,62 @@ impl VisionAnchorConfig {
         Self::default()
     }
 
-    pub fn sim_match(offset_px: f32) -> Self {
+    pub fn ocr_with_jitter(jitter_px: f32) -> Self {
         Self {
-            mode: VisionAnchorMode::SimMatch,
-            sim_offset_px: offset_px.max(0.0),
+            anchor_jitter_px: jitter_px.max(0.0),
         }
     }
 
-    pub fn uses_sim_match(&self) -> bool {
-        self.mode == VisionAnchorMode::SimMatch
+    pub fn uses_anchor_jitter(&self) -> bool {
+        self.anchor_jitter_px > 0.0
     }
 }
 
-/// 游戏 / NEAT 训练运行配置。
+/// 游戏 / 规则 bot 运行配置。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GameSimConfig {
-    /// NEAT 训练模式：装饰玩家、波次刷怪、视觉计分、零初始药水等。
-    pub training: bool,
+    /// 自动玩模式：装饰 NPC、波次刷怪、零初始药水。
+    pub bot_play: bool,
+    /// 预览模式：受击 HP 最低保留 1，便于持续观察 bot。
+    pub preview: bool,
 }
 
 impl Default for GameSimConfig {
     fn default() -> Self {
-        Self { training: false }
+        Self {
+            bot_play: false,
+            preview: false,
+        }
     }
 }
 
 impl GameSimConfig {
-    pub fn training() -> Self {
-        Self { training: true }
+    pub fn bot_play() -> Self {
+        Self {
+            bot_play: true,
+            preview: false,
+        }
+    }
+
+    /// 与自动玩相同环境，但不因 HP 归零结束。
+    pub fn preview() -> Self {
+        Self {
+            bot_play: true,
+            preview: true,
+        }
     }
 }
 
-/// 训练节奏（**不改变**逻辑物理 60Hz；仅改变多常做一次 YOLO+OCR）。
+/// 视觉感知节奏（**不改变**逻辑物理 60Hz；仅改变每秒 YOLO 次数）。
 ///
-/// 部署 / 正式推理时必须 `vision_interval_ticks = 1`（每逻辑帧感知一次）。
+/// 内部仍用 `vision_interval_ticks`；CLI 对外使用 `--detect-hz`（次/秒）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TrainingPaceConfig {
-    /// 每 N 个逻辑帧执行一次 `render + perceive`（中间帧复用上一帧观测）。
+pub struct VisionPaceConfig {
+    /// 每 N 个逻辑帧执行一次感知（中间帧复用上一帧观测/动作）。
     pub vision_interval_ticks: u32,
 }
 
-impl Default for TrainingPaceConfig {
+impl Default for VisionPaceConfig {
     fn default() -> Self {
         Self {
             vision_interval_ticks: 1,
@@ -78,17 +81,29 @@ impl Default for TrainingPaceConfig {
     }
 }
 
-impl TrainingPaceConfig {
-    /// 与正式 60Hz 推理一致（最慢、无分布偏移）。
+impl VisionPaceConfig {
+    /// 与正式 60Hz 推理一致。
     pub fn realtime() -> Self {
         Self::default()
     }
 
-    /// 推荐训练默认：约 5Hz 感知（每 12 tick），物理仍 60Hz。
+    /// 推荐默认：约 10 次/秒感知（截图+推理约 100ms），物理仍 60Hz。
     pub fn fast() -> Self {
+        Self::from_detect_hz(10.0)
+    }
+
+    /// 由检测频率（Hz）换算：`interval = round(60 / hz)`，钳制到 `[1, 60]`。
+    pub fn from_detect_hz(hz: f32) -> Self {
+        let hz = hz.clamp(1.0, super::types::LOGIC_HZ);
+        let ticks = (super::types::LOGIC_HZ / hz).round().clamp(1.0, super::types::LOGIC_HZ) as u32;
         Self {
-            vision_interval_ticks: 12,
+            vision_interval_ticks: ticks,
         }
+    }
+
+    /// 等效检测频率（次/秒）。
+    pub fn detect_hz(self) -> f32 {
+        super::types::LOGIC_HZ / self.vision_interval_ticks.max(1) as f32
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -96,5 +111,19 @@ impl TrainingPaceConfig {
             return Err("vision_interval_ticks 不能为 0".into());
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod pace_tests {
+    use super::VisionPaceConfig;
+
+    #[test]
+    fn detect_hz_roundtrips_common_values() {
+        assert_eq!(VisionPaceConfig::from_detect_hz(5.0).vision_interval_ticks, 12);
+        assert_eq!(VisionPaceConfig::from_detect_hz(10.0).vision_interval_ticks, 6);
+        assert_eq!(VisionPaceConfig::from_detect_hz(60.0).vision_interval_ticks, 1);
+        assert!((VisionPaceConfig::from_detect_hz(5.0).detect_hz() - 5.0).abs() < 0.01);
+        assert!((VisionPaceConfig::from_detect_hz(10.0).detect_hz() - 10.0).abs() < 0.01);
     }
 }

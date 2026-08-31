@@ -2,10 +2,10 @@ pub const WINDOW_W: f32 = 1368.0;
 pub const WINDOW_H: f32 = 768.0;
 pub const WORLD_VIEW_H: f32 = 697.0;
 
-/// 玩家头顶/脚下名牌（与 find_player / NEAT 训练一致）
+/// 玩家头顶/脚下名牌（与 find_player / 规则 bot 一致）
 pub const DEFAULT_PLAYER_NAME: &str = "光头强加强版";
 
-/// NEAT 训练：装饰玩家数量与资源（`assets/player/` 下目录名）
+/// 自动玩模式：装饰玩家数量与资源（`assets/player/` 下目录名）
 pub const TRAINING_NPC_COUNT: usize = 4;
 /// 训练装饰玩家名牌（与 `DEFAULT_PLAYER_NAME` 无共用长子串，避免 OCR 误匹配）
 pub const TRAINING_NPC_NAMES: [&str; TRAINING_NPC_COUNT] =

@@ -1,12 +1,19 @@
+pub mod bot_harness;
+pub mod headless_vision;
+pub mod human_pace;
+pub mod vision_worker;
+pub mod sim_observation;
 pub mod action;
+pub mod agent;
 pub mod camera;
 pub mod config;
 pub mod self_anchor;
-pub mod fitness;
 pub mod input;
 pub mod map;
+pub mod movement_gate;
 pub mod npc;
 pub mod observation;
+pub mod rule_bot;
 pub mod sim;
 pub mod types;
 pub mod view;
@@ -16,16 +23,35 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-pub use action::{action_to_input, actions_from_bits, input_label, Action, NEAT_OUTPUT_BUTTONS};
+pub use bot_harness::{
+    assert_yolo_probes, assert_yolo_probes_with, build_parallel_episode_jobs,
+    build_parallel_probe_jobs, default_parallel_episode_seeds, default_probe_seeds,
+    probe_duration_secs, run_all_yolo_probes, run_episode, run_parallel_probe_pool,
+    run_parallel_probe_subprocess, run_probe_seeds, run_yolo_probes, BotProbeConfig,
+    DEFAULT_PARALLEL_JOBS, EpisodeReport, FirstPlatformReport, FirstPlatformTracker,
+    ParallelProbeReport, ProbeDriver, SpawnJumpReport, YoloProbeSet, YoloProbeSummary,
+    FIRST_PLATFORM_PROBE_TICKS, evaluate_first_platform_report, format_first_platform_preview_done,
+};
+pub use headless_vision::{default_yolo_model_path, DeferredCaptureVision, HeadlessVisionEnv};
+pub use human_pace::HumanPace;
+pub use sim_observation::observation_from_sim;
+pub use action::{action_to_input, input_label, Action};
+pub use agent::{AgentController, VisionWorkerTiming};
 pub use camera::WorldCamera;
-pub use config::{GameSimConfig, TrainingPaceConfig, VisionAnchorConfig, VisionAnchorMode};
-pub use self_anchor::{episode_anchor_offset, find_self_player_by_sim};
-pub use fitness::{FitnessShapingConfig, TrainingFitness};
+pub use config::{GameSimConfig, VisionAnchorConfig, VisionPaceConfig};
+pub use self_anchor::{apply_anchor_jitter, episode_anchor_offset};
+pub use movement_gate::{MovementGate, MovementGateCtx};
+pub use rule_bot::{visit_key, RuleBot, RuleBotCtx};
 pub use input::InputFrame;
-pub use map::{GameMap, Portal};
+pub use map::{ClimbDir, ClimbHint, GameMap, Portal};
 pub use npc::NpcPlayerState;
-pub use observation::{VisionObservation, NEAT_CONF_THRESH, OBS_DIM};
-pub use sim::{GameModal, GameSim, GameState, GroundTruth, MobState, PlayerState};
+pub use observation::{
+    inject_physics_walk_flags, VisionObservation, VISION_CONF_THRESH, OBS_DIM, OBS_DROP_SLOTS,
+    OBS_DROP_START, OBS_ENEMY_SLOTS, OBS_ENEMY_START, OBS_FLOOR_SLOTS, OBS_FLOOR_START,
+    OBS_LADDER_SLOTS, OBS_LADDER_START, OBS_PHYSICS, OBS_PHYSICS_START, OBS_ROPE_SLOTS,
+    OBS_ROPE_START, OBS_SLOT_DIM,
+};
+pub use sim::{EngageHint, GameModal, GameSim, GameState, GroundTruth, MobState, PlayerState};
 pub use types::{
     DropKind, MobAnim, PlayerAnim, ATTACK_DURATION, DEFAULT_PLAYER_NAME, LOGIC_DT, LOGIC_HZ,
     NAME_TAG_BG_ALPHA, NAME_TAG_FONT_SIZE, NAME_TAG_GAP_BELOW_FEET, NAME_TAG_PAD_X, NAME_TAG_PAD_Y,

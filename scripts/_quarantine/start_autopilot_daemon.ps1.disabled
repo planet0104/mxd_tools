@@ -1,0 +1,73 @@
+# 以独立进程启动 train_autopilot（比 Start-Job 更稳定，父 shell 退出后仍继续）
+param(
+    [int]$IntervalMin = 30,
+    [int]$StuckMinutes = 45,
+    [int]$StartupGraceMin = 10,
+    [int]$TotalGenerations = 25000,
+    [int]$Population = 40,
+    [switch]$NoOcr,
+    [float]$AnchorOffset = 10.0,
+    [string]$StopAt = "2026-08-28T10:00:00",
+    [string]$TrainLog = "",
+    [string]$ProjectRoot = (Split-Path $PSScriptRoot -Parent)
+)
+
+$ErrorActionPreference = "Stop"
+$LogDir = Join-Path $ProjectRoot "tmp"
+$PidFile = Join-Path $LogDir "train_autopilot.pid"
+$AutoScript = Join-Path $ProjectRoot "scripts\train_autopilot.ps1"
+$DaemonLog = Join-Path $LogDir "train_autopilot_daemon.log"
+
+New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+
+function Write-Daemon([string]$Msg) {
+    $line = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] $Msg"
+    Add-Content -Path $DaemonLog -Value $line -Encoding UTF8
+    Write-Host $line
+}
+
+# 若已有存活进程则跳过
+if (Test-Path $PidFile) {
+    $oldPid = [int](Get-Content $PidFile -ErrorAction SilentlyContinue | Select-Object -First 1)
+    if ($oldPid -gt 0) {
+        $alive = Get-CimInstance Win32_Process -Filter "ProcessId=$oldPid" -ErrorAction SilentlyContinue
+        if ($alive) {
+            Write-Daemon "autopilot already running pid=$oldPid"
+            exit 0
+        }
+    }
+}
+
+if (-not $TrainLog) {
+    $latest = Get-ChildItem -Path $LogDir -Filter "neat_train_*.log" -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($latest) { $TrainLog = $latest.FullName }
+}
+
+$argList = @(
+    "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $AutoScript,
+    "-IntervalMin", "$IntervalMin",
+    "-StuckMinutes", "$StuckMinutes",
+    "-StartupGraceMin", "$StartupGraceMin",
+    "-TotalGenerations", "$TotalGenerations",
+    "-Population", "$Population",
+    "-AnchorOffset", "$AnchorOffset",
+    "-StopAt", $StopAt,
+    "-ProjectRoot", $ProjectRoot
+)
+if ($NoOcr) { $argList += "-NoOcr" }
+if ($TrainLog) { $argList += @("-TrainLog", $TrainLog) }
+
+$stderrLog = Join-Path $LogDir "train_autopilot_boot.err.log"
+$stdoutLog = Join-Path $LogDir "train_autopilot_boot.out.log"
+
+$p = Start-Process -FilePath "powershell.exe" `
+    -ArgumentList $argList `
+    -WorkingDirectory $ProjectRoot `
+    -WindowStyle Hidden `
+    -RedirectStandardError $stderrLog `
+    -RedirectStandardOutput $stdoutLog `
+    -PassThru
+
+$p.Id | Set-Content $PidFile -Encoding ASCII
+Write-Daemon "started autopilot pid=$($p.Id) interval=${IntervalMin}min stopAt=$StopAt trainLog=$TrainLog"

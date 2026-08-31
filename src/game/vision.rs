@@ -1,4 +1,4 @@
-//! 视觉训练单步：每帧**一次** YOLO（+ 可选 OCR）→ 检测列表 + 自身玩家 + NEAT 观测（无磁盘 I/O）。
+//! 视觉单步：YOLO+OCR → 观测向量。
 
 use std::path::Path;
 
@@ -8,13 +8,12 @@ use image::RgbImage;
 use crate::player_name::{self, NamedPlayerHit};
 use crate::yolo::{Detection, YoloDetector, YoloDevice};
 
-use super::config::{VisionAnchorConfig, VisionAnchorMode};
+use super::config::VisionAnchorConfig;
 use super::observation::VisionObservation;
-use super::self_anchor::{episode_anchor_offset, find_self_player_by_sim};
-use super::GameSim;
+use super::self_anchor::apply_anchor_jitter;
 use super::{DEFAULT_PLAYER_NAME, WINDOW_H, WINDOW_W};
 
-/// 训练 SimMatch 模式：主线程随帧传入的 sim 快照。
+/// 训练 YOLO 模式：主线程随帧传入的 sim 快照（OCR 脚点抖动用 episode_seed）。
 #[derive(Debug, Clone, Copy)]
 pub struct SimVisionSnapshot {
     pub player_x: f32,
@@ -32,7 +31,7 @@ pub fn filter_detections(detections: Vec<Detection>, min_conf: f32) -> Vec<Detec
         .collect()
 }
 
-/// 视觉推理管线（YOLO + OCR + 观测编码），全程内存操作。
+/// 视觉推理管线（YOLO + OCR + 观测编码）。
 pub struct VisionPipeline {
     detector: YoloDetector,
     target_name: String,
@@ -71,15 +70,11 @@ impl VisionPipeline {
         self.conf_thresh
     }
 
-    /// 对一帧 RGB 做**单次**视觉感知（训练每逻辑帧调用一次）。
-    ///
-    /// 流程：`detect_rgb8`（一次 YOLO）→ 置信度过滤 → 自身锚点（OCR 或 SimMatch）
-    /// → `VisionObservation::from_detections`（纯内存编码，不再调用模型）。
+    /// 对一帧 RGB 做 YOLO+OCR 感知。
     pub fn perceive(&mut self, frame: &RgbImage) -> Result<VisionStep> {
         self.perceive_with_snapshot(frame, None)
     }
 
-    /// 带 sim 快照的感知；SimMatch 模式下必须传入 `Some(snapshot)`。
     pub fn perceive_with_snapshot(
         &mut self,
         frame: &RgbImage,
@@ -89,7 +84,6 @@ impl VisionPipeline {
         self.build_agent_step(frame, &detections, &self.target_name, sim_snapshot)
     }
 
-    /// 一次 YOLO 推理 + 置信度过滤。
     pub fn detect_frame(&mut self, frame: &RgbImage) -> Result<Vec<Detection>> {
         let w = frame.width();
         let h = frame.height();
@@ -97,7 +91,6 @@ impl VisionPipeline {
         Ok(filter_detections(raw, self.conf_thresh))
     }
 
-    /// 在已有检测框上定位自身锚点并编码观测（不再调用 YOLO）。
     pub fn build_agent_step(
         &self,
         frame: &RgbImage,
@@ -128,34 +121,19 @@ impl VisionPipeline {
         target_name: &str,
         sim_snapshot: Option<SimVisionSnapshot>,
     ) -> Result<Option<NamedPlayerHit>> {
-        match self.anchor.mode {
-            VisionAnchorMode::Ocr => {
-                let (self_player, _) = player_name::find_named_player_verbose(
-                    frame,
-                    detections,
-                    target_name,
-                    self.conf_thresh,
-                    false,
-                )?;
-                Ok(self_player)
-            }
-            VisionAnchorMode::SimMatch => {
-                let Some(snap) = sim_snapshot else {
-                    anyhow::bail!("SimMatch 模式需要 SimVisionSnapshot");
-                };
-                let (ox, oy) = episode_anchor_offset(snap.episode_seed, self.anchor.sim_offset_px);
-                Ok(find_self_player_by_sim(
-                    detections,
-                    snap.player_x,
-                    snap.player_y,
-                    snap.cam_x,
-                    snap.cam_y,
-                    self.conf_thresh,
-                    ox,
-                    oy,
-                ))
+        let (mut self_player, _) = player_name::find_named_player_verbose(
+            frame,
+            detections,
+            target_name,
+            self.conf_thresh,
+            false,
+        )?;
+        if self.anchor.uses_anchor_jitter() {
+            if let (Some(hit), Some(snap)) = (&mut self_player, sim_snapshot) {
+                apply_anchor_jitter(hit, snap.episode_seed, self.anchor.anchor_jitter_px);
             }
         }
+        Ok(self_player)
     }
 }
 
@@ -166,18 +144,6 @@ pub struct VisionStep {
     pub observation: VisionObservation,
 }
 
-impl VisionStep {
-    /// 将本帧 YOLO 可见掉落与观测写入 `GameSim`（训练计分 / shaping）。
-    pub fn apply_fitness_hints(&self, sim: &mut GameSim) {
-        sim.record_vision_loot(&self.detections);
-        if sim.config.training {
-            sim.fitness
-                .set_last_observation(&self.observation.values);
-        }
-    }
-}
-
-/// 校验帧尺寸是否为训练标准分辨率。
 pub fn assert_training_frame(frame: &RgbImage) -> Result<()> {
     if frame.width() != WINDOW_W as u32 || frame.height() != WINDOW_H as u32 {
         anyhow::bail!(
@@ -194,7 +160,7 @@ pub fn assert_training_frame(frame: &RgbImage) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::NEAT_CONF_THRESH;
+    use crate::game::VISION_CONF_THRESH;
     use crate::yolo::CLASS_NAMES;
 
     #[test]
@@ -219,8 +185,8 @@ mod tests {
                 y2: 1.0,
             },
         ];
-        let out = filter_detections(dets, NEAT_CONF_THRESH);
+        let out = filter_detections(dets, VISION_CONF_THRESH);
         assert_eq!(out.len(), 1);
-        assert!(out[0].conf >= NEAT_CONF_THRESH);
+        assert!(out[0].conf >= VISION_CONF_THRESH);
     }
 }

@@ -110,7 +110,7 @@ function Start-Training {
         cargo build --release --bin neat_trainer 2>&1 | Add-Content $TrainLog
         Pop-Location
     }
-    $cmd = "`"$exe`" --generations $gens --population $Population --pace 12 --max-ticks 18000"
+    $cmd = "`"$exe`" --generations $gens --population $Population --detect-hz 5 --max-ticks 18000"
     if ($Fresh) { $cmd = $cmd + " --fresh" }
     $cmd = $cmd + " >> `"$TrainLog`" 2>&1"
     $p = Start-Process -FilePath "cmd.exe" -ArgumentList "/c", $cmd -WorkingDirectory $ProjectRoot -PassThru -WindowStyle Hidden

@@ -1,14 +1,14 @@
-//! 游戏主线程与 YOLO+OCR+NEAT 决策线程解耦（本地 CPU 视觉）。
+//! 游戏主线程与 YOLO+OCR 视觉线程解耦；规则 bot 在主线程用最新物理状态决策。
 
-use std::sync::{Arc, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use image::RgbImage;
 
-use crate::game::InputFrame;
-use crate::game::{GameSim, SimVisionSnapshot, VisionPipeline, VisionStep};
-use crate::neat::{evaluate, input_from_outputs, Genome};
+use super::input::InputFrame;
+use super::observation::OBS_DIM;
+use super::rule_bot::{RuleBot, RuleBotCtx};
+use super::{inject_physics_walk_flags, GameSim, SimVisionSnapshot, VisionPipeline, VisionStep};
 
 const FRAME_QUEUE: usize = 2;
 
@@ -27,74 +27,68 @@ pub struct VisionWorkerTiming {
     pub tick: u32,
     pub queue_wait_ms: f64,
     pub perceive_ms: f64,
-    pub neat_ms: f64,
+    pub policy_ms: f64,
     pub worker_total_ms: f64,
 }
 
 struct VisionAgentResult {
     tick: u32,
     step: VisionStep,
-    input: InputFrame,
-    neat_outputs: Vec<f32>,
     timing: VisionWorkerTiming,
 }
 
-/// 视觉 + NEAT 控制器。
+fn now_ns() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
+}
+
+/// 视觉 + 规则 bot 控制器。
 pub struct AgentController {
     frame_tx: std::sync::mpsc::SyncSender<FrameMsg>,
     result_rx: std::sync::mpsc::Receiver<VisionAgentResult>,
-    genome: Arc<RwLock<Genome>>,
     join: Option<JoinHandle<()>>,
+    bot: RuleBot,
     last_input: InputFrame,
     last_vision: Option<VisionStep>,
     last_applied_tick: Option<u32>,
-    last_neat_outputs: Option<Vec<f32>>,
     worker_dead: bool,
     last_poll_timings: Vec<VisionWorkerTiming>,
 }
 
 impl AgentController {
-    pub fn spawn(pipeline: VisionPipeline, genome: Genome) -> Self {
+    pub fn spawn(pipeline: VisionPipeline) -> Self {
         let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel(FRAME_QUEUE);
         let (result_tx, result_rx) = std::sync::mpsc::channel();
-        let genome = Arc::new(RwLock::new(genome));
-        let genome_worker = Arc::clone(&genome);
         let join = thread::Builder::new()
-            .name("vision-neat-agent".into())
-            .spawn(move || vision_agent_loop(frame_rx, result_tx, pipeline, genome_worker))
-            .expect("spawn vision-neat-agent");
+            .name("vision-yolo-agent".into())
+            .spawn(move || vision_agent_loop(frame_rx, result_tx, pipeline))
+            .expect("spawn vision-yolo-agent");
 
         Self {
             frame_tx,
             result_rx,
-            genome,
             join: Some(join),
+            bot: RuleBot::default(),
             last_input: InputFrame::default(),
             last_vision: None,
             last_applied_tick: None,
-            last_neat_outputs: None,
             worker_dead: false,
             last_poll_timings: Vec::new(),
         }
     }
 
-    pub fn set_genome(&self, genome: Genome) {
-        if let Ok(mut g) = self.genome.write() {
-            *g = genome;
-        }
-    }
-
-    pub fn try_submit_frame(&self, tick: u32, rgb: RgbImage, sim_snapshot: Option<SimVisionSnapshot>) -> bool {
+    pub fn try_submit_frame(&self, tick: u32, rgb: RgbImage, sim: &GameSim) -> bool {
         if self.worker_dead {
             return false;
         }
-        let submitted_ns = crate::trainer::profile::now_ns();
         self.frame_tx
             .try_send(FrameMsg::Job {
                 tick,
                 rgb,
-                submitted_ns,
-                sim_snapshot,
+                submitted_ns: now_ns(),
+                sim_snapshot: Some(sim.vision_snapshot()),
             })
             .is_ok()
     }
@@ -109,10 +103,6 @@ impl AgentController {
 
     pub fn last_applied_tick(&self) -> Option<u32> {
         self.last_applied_tick
-    }
-
-    pub fn last_neat_outputs(&self) -> Option<&[f32]> {
-        self.last_neat_outputs.as_deref()
     }
 
     pub fn worker_dead(&self) -> bool {
@@ -133,7 +123,7 @@ impl AgentController {
             .send(FrameMsg::Job {
                 tick,
                 rgb,
-                submitted_ns: crate::trainer::profile::now_ns(),
+                submitted_ns: now_ns(),
                 sim_snapshot: Some(sim.vision_snapshot()),
             })
             .map_err(|_| anyhow::anyhow!("视觉线程已退出"))?;
@@ -157,7 +147,6 @@ impl AgentController {
             batch
         };
         for result in batch {
-            self.last_poll_timings.push(result.timing.clone());
             self.apply_result(sim, result);
         }
     }
@@ -189,18 +178,30 @@ impl AgentController {
         Ok(())
     }
 
-    fn apply_result(&mut self, sim: &mut GameSim, result: VisionAgentResult) {
-        result.step.apply_fitness_hints(sim);
-        self.last_input = result.input;
+    fn apply_result(&mut self, sim: &mut GameSim, mut result: VisionAgentResult) {
+        let t0 = Instant::now();
+        let (pr, pl) = sim.physics_walk_ok_pair();
+        inject_physics_walk_flags(&mut result.step.observation.values, pr, pl);
+
+        let mut obs = [0.0_f32; OBS_DIM];
+        let n = result.step.observation.values.len().min(OBS_DIM);
+        obs[..n].copy_from_slice(&result.step.observation.values[..n]);
+
+        sim.movement_gate.set_last_observation(&obs);
+
+        let ctx = RuleBotCtx::from_sim_with_farm_y(sim, &obs, self.bot.farm_y);
+        self.last_input = self.bot.decide(ctx);
+        result.timing.policy_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
         self.last_vision = Some(result.step);
-        self.last_neat_outputs = Some(result.neat_outputs);
         self.last_applied_tick = Some(result.tick);
+        self.last_poll_timings.push(result.timing);
     }
 
     pub fn reset_vision_state(&mut self) {
+        self.bot.reset();
         self.last_input = InputFrame::default();
         self.last_vision = None;
-        self.last_neat_outputs = None;
         self.last_applied_tick = None;
         self.last_poll_timings.clear();
     }
@@ -223,7 +224,6 @@ fn vision_agent_loop(
     frame_rx: std::sync::mpsc::Receiver<FrameMsg>,
     result_tx: std::sync::mpsc::Sender<VisionAgentResult>,
     mut pipeline: VisionPipeline,
-    genome: Arc<RwLock<Genome>>,
 ) {
     while let Ok(msg) = frame_rx.recv() {
         match msg {
@@ -235,9 +235,8 @@ fn vision_agent_loop(
                 sim_snapshot,
             } => {
                 let worker_start = Instant::now();
-                let queue_wait_ms = crate::trainer::profile::now_ns()
-                    .saturating_sub(submitted_ns) as f64
-                    / 1_000_000.0;
+                let queue_wait_ms =
+                    now_ns().saturating_sub(submitted_ns) as f64 / 1_000_000.0;
                 let t0 = Instant::now();
                 let step = match pipeline.perceive_with_snapshot(&rgb, sim_snapshot) {
                     Ok(s) => s,
@@ -247,26 +246,18 @@ fn vision_agent_loop(
                     }
                 };
                 let perceive_ms = t0.elapsed().as_secs_f64() * 1000.0;
-                let t1 = Instant::now();
-                let (input, neat_outputs) = {
-                    let g = genome.read().expect("genome lock");
-                    let outputs = evaluate(&g, &step.observation.values);
-                    (input_from_outputs(&outputs), outputs)
-                };
-                let neat_ms = t1.elapsed().as_secs_f64() * 1000.0;
+
                 let timing = VisionWorkerTiming {
                     tick,
                     queue_wait_ms,
                     perceive_ms,
-                    neat_ms,
+                    policy_ms: 0.0,
                     worker_total_ms: worker_start.elapsed().as_secs_f64() * 1000.0,
                 };
                 if result_tx
                     .send(VisionAgentResult {
                         tick,
                         step,
-                        input,
-                        neat_outputs,
                         timing,
                     })
                     .is_err()

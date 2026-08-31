@@ -1,0 +1,75 @@
+# Train 90k then auto-probe preview.
+# Exit 0 = OK, 1 = STAGNANT, 2 = failure.
+$ErrorActionPreference = "Continue"
+Set-Location $PSScriptRoot\..
+if (-not (Test-Path "Cargo.toml")) { Set-Location (Split-Path $PSScriptRoot -Parent) }
+
+$round = if ($args.Count -ge 1) { [int]$args[0] } else { 1 }
+$logDir = Join-Path (Get-Location) "tmp"
+New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+$stamp = Get-Date -Format "yyyyMMdd_HHmmss"
+$trainLog = Join-Path $logDir "auto_train_r${round}_${stamp}.log"
+
+Write-Host "[auto] round=$round build release bins..."
+cargo build --release --bin neat_trainer --bin neat_preview
+if ($LASTEXITCODE -ne 0) { Write-Host "[auto] build failed"; exit 2 }
+
+Get-Process neat_trainer -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 2
+
+Write-Host "[auto] start 90k --fresh sim-detect (workers=20)..."
+$exe = Join-Path (Get-Location) "target\release\neat_trainer.exe"
+# 不用 RedirectStandard*：管道缓冲满会导致 worker 卡死/主进程异常退出。
+# 日志只走 --log-file。
+$p = Start-Process -FilePath $exe -ArgumentList @(
+  "--sim-detect","--fresh",
+  "--population","40","--workers","20","--generations","90000",
+  "--detect-hz","10","--max-ticks","36000",
+  "--sim-dropout","0.32","--sim-jitter","20","--sim-class-noise","0.14","--sim-size-jitter","0.25",
+  "--log-file", $trainLog
+) -WorkingDirectory (Get-Location) -PassThru -WindowStyle Hidden
+
+Write-Host "[auto] trainer pid=$($p.Id) log=$trainLog"
+$deadline = (Get-Date).AddMinutes(25)
+$sawProgress = $false
+do {
+  Start-Sleep -Seconds 20
+  $mainAlive = $null -ne (Get-Process -Id $p.Id -ErrorAction SilentlyContinue)
+  $workers = @(Get-Process neat_trainer -ErrorAction SilentlyContinue)
+  if ($workers.Count -gt 0) { $sawProgress = $true }
+  $marker = $false
+  if (Test-Path $trainLog) {
+    $marker = Select-String -Path $trainLog -Pattern "训练完成" -Quiet -ErrorAction SilentlyContinue
+  }
+  Write-Host ("[auto] workers={0} main={1} done_marker={2}" -f $workers.Count, $mainAlive, $marker)
+  if ($marker) { break }
+  if ($sawProgress -and -not $mainAlive -and $workers.Count -eq 0) {
+    Write-Host "[auto] trainer died early without completion"
+    Get-Content $trainLog -Tail 20 -ErrorAction SilentlyContinue
+    exit 2
+  }
+} while ((Get-Date) -lt $deadline)
+
+if (-not (Select-String -Path $trainLog -Pattern "训练完成" -Quiet -ErrorAction SilentlyContinue)) {
+  Write-Host "[auto] timeout or incomplete training"
+  Get-Process neat_trainer -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+  exit 2
+}
+
+Write-Host "[auto] TRAIN_DONE"
+# 等子进程收尾
+Start-Sleep -Seconds 3
+Get-Process neat_trainer -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+
+Write-Host "[auto] preview probe (seed=0 对齐默认预览 + seed=445)..."
+& "$PSScriptRoot\preview_probe.ps1" -AutoTicks 7200 -Seed 0 -DetectHz 5 -AnchorOffset 0 -TimeoutSec 120
+$prev0 = $LASTEXITCODE
+Write-Host "[auto] seed0 exit=$prev0"
+& "$PSScriptRoot\preview_probe.ps1" -AutoTicks 3600 -Seed 445 -DetectHz 10 -AnchorOffset 14 -TimeoutSec 90
+$prev445 = $LASTEXITCODE
+Write-Host "[auto] seed445 exit=$prev445"
+# 必须以用户默认 seed=0 通过；445 作参考。
+if ($prev0 -eq 0) { Write-Host "[auto] VERDICT=OK round=$round (seed0)"; exit 0 }
+if ($prev0 -eq 1) { Write-Host "[auto] VERDICT=STAGNANT round=$round (seed0)"; exit 1 }
+Write-Host "[auto] preview failed exit=$prev0"
+exit 2
