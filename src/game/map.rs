@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use rand::Rng;
 use serde::Deserialize;
 
 use crate::game::types::SAME_LEVEL_TOL;
@@ -782,6 +783,97 @@ impl GameMap {
         (400.0, self.max_stand_y())
     }
 
+    /// 多平台出生候选：按高度带合并水平脚点，抽样若干站立位置。
+    pub fn player_spawn_candidates(&self) -> Vec<(f32, f32)> {
+        use crate::game::types::{
+            PLAYER_SPAWN_EDGE_PAD, PLAYER_SPAWN_MIN_PLATFORM_W, PLAYER_SPAWN_Y_BAND,
+        };
+        use std::collections::BTreeMap;
+
+        let mut bands: BTreeMap<i32, Vec<(f32, f32, f32)>> = BTreeMap::new();
+        for p in &self.platforms {
+            let (xmin, xmax) = if p.x1 <= p.x2 {
+                (p.x1, p.x2)
+            } else {
+                (p.x2, p.x1)
+            };
+            if xmax - xmin < PLAYER_SPAWN_MIN_PLATFORM_W {
+                continue;
+            }
+            if (p.y1 - p.y2).abs() >= 2.0 {
+                continue;
+            }
+            let py = (p.y1 + p.y2) * 0.5;
+            let band = (py / PLAYER_SPAWN_Y_BAND).round() as i32;
+            bands.entry(band).or_default().push((xmin, xmax, py));
+        }
+
+        let mut out: Vec<(f32, f32)> = Vec::new();
+        for spans in bands.values() {
+            let mut merged: Vec<(f32, f32, f32)> = Vec::new();
+            let mut sorted = spans.clone();
+            sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            for (lo, hi, py) in sorted {
+                if let Some(last) = merged.last_mut() {
+                    if lo <= last.1 + 8.0 && (py - last.2).abs() <= 4.0 {
+                        last.1 = last.1.max(hi);
+                        continue;
+                    }
+                }
+                merged.push((lo, hi, py));
+            }
+            for (lo, hi, py) in merged {
+                let w = hi - lo;
+                if w < PLAYER_SPAWN_MIN_PLATFORM_W {
+                    continue;
+                }
+                let pad = PLAYER_SPAWN_EDGE_PAD.min(w * 0.25);
+                let a = lo + pad;
+                let b = hi - pad;
+                if b <= a {
+                    continue;
+                }
+                let mid = (a + b) * 0.5;
+                out.push((mid, py));
+                if w >= PLAYER_SPAWN_MIN_PLATFORM_W * 2.0 {
+                    out.push((a + (b - a) * 0.25, py));
+                    out.push((a + (b - a) * 0.75, py));
+                }
+            }
+        }
+
+        for sp in &self.spawns {
+            let (w1, w2) = self.walk_range_at(sp.x, sp.y);
+            let x = sp.x.clamp(w1, w2);
+            out.push((x, sp.y));
+        }
+
+        out.sort_by(|a, b| {
+            a.1.partial_cmp(&b.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
+        });
+        out.dedup_by(|a, b| (a.0 - b.0).abs() < 12.0 && (a.1 - b.1).abs() < 8.0);
+        if out.is_empty() {
+            out.push(self.default_spawn());
+        }
+        out
+    }
+
+    /// 按 RNG 从候选点随机选出生位置（训练泛化用）。
+    pub fn random_player_spawn<R: rand::Rng + ?Sized>(&self, rng: &mut R) -> (f32, f32) {
+        let cands = self.player_spawn_candidates();
+        let i = rng.gen_range(0..cands.len());
+        let (x, y) = cands[i];
+        if let Some(st) = self.stand_at(x, y + 40.0, 120.0) {
+            (x, st.y)
+        } else if let Some((sx, st)) = self.nearest_stand(x, y) {
+            (sx, st.y)
+        } else {
+            (x, y)
+        }
+    }
+
     /// 刷怪点所在高度上、包含 x 的连续水平平台巡逻区间。
     pub fn walk_range_at(&self, x: f32, y: f32) -> (f32, f32) {
         const EDGE_PAD: f32 = 8.0;
@@ -890,6 +982,7 @@ fn slope_ground_y(slope: &SlopePoly, x: f32) -> Option<f32> {
 mod tests {
     use super::*;
     use crate::game::load_default_map;
+    use rand::SeedableRng;
 
     #[test]
     fn adjacent_climb_ignores_upper_rope_from_spawn_ground() {
@@ -932,6 +1025,32 @@ mod tests {
             .expect("spawn should see 1165 ledges");
         // 左侧 218–308 或右侧 617–656 的 1165 台阶。
         assert!(dx.abs() > 10.0, "should walk toward a ledge, dx={dx}");
+    }
+
+    #[test]
+    fn player_spawn_candidates_cover_multiple_altitudes() {
+        let map = load_default_map().expect("default map");
+        let cands = map.player_spawn_candidates();
+        assert!(cands.len() >= 4, "expected several spawn candidates, got {}", cands.len());
+        let mut ys: Vec<i32> = cands
+            .iter()
+            .map(|(_, y)| (*y / 40.0).round() as i32)
+            .collect();
+        ys.sort_unstable();
+        ys.dedup();
+        assert!(
+            ys.len() >= 3,
+            "candidates should span multiple platform heights, bands={ys:?}"
+        );
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        let a = map.random_player_spawn(&mut rng);
+        assert!(
+            map.strict_stand_at(a.0, a.1).is_some()
+                || map.stand_at(a.0, a.1 + 40.0, 120.0).is_some(),
+            "spawn ({}, {}) should be standable",
+            a.0,
+            a.1
+        );
     }
 
     #[test]

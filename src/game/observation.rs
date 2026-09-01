@@ -17,12 +17,13 @@ pub const OBS_DROP_SLOTS: usize = 4;
 pub const OBS_LADDER_SLOTS: usize = 2;
 pub const OBS_ROPE_SLOTS: usize = 3;
 pub const OBS_SLOT_DIM: usize = 4;
-/// 物理前方同层可走（右、左），与 YOLO 无关；训练/预览一致，专治顶边站桩。
-pub const OBS_PHYSICS: usize = 2;
+/// 本体反馈：OCR 脚点位移、卡住、上一帧动作（部署端可复现，无 sim 物理通道）。
+/// 布局: last_dx, last_dy, blocked_left, blocked_right, last_left, last_right, last_jump, last_attack
+pub const OBS_PROPRIO: usize = 8;
 pub const OBS_DIM: usize = OBS_SELF
     + (OBS_FLOOR_SLOTS + OBS_ENEMY_SLOTS + OBS_DROP_SLOTS + OBS_LADDER_SLOTS + OBS_ROPE_SLOTS)
         * OBS_SLOT_DIM
-    + OBS_PHYSICS;
+    + OBS_PROPRIO;
 
 /// 各组槽位在观测向量中的起始下标。
 pub const OBS_FLOOR_START: usize = OBS_SELF;
@@ -30,7 +31,7 @@ pub const OBS_ENEMY_START: usize = OBS_SELF + OBS_FLOOR_SLOTS * OBS_SLOT_DIM;
 pub const OBS_DROP_START: usize = OBS_ENEMY_START + OBS_ENEMY_SLOTS * OBS_SLOT_DIM;
 pub const OBS_LADDER_START: usize = OBS_DROP_START + OBS_DROP_SLOTS * OBS_SLOT_DIM;
 pub const OBS_ROPE_START: usize = OBS_LADDER_START + OBS_LADDER_SLOTS * OBS_SLOT_DIM;
-pub const OBS_PHYSICS_START: usize = OBS_ROPE_START + OBS_ROPE_SLOTS * OBS_SLOT_DIM;
+pub const OBS_PROPRIO_START: usize = OBS_ROPE_START + OBS_ROPE_SLOTS * OBS_SLOT_DIM;
 
 const FLOOR: &str = "地板";
 const LADDER: &str = "梯子";
@@ -178,13 +179,50 @@ pub fn obs_has_same_level_enemy(values: &[f32]) -> bool {
     false
 }
 
+/// 本台（紧同层 ≈32px）是否有敌人。清层/换台判定必须用这个，
+/// 否则上层台怪（Δy≈50px）会被宽同层当成「本台还有怪」而横走空砍。
+pub fn obs_has_platform_enemy(values: &[f32]) -> bool {
+    for i in 0..OBS_ENEMY_SLOTS {
+        let base = OBS_ENEMY_START + i * OBS_SLOT_DIM;
+        if !obs_slot_active(values, base, 1) {
+            continue;
+        }
+        let Some((_, dy, _, _)) = read_slot(values, base) else {
+            continue;
+        };
+        if dy.abs() <= ENEMY_PLATFORM_DY {
+            return true;
+        }
+    }
+    false
+}
+
+/// 本台近距（≈200px）是否有敌人。远处同台怪不算「本台还在农」——
+/// 否则会一路空砍追 500px 外的怪，顶到地图边缘仍不清层。
+pub const ENEMY_NEAR_PLATFORM_DX: f32 = 200.0 / 1368.0;
+
+pub fn obs_has_nearby_platform_enemy(values: &[f32]) -> bool {
+    for i in 0..OBS_ENEMY_SLOTS {
+        let base = OBS_ENEMY_START + i * OBS_SLOT_DIM;
+        if !obs_slot_active(values, base, 1) {
+            continue;
+        }
+        let Some((dx, dy, _, _)) = read_slot(values, base) else {
+            continue;
+        };
+        if dy.abs() <= ENEMY_PLATFORM_DY && dx.abs() <= ENEMY_NEAR_PLATFORM_DX {
+            return true;
+        }
+    }
+    false
+}
+
 /// 与 `sim::try_attack_mobs` 攻击框对齐的归一化距离阈值（1368×768 视口）。
 const ATTACK_GATE_DX_FWD: f32 = 90.0 / 1368.0;
 const ATTACK_GATE_DX_BACK: f32 = 8.0 / 1368.0;
 const ATTACK_GATE_DY: f32 = 80.0 / 768.0;
-/// 敌人与玩家同层才可普攻；对齐 RuleBot SAME_PLATFORM_DY≈28px，略留 YOLO 容差。
-/// 过宽（如 70px）会把上层台怪当成同层，导致空砍/假农怪带。
 /// 敌人与玩家同层才可普攻；对齐 sim 攻击框并留 YOLO 容差。
+/// 过宽会把上层台怪当成同层；农怪带清层判定请用 `ENEMY_PLATFORM_DY` / `obs_has_platform_enemy`。
 pub const ENEMY_SAME_LEVEL_DY: f32 = 70.0 / 768.0;
 /// 纯视觉决策用的更紧同层（约 32px）：排除上层台怪，避免空砍/假农怪带。
 pub const ENEMY_PLATFORM_DY: f32 = 32.0 / 768.0;
@@ -821,17 +859,30 @@ fn encode_slot(
     values[offset + 3] = (det.y2 - det.y1) / h;
 }
 
-/// 写入物理「右/左前方同层可走」标志（1=可走，0=悬崖/挡墙）。
-pub fn inject_physics_walk_flags(
+/// 写入本体运动反馈（位移、卡住、上一帧动作）。
+pub fn inject_proprioception(
     values: &mut [f32],
-    right_ok: Option<bool>,
-    left_ok: Option<bool>,
+    last_dx: f32,
+    last_dy: f32,
+    blocked_left: bool,
+    blocked_right: bool,
+    last_left: bool,
+    last_right: bool,
+    last_jump: bool,
+    last_attack: bool,
 ) {
     if values.len() < OBS_DIM {
         return;
     }
-    values[OBS_PHYSICS_START] = if right_ok.unwrap_or(true) { 1.0 } else { 0.0 };
-    values[OBS_PHYSICS_START + 1] = if left_ok.unwrap_or(true) { 1.0 } else { 0.0 };
+    let base = OBS_PROPRIO_START;
+    values[base] = last_dx.clamp(-1.0, 1.0);
+    values[base + 1] = last_dy.clamp(-1.0, 1.0);
+    values[base + 2] = if blocked_left { 1.0 } else { 0.0 };
+    values[base + 3] = if blocked_right { 1.0 } else { 0.0 };
+    values[base + 4] = if last_left { 1.0 } else { 0.0 };
+    values[base + 5] = if last_right { 1.0 } else { 0.0 };
+    values[base + 6] = if last_jump { 1.0 } else { 0.0 };
+    values[base + 7] = if last_attack { 1.0 } else { 0.0 };
 }
 
 #[cfg(test)]
@@ -855,6 +906,35 @@ mod tests {
     fn obs_dim_fixed() {
         let obs = VisionObservation::from_detections(&[], None, 1368, 768);
         assert_eq!(obs.values.len(), OBS_DIM);
+        assert_eq!(
+            OBS_DIM,
+            OBS_SELF
+                + (OBS_FLOOR_SLOTS + OBS_ENEMY_SLOTS + OBS_DROP_SLOTS + OBS_LADDER_SLOTS + OBS_ROPE_SLOTS)
+                    * OBS_SLOT_DIM
+                + OBS_PROPRIO
+        );
+    }
+
+    #[test]
+    fn inject_proprio_write_tail() {
+        let mut obs = VisionObservation::zeros();
+        inject_proprioception(
+            &mut obs.values,
+            0.1,
+            -0.2,
+            true,
+            false,
+            true,
+            false,
+            true,
+            false,
+        );
+        assert!((obs.values[OBS_PROPRIO_START] - 0.1).abs() < 1e-5);
+        assert!((obs.values[OBS_PROPRIO_START + 1] + 0.2).abs() < 1e-5);
+        assert_eq!(obs.values[OBS_PROPRIO_START + 2], 1.0);
+        assert_eq!(obs.values[OBS_PROPRIO_START + 3], 0.0);
+        assert_eq!(obs.values[OBS_PROPRIO_START + 4], 1.0);
+        assert_eq!(obs.values[OBS_PROPRIO_START + 6], 1.0);
     }
 
     #[test]
@@ -879,6 +959,19 @@ mod tests {
             near_dx.abs() < far_dx.abs(),
             "nearest floor should be first slot"
         );
+    }
+
+    #[test]
+    fn platform_enemy_excludes_upper_band() {
+        let mut v = [0.0_f32; OBS_DIM];
+        v[OBS_ENEMY_START + 2] = 0.05;
+        v[OBS_ENEMY_START + 3] = 0.05;
+        v[OBS_ENEMY_START] = -0.2;
+        v[OBS_ENEMY_START + 1] = 54.0 / 768.0;
+        assert!(obs_has_same_level_enemy(&v));
+        assert!(!obs_has_platform_enemy(&v));
+        v[OBS_ENEMY_START + 1] = 10.0 / 768.0;
+        assert!(obs_has_platform_enemy(&v));
     }
 
     #[test]

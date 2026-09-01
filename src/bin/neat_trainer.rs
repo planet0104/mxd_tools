@@ -4,7 +4,8 @@
 //! 主线程负责 GL 离屏渲染轮转。个体死亡后立即从 peak 排名前列补位。
 //!
 //! ```powershell
-//! cargo run --release --bin neat_trainer -- --generations 500 --population 10 --workers 10 --detect-hz 10
+//! # OBS 含本体反馈后旧基因组不兼容，请始终 --fresh
+//! cargo run --release --bin neat_trainer -- --fresh --generations 3000 --population 50 --workers 16 --elite-breed 8 --detect-hz 10 --fitness-shaping 0.5
 //! cargo run --release --bin neat_trainer -- --sequential --generations 50 --population 10
 //! ```
 
@@ -51,18 +52,18 @@ struct Cli {
 impl Cli {
     fn parse(args: &[String]) -> Self {
         let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let population = arg_usize(args, "--population", 10);
+        let population = arg_usize(args, "--population", 20);
         let sequential = args.iter().any(|a| a == "--sequential");
         Self {
-            generations: arg_u32(args, "--generations", 500),
+            generations: arg_u32(args, "--generations", 3000),
             population,
             workers: if sequential {
                 1
             } else {
-                arg_usize(args, "--workers", population)
+                arg_usize(args, "--workers", 10.min(population))
             },
             sequential,
-            elite_breed: arg_usize(args, "--elite-breed", (population / 2).max(2)),
+            elite_breed: arg_usize(args, "--elite-breed", (population / 3).max(4).min(population)),
             detect_hz: arg_f32(args, "--detect-hz", 10.0),
             max_ticks: arg_u32(args, "--max-ticks", 18_000),
             model: arg_path(args, "--model").unwrap_or_else(default_yolo_model_path),
@@ -75,7 +76,7 @@ impl Cli {
                 .unwrap_or_else(|| manifest.join(DEFAULT_SESSION_BEST_FILE)),
             fresh: args.iter().any(|a| a == "--fresh"),
             fitness_shaping: FitnessShapingConfig {
-                memory_weight: arg_f32(args, "--fitness-shaping", 0.35),
+                memory_weight: arg_f32(args, "--fitness-shaping", 0.5),
             },
         }
     }
@@ -261,7 +262,7 @@ async fn run_parallel_trainer_main(
 
     let s = shared.lock().expect("trainer lock");
     eprintln!(
-        "训练完成: best_peak={:.2} gen={} completed={} → {}",
+        "训练完成: best_rank={:.2} gen={} completed={} → {}",
         rank_fitness(&s.population.best_ever),
         s.population.generation,
         s.spawns_completed,
@@ -287,8 +288,8 @@ async fn run_sequential_trainer(
 
     let mut vision = prepare_vision_env(Some(&cli.model)).await?;
     let mut rng = StdRng::seed_from_u64(cli.seed.wrapping_add(spawns_completed as u64));
-    let mut last_saved_fitness = 0.0_f32;
-    let mut last_session_fitness = 0.0_f32;
+    let mut last_saved_fitness = f32::NEG_INFINITY;
+    let mut last_session_fitness = f32::NEG_INFINITY;
     let started = std::time::Instant::now();
     let mut last_status = std::time::Instant::now();
     let mut window_done: u32 = 0;
@@ -357,7 +358,7 @@ async fn run_sequential_trainer(
             let avg_peak = window_peak_sum / window_done.max(1) as f32;
             let avg_final = window_final_sum / window_done.max(1) as f32;
             eprintln!(
-                "[{:>5.0}s] done={}/{} (+{}) rate={:.2}/s gen={} best_peak={:.1} window: peak_avg={:.1} peak_max={:.1} final_avg={:.1}",
+                "[{:>5.0}s] done={}/{} (+{}) rate={:.2}/s gen={} best_rank={:.1} window: peak_avg={:.1} peak_max={:.1} final_avg={:.1}",
                 started.elapsed().as_secs_f32(),
                 spawns_completed,
                 total_spawns,
@@ -379,7 +380,7 @@ async fn run_sequential_trainer(
     }
 
     eprintln!(
-        "训练完成: best_peak={:.2} gen={} → {}",
+        "训练完成: best_rank={:.2} gen={} → {}",
         rank_fitness(&population.best_ever),
         population.generation,
         cli.best_genome.display()

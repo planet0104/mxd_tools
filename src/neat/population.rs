@@ -6,7 +6,11 @@ use super::genome::reset_innovations;
 
 const TARGET_SPECIES: usize = 8;
 const STALE_SPECIES: u32 = 12;
-const FRESH_FRACTION: f32 = 0.10;
+/// 常规随机注入比例（提高多样性，抑制早熟）。
+const FRESH_FRACTION: f32 = 0.22;
+/// 最优 peak 连续多少次评估未提升，则提高随机注入。
+const BEST_STAGNATION_EVALS: u32 = 80;
+const STAGNANT_FRESH_FRACTION: f32 = 0.55;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Species {
@@ -58,6 +62,9 @@ pub struct Population {
     /// 已完成评估的个体数（持续进化进度）。
     #[serde(default)]
     pub evaluations_completed: u32,
+    /// 自上次刷新 best_ever 以来的评估次数。
+    #[serde(default)]
+    pub evals_since_best_improve: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,7 +91,10 @@ impl Population {
         let genomes: Vec<Genome> = (0..cfg.size)
             .map(|_| Genome::random_minimal(rng))
             .collect();
-        let best_ever = genomes.first().cloned().unwrap_or_else(|| Genome::random_minimal(rng));
+        let mut best_ever = genomes.first().cloned().unwrap_or_else(|| Genome::random_minimal(rng));
+        // 未评估个体 fitness=0；若保留 0，终局大负分的个体永远无法刷新最优（日志也不出）。
+        best_ever.fitness = f32::NEG_INFINITY;
+        best_ever.peak_fitness = f32::NEG_INFINITY;
         let species = speciate(genomes, &cfg.compat);
         Self {
             generation: 0,
@@ -92,6 +102,7 @@ impl Population {
             best_ever,
             config: cfg,
             evaluations_completed: 0,
+            evals_since_best_improve: 0,
         }
     }
 
@@ -140,7 +151,13 @@ impl Population {
     /// 单个体死亡/局结束后写入基因库（按 peak 保留 top-N，立即供下一槽位选亲）。
     pub fn on_eval_complete(&mut self, mut genome: Genome) {
         self.evaluations_completed += 1;
+        let before = rank_fitness(&self.best_ever);
         self.update_best_with(Some(&genome));
+        if rank_fitness(&self.best_ever) > before + 1e-3 {
+            self.evals_since_best_improve = 0;
+        } else {
+            self.evals_since_best_improve = self.evals_since_best_improve.saturating_add(1);
+        }
         let compat = self.config.compat;
         if let Some(sp) = self
             .species
@@ -174,7 +191,23 @@ impl Population {
         if pool.is_empty() || pool.iter().all(|g| rank_fitness(g) <= 0.0) {
             return Genome::random_minimal(rng);
         }
-        if spawn_index > 0 && rng.gen::<f32>() < FRESH_FRACTION {
+        let stagnant = self.evals_since_best_improve >= BEST_STAGNATION_EVALS;
+        let fresh_p = if stagnant {
+            STAGNANT_FRESH_FRACTION
+        } else {
+            FRESH_FRACTION
+        };
+        if spawn_index > 0 && rng.gen::<f32>() < fresh_p {
+            if stagnant
+                && self.evals_since_best_improve > 0
+                && self.evals_since_best_improve % 100 == 0
+            {
+                eprintln!(
+                    "最优停滞 {} 局，注入随机个体 (fresh={:.0}%)",
+                    self.evals_since_best_improve,
+                    fresh_p * 100.0
+                );
+            }
             return Genome::random_minimal(rng);
         }
         let elite_n = self
@@ -182,6 +215,12 @@ impl Population {
             .elite_breed_count
             .max(1)
             .min(pool.len());
+        // 停滞时放宽选亲面，避免只在 top-k 近亲繁殖。
+        let elite_n = if stagnant {
+            elite_n.max((pool.len() * 3 / 4).max(1))
+        } else {
+            elite_n
+        };
         pool.truncate(elite_n);
 
         let parent_a = tournament_pick(&pool, rng);
@@ -192,6 +231,10 @@ impl Population {
             parent_a.clone()
         };
         mutate(&mut child, rng);
+        if stagnant {
+            // 额外一轮突变，跳出局部最优。
+            mutate(&mut child, rng);
+        }
         child.fitness = 0.0;
         child.adjusted_fitness = 0.0;
         child.peak_fitness = 0.0;
@@ -381,15 +424,35 @@ mod tests {
     }
 
     #[test]
-    fn trim_keeps_peak_not_final() {
-        let mut pop = Population::new(PopulationConfig::with_size(2), &mut rand::rngs::StdRng::seed_from_u64(7));
-        pop.on_eval_complete(scored(1.0, 5.0, 100.0));
+    fn trim_keeps_highest_final_fitness() {
+        let mut pop =
+            Population::new(PopulationConfig::with_size(2), &mut rand::rngs::StdRng::seed_from_u64(7));
+        pop.on_eval_complete(scored(1.0, 95.0, 100.0));
         pop.on_eval_complete(scored(2.0, 80.0, 20.0));
-        pop.on_eval_complete(scored(3.0, 1.0, 50.0));
+        pop.on_eval_complete(scored(3.0, 48.0, 50.0));
         let archive = pop.archive();
         assert_eq!(archive.len(), 2);
-        assert!((rank_fitness(&archive[0]) - 100.0).abs() < 1e-3);
-        assert!((rank_fitness(&archive[1]) - 50.0).abs() < 1e-3);
+        assert!(rank_fitness(&archive[0]) > rank_fitness(&archive[1]));
+        assert_eq!(rank_fitness(&archive[0]), 95.0);
+    }
+
+    #[test]
+    fn rank_ignores_peak_entirely() {
+        // 高 peak + 低终局不再有任何加成，也不再额外重罚：排名只看终局。
+        let collapsed = scored(1.0, 40.0, 200.0);
+        let steady = scored(2.0, 60.0, 60.0);
+        assert_eq!(rank_fitness(&collapsed), 40.0);
+        assert!(rank_fitness(&steady) > rank_fitness(&collapsed));
+    }
+
+    #[test]
+    fn rank_uses_final_including_negatives() {
+        let lucky = scored(1.0, 10.0, 0.0);
+        let walker = scored(2.0, -44.0, 0.0);
+        let worse = scored(3.0, -80.0, 0.0);
+        assert_eq!(rank_fitness(&lucky), 10.0);
+        assert_eq!(rank_fitness(&walker), -44.0);
+        assert!(rank_fitness(&walker) > rank_fitness(&worse));
     }
 
     #[test]

@@ -38,6 +38,12 @@ pub struct GameSimConfig {
     pub preview: bool,
     /// NEAT 训练模式：启用视觉适应度计分、HP 归零结束。
     pub training: bool,
+    /// 在多平台候选点中按 episode_seed 随机出生。
+    pub random_player_spawn: bool,
+    /// 规则 bot 输入门控；NEAT 训练/预览必须关闭（部署无此通道）。
+    pub movement_gate: bool,
+    /// 挥砍时自动转向最近同层怪。NEAT 训练/预览必须关闭，否则单向狂砍也能打中。
+    pub attack_auto_face: bool,
 }
 
 impl Default for GameSimConfig {
@@ -46,6 +52,9 @@ impl Default for GameSimConfig {
             bot_play: false,
             preview: false,
             training: false,
+            random_player_spawn: false,
+            movement_gate: false,
+            attack_auto_face: true,
         }
     }
 }
@@ -56,6 +65,9 @@ impl GameSimConfig {
             bot_play: true,
             preview: false,
             training: false,
+            random_player_spawn: super::types::TRAINING_RANDOM_PLAYER_SPAWN,
+            movement_gate: true,
+            attack_auto_face: true,
         }
     }
 
@@ -65,15 +77,33 @@ impl GameSimConfig {
             bot_play: true,
             preview: true,
             training: false,
+            random_player_spawn: super::types::TRAINING_RANDOM_PLAYER_SPAWN,
+            movement_gate: true,
+            attack_auto_face: true,
         }
     }
 
-    /// NEAT 训练：自动玩环境 + 视觉适应度 + 正常死亡。
+    /// NEAT 训练：自动玩环境 + 视觉适应度 + 正常死亡；无 MovementGate。
     pub fn training() -> Self {
         Self {
             bot_play: true,
             preview: false,
             training: true,
+            random_player_spawn: super::types::TRAINING_RANDOM_PLAYER_SPAWN,
+            movement_gate: false,
+            attack_auto_face: false,
+        }
+    }
+
+    /// NEAT 预览：与训练同感知约束；开 training 计分便于 diag 对照，preview 受击不死。
+    pub fn neat_preview() -> Self {
+        Self {
+            bot_play: true,
+            preview: true,
+            training: true,
+            random_player_spawn: super::types::TRAINING_RANDOM_PLAYER_SPAWN,
+            movement_gate: false,
+            attack_auto_face: false,
         }
     }
 }

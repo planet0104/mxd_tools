@@ -197,7 +197,7 @@ impl MovementGate {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::observation::{inject_physics_walk_flags, OBS_ENEMY_START, OBS_FLOOR_START};
+    use crate::game::observation::{OBS_ENEMY_START, OBS_FLOOR_START};
 
     fn floor_slot(values: &mut [f32], dx: f32, dy: f32, w: f32) {
         values[OBS_FLOOR_START] = dx;
@@ -274,7 +274,6 @@ mod tests {
         let mut obs = [0.0_f32; OBS_DIM];
         obs[OBS_FLOOR_START + 2] = 8.0 / 1368.0;
         obs[OBS_FLOOR_START + 3] = 0.04;
-        inject_physics_walk_flags(&mut obs, Some(false), Some(true));
         gate.set_last_observation(&obs);
         let ctx = MovementGateCtx {
             facing: 1.0,
@@ -302,7 +301,6 @@ mod tests {
         let mut obs = [0.0_f32; OBS_DIM];
         obs[OBS_FLOOR_START + 2] = 200.0 / 1368.0;
         obs[OBS_FLOOR_START + 3] = 0.04;
-        inject_physics_walk_flags(&mut obs, Some(false), Some(true));
         gate.set_last_observation(&obs);
         let ctx = MovementGateCtx {
             facing: 1.0,

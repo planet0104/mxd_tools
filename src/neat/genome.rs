@@ -50,13 +50,13 @@ impl Default for Compatibility {
     }
 }
 
-/// 选亲/排名用：优先 peak，旧检查点无 peak 时回退 final。
+/// 选亲/排名：直接用终局分数。
+///
+/// 适应度已改为正分为主（不再有局末重罚把高分打成 -500），所以「峰值后崩盘」这种
+/// 需要用 peak 纠偏的情形不复存在；peak 只留作训练日志。混合 peak 反而制造过
+/// 「幸运终局被夹成 0 却压过真实探索者」的锁榜 bug。
 pub fn rank_fitness(g: &Genome) -> f32 {
-    if g.peak_fitness > 0.0 {
-        g.peak_fitness
-    } else {
-        g.fitness
-    }
+    g.fitness
 }
 
 impl Genome {
@@ -374,6 +374,7 @@ mod tests {
             },
             config: Default::default(),
             evaluations_completed: 0,
+            evals_since_best_improve: 0,
         };
         reset_innovations();
         restore_innovations_from_population(&pop);

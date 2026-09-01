@@ -1,10 +1,7 @@
-use crate::game::action::actions_from_bits;
-use crate::game::InputFrame;
+use crate::game::macro_action::{MacroAction, MACRO_ACTION_COUNT};
 
 use super::genome::Genome;
 use super::{INPUT_SIZE, OUTPUT_NODE_START, OUTPUT_SIZE};
-
-pub const OUTPUT_THRESHOLD: f32 = 0.5;
 
 fn sigmoid(x: f32) -> f32 {
     1.0 / (1.0 + (-x).exp())
@@ -42,13 +39,21 @@ pub fn evaluate(genome: &Genome, inputs: &[f32]) -> Vec<f32> {
         .collect()
 }
 
-pub fn input_from_outputs(outputs: &[f32]) -> InputFrame {
-    let bits: Vec<bool> = outputs
-        .iter()
-        .take(OUTPUT_SIZE)
-        .map(|v| *v >= OUTPUT_THRESHOLD)
-        .collect();
-    actions_from_bits(&bits)
+/// 输出层互斥：取最大的一路作为本次动作。
+///
+/// 未接线的输出恒为 0，接了线的输出经 sigmoid 恒 > 0，因此「有连接」天然胜出，
+/// 不存在旧版按键位那种左右同时按、up+down 互抵的无效组合。
+pub fn action_from_outputs(outputs: &[f32]) -> MacroAction {
+    let mut best = 0usize;
+    let mut best_v = f32::NEG_INFINITY;
+    for i in 0..MACRO_ACTION_COUNT {
+        let v = outputs.get(i).copied().unwrap_or(0.0);
+        if v > best_v {
+            best_v = v;
+            best = i;
+        }
+    }
+    MacroAction::from_index(best)
 }
 
 fn topological_layers(genome: &Genome) -> Vec<Vec<usize>> {
@@ -104,22 +109,26 @@ mod tests {
     use rand::SeedableRng;
 
     #[test]
-    fn outputs_len_matches_actions() {
-        let mut rng = rand::rngs::StdRng::seed_from_u64(9);
+    fn outputs_match_action_count() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(64);
         let g = Genome::random_minimal(&mut rng);
-        let inputs = vec![0.5; INPUT_SIZE];
+        let inputs = vec![0.5_f32; INPUT_SIZE];
         let out = evaluate(&g, &inputs);
-        assert_eq!(out.len(), OUTPUT_SIZE);
-        let inp = input_from_outputs(&out);
-        assert!(!inp.attack || out[3] >= OUTPUT_THRESHOLD);
+        assert_eq!(out.len(), MACRO_ACTION_COUNT);
     }
 
     #[test]
-    fn combo_left_jump() {
-        let outputs = vec![0.9, 0.1, 0.9, 0.1, 0.1, 0.1, 0.1, 0.1];
-        let inp = input_from_outputs(&outputs);
-        assert!(inp.left);
-        assert!(inp.jump);
-        assert!(!inp.right);
+    fn action_picks_strongest_output() {
+        let outputs = vec![0.1, 0.2, 0.9, 0.3, 0.4, 0.5];
+        assert_eq!(action_from_outputs(&outputs), MacroAction::Attack);
+        let outputs = vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.95];
+        assert_eq!(action_from_outputs(&outputs), MacroAction::Climb);
+    }
+
+    #[test]
+    fn unconnected_outputs_lose_to_connected_ones() {
+        // sigmoid(0)=0.5：接了线的输出必然压过恒 0 的未接线输出。
+        let outputs = vec![0.0, 0.0, 0.0, 0.5, 0.0, 0.0];
+        assert_eq!(action_from_outputs(&outputs), MacroAction::JumpLeft);
     }
 }

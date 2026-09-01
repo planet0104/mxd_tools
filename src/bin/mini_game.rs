@@ -95,7 +95,15 @@ async fn main() {
         }
     }
 
-    let mut sim = GameSim::new(map, 42);
+    let mut sim = {
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(42);
+        let mut cfg = mxd_tools::game::GameSimConfig::default();
+        cfg.random_player_spawn = true;
+        GameSim::new_with_config(map, seed, cfg)
+    };
     let mut acc = 0.0f32;
     // 攻击边沿缓冲：渲染帧按下时逻辑 tick 可能还没跑，不能只用 is_key_pressed。
     let mut attack_buf = false;

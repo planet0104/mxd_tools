@@ -20,6 +20,14 @@ pub const TRAINING_MESO_PILES_MAX: u32 = 3;
 /// NEAT 训练：单堆金币数量
 pub const TRAINING_MESO_AMOUNT_MIN: u32 = 3;
 pub const TRAINING_MESO_AMOUNT_MAX: u32 = 8;
+/// 训练/自动玩：是否在多平台候选点中随机出生（增强泛化）
+pub const TRAINING_RANDOM_PLAYER_SPAWN: bool = true;
+/// 候选平台最小宽度（px）
+pub const PLAYER_SPAWN_MIN_PLATFORM_W: f32 = 72.0;
+/// 出生点距平台端内缩
+pub const PLAYER_SPAWN_EDGE_PAD: f32 = 20.0;
+/// 同高度合并容差（量化到出生候选）
+pub const PLAYER_SPAWN_Y_BAND: f32 = 24.0;
 /// 普通模式怪物掉落红药概率
 pub const NORMAL_POTION_DROP_CHANCE: f32 = 0.30;
 /// 名牌：脚点下方间距、内边距、字号（凤凰点阵体 16px，对齐原版 UIImageText）

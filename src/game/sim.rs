@@ -177,14 +177,23 @@ impl GameSim {
         Self::new_with_config(map, seed, GameSimConfig::preview())
     }
 
+    /// NEAT 预览：无 MovementGate，与训练感知约束一致。
+    pub fn new_neat_preview(map: GameMap, seed: u64) -> Self {
+        Self::new_with_config(map, seed, GameSimConfig::neat_preview())
+    }
+
     /// NEAT 训练：装饰 NPC、波次刷怪、视觉适应度计分。
     pub fn new_training(map: GameMap, seed: u64) -> Self {
         Self::new_with_config(map, seed, GameSimConfig::training())
     }
 
     pub fn new_with_config(map: GameMap, seed: u64, config: GameSimConfig) -> Self {
-        let (spawn_x, spawn_y) = map.default_spawn();
-        let rng = StdRng::seed_from_u64(seed);
+        let mut rng = StdRng::seed_from_u64(seed);
+        let (spawn_x, spawn_y) = if config.random_player_spawn {
+            map.random_player_spawn(&mut rng)
+        } else {
+            map.default_spawn()
+        };
         let start_potions = if config.bot_play { 0 } else { 5 };
         let mut sim = Self {
             map,
@@ -304,7 +313,11 @@ impl GameSim {
     }
 
     fn respawn_player(&mut self) {
-        let (sx, sy) = self.map.default_spawn();
+        let (sx, sy) = if self.config.random_player_spawn {
+            self.map.random_player_spawn(&mut self.rng)
+        } else {
+            self.map.default_spawn()
+        };
         self.spawn_x = sx;
         self.spawn_y = sy;
         {
@@ -387,7 +400,7 @@ impl GameSim {
 
     /// 规则 bot：返回门控后的有效输入（用于日志对比）。
     pub fn effective_bot_input(&self, input: &InputFrame) -> InputFrame {
-        if !self.config.bot_play {
+        if !self.config.movement_gate {
             return *input;
         }
         let gate_ctx = self.movement_gate_ctx();
@@ -505,9 +518,10 @@ impl GameSim {
 
         self.state.tick += 1;
         let dt = LOGIC_DT;
-        let gate_ctx = self.movement_gate_ctx();
         let mut effective = *input;
-        if self.config.bot_play {
+        // MovementGate 仅规则 bot；NEAT 训练/预览原样执行网络输出（部署无 gate）。
+        if self.config.movement_gate {
+            let gate_ctx = self.movement_gate_ctx();
             effective = self.movement_gate.filter_input(input, gate_ctx);
         }
         if effective.use_potion {
@@ -516,8 +530,17 @@ impl GameSim {
         self.tick_player(&effective, dt);
         if self.config.training {
             let (px, py) = (self.state.player.x, self.state.player.y);
-            if self.fitness.tick_stagnation(px, py, self.state.tick) {
-                self.state.player.hp = 0;
+            let grounded = self.state.player.on_ground;
+            let climbing = self.state.player.climbing;
+            if self
+                .fitness
+                .tick_stagnation(px, py, self.state.tick, grounded, climbing)
+                || self.fitness.idle_forfeit
+            {
+                // 预览：认输结束本局，但不把 HP 置 0（避免看起来像「被怪砍死」）。
+                if !self.config.preview {
+                    self.state.player.hp = 0;
+                }
                 self.state.modal = GameModal::GameOver;
             }
         }
@@ -576,14 +599,17 @@ impl GameSim {
             && self.state.player.attack_cd <= 0.0;
 
         if do_attack {
-            let face_dx = self.nearest_engage_hint().map(|e| e.dx);
-            let p = &mut self.state.player;
-            // 挥砍瞬间按最近同层怪自动转向，避免靠方向键转身变成追怪贴脸。
-            if let Some(dx) = face_dx {
-                if dx.abs() > 2.0 {
-                    p.facing = dx.signum();
+            if self.config.attack_auto_face {
+                let face_dx = self.nearest_engage_hint().map(|e| e.dx);
+                let p = &mut self.state.player;
+                // 规则 bot：挥砍瞬间按最近同层怪自动转向。NEAT 关闭，逼网络学朝向。
+                if let Some(dx) = face_dx {
+                    if dx.abs() > 2.0 {
+                        p.facing = dx.signum();
+                    }
                 }
             }
+            let p = &mut self.state.player;
             p.attack_t = ATTACK_DURATION;
             p.attack_cd = ATTACK_COOLDOWN;
             p.anim = PlayerAnim::Attack;
@@ -1151,6 +1177,9 @@ impl GameSim {
 
         self.state.touch_hits = self.state.touch_hits.saturating_add(1);
         let tick = self.state.tick;
+        if self.config.training {
+            self.fitness.record_player_hurt(damage);
+        }
         self.state.player.x = Self::safe_hurt_knockback_x(&self.map, old_x, feet_y, knock_dir);
 
         // NEAT 训练时关掉逐帧伤害日志，避免并行刷屏；预览/规则 bot 仍打印。
@@ -1519,6 +1548,7 @@ mod control_tests {
     #[test]
     fn attack_auto_faces_mob_on_the_left() {
         let mut s = sim(5);
+        s.config.attack_auto_face = true;
         let px = s.state.player.x;
         let py = s.state.player.y;
         s.state.player.facing = 1.0;
@@ -1548,6 +1578,41 @@ mod control_tests {
             "attack should auto-face left toward mob"
         );
         assert!(s.state.mobs[0].hp < 50, "should still hit after auto-face");
+    }
+
+    #[test]
+    fn attack_without_auto_face_keeps_facing() {
+        let mut s = sim(5);
+        s.config.attack_auto_face = false;
+        let px = s.state.player.x;
+        let py = s.state.player.y;
+        s.state.player.facing = 1.0;
+        s.state.mobs.clear();
+        s.state.mobs.push(MobState {
+            mob_id: 130101,
+            x: px - 30.0,
+            y: py,
+            hp: 50,
+            max_hp: 50,
+            vx: 0.0,
+            walk_x1: px - 100.0,
+            walk_x2: px + 50.0,
+            alive: true,
+            hit_t: 0.0,
+            die_t: 0.0,
+            anim: MobAnim::Move,
+            anim_t: 0.0,
+            touch_damage: 5,
+        });
+        s.tick(&InputFrame {
+            attack: true,
+            ..Default::default()
+        });
+        assert!(
+            s.state.player.facing > 0.0,
+            "without auto-face, facing must stay right"
+        );
+        assert_eq!(s.state.mobs[0].hp, 50, "facing away should miss");
     }
 
     #[test]

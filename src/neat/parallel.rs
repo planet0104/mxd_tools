@@ -144,7 +144,8 @@ impl EvalSlot {
             self.pending_submit_tick = None;
             sim.record_vision_loot(&result.step.detections);
             let obs = obs_from_step(sim, &result.step);
-            driver.apply_observation(sim, obs);
+            let ocr = result.step.self_player.as_ref().map(|p| (p.x, p.y));
+            driver.apply_observation(sim, obs, ocr);
         }
 
         if self.bootstrap_phase < 2 {
@@ -159,7 +160,8 @@ impl EvalSlot {
                     .context("槽位 bootstrap YOLO")?;
                 sim.record_vision_loot(&step.detections);
                 let obs = obs_from_step(sim, &step);
-                driver.apply_observation(sim, obs);
+                let ocr = step.self_player.as_ref().map(|p| (p.x, p.y));
+                driver.apply_observation(sim, obs, ocr);
             }
             return Ok(SlotTick::Booting);
         }
@@ -184,7 +186,9 @@ impl EvalSlot {
         }
 
         driver.tick_sim(sim);
-        self.peak_fitness = self.peak_fitness.max(sim.fitness.score);
+        if sim.fitness.allows_peak_update() {
+            self.peak_fitness = self.peak_fitness.max(sim.fitness.score);
+        }
         self.logic_tick += 1;
 
         if sim.is_episode_over() || self.logic_tick >= max_ticks {
@@ -272,8 +276,8 @@ pub async fn run_parallel_trainer(
     slots: &mut [EvalSlot],
 ) -> Result<()> {
     let mut ckpt_state = CheckpointState {
-        last_saved_fitness: 0.0,
-        last_session_fitness: 0.0,
+        last_saved_fitness: f32::NEG_INFINITY,
+        last_session_fitness: f32::NEG_INFINITY,
     };
     let mut window_done: u32 = 0;
     let mut window_peak_sum: f32 = 0.0;
@@ -353,13 +357,14 @@ pub async fn run_parallel_trainer(
         }
 
         if last_status.elapsed() >= STATUS_INTERVAL {
-            let (completed, best, gen, active) = {
+            let (completed, best, gen, active, stagnant) = {
                 let s = shared.lock().expect("trainer lock");
                 (
                     s.spawns_completed,
                     rank_fitness(&s.population.best_ever),
                     s.population.generation,
                     slots.iter().filter(|sl| sl.active()).count(),
+                    s.population.evals_since_best_improve,
                 )
             };
             let elapsed = last_status.elapsed().as_secs_f32().max(0.001);
@@ -380,7 +385,7 @@ pub async fn run_parallel_trainer(
                 0.0
             };
             eprintln!(
-                "[{:>5.0}s] done={}/{} (+{}) rate={:.2}/s active={} gen={} best_peak={:.1} window: peak_avg={:.1} peak_max={:.1} final_avg={:.1}",
+                "[{:>5.0}s] done={}/{} (+{}) rate={:.2}/s active={} gen={} best_rank={:.1} stale={} window: peak_avg={:.1} peak_max={:.1} final_avg={:.1}",
                 started.elapsed().as_secs_f32(),
                 completed,
                 cfg.total_spawns,
@@ -389,6 +394,7 @@ pub async fn run_parallel_trainer(
                 active,
                 gen,
                 best,
+                stagnant,
                 avg_peak,
                 peak_max,
                 avg_final,

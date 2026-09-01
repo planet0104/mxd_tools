@@ -33,7 +33,7 @@ pub async fn evaluate_genome(
     let mut driver = NeatDriver::new(genome.clone());
     driver.bootstrap_vision(vision, &mut sim).await?;
 
-    let mut peak_fitness = sim.fitness.score;
+    let mut peak_fitness = 0.0_f32;
     for tick in 0..max_ticks {
         if sim.is_episode_over() {
             break;
@@ -42,7 +42,9 @@ pub async fn evaluate_genome(
             .logic_tick(vision, &mut sim, tick, vision_interval)
             .await?;
         driver.tick_sim(&mut sim);
-        peak_fitness = peak_fitness.max(sim.fitness.score);
+        if sim.fitness.allows_peak_update() {
+            peak_fitness = peak_fitness.max(sim.fitness.score);
+        }
         if sim.is_episode_over() {
             break;
         }

@@ -2390,7 +2390,7 @@ fn steer_toward_slot(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::observation::{inject_physics_walk_flags, OBS_FLOOR_START};
+    use crate::game::observation::OBS_FLOOR_START;
 
     #[test]
     fn patrol_moves_right_by_default() {
@@ -2458,7 +2458,6 @@ mod tests {
         let mut obs = [0.0_f32; OBS_DIM];
         obs[OBS_FLOOR_START + 2] = 0.08;
         obs[OBS_FLOOR_START + 3] = 0.04;
-        inject_physics_walk_flags(&mut obs, Some(false), Some(true));
         let ctx = RuleBotCtx {
             obs: &obs,
             facing: 1.0,
@@ -2553,7 +2552,6 @@ mod tests {
     fn combat_stops_at_cliff_without_jumping() {
         let mut bot = RuleBot::default();
         let mut obs = [0.0_f32; OBS_DIM];
-        inject_physics_walk_flags(&mut obs, Some(false), Some(true));
         obs[OBS_ENEMY_START] = 0.12;
         obs[OBS_ENEMY_START + 1] = 0.0;
         obs[OBS_ENEMY_START + 2] = 0.05;
@@ -2595,7 +2593,6 @@ mod tests {
         obs[OBS_FLOOR_START + 1] = 0.02;
         obs[OBS_FLOOR_START + 2] = 0.2;
         obs[OBS_FLOOR_START + 3] = 0.04;
-        inject_physics_walk_flags(&mut obs, Some(true), Some(true));
         let ctx = RuleBotCtx {
             obs: &obs,
             facing: 1.0,
@@ -2637,7 +2634,6 @@ mod tests {
         let mut obs = [0.0_f32; OBS_DIM];
         obs[OBS_FLOOR_START + 2] = 8.0 / 1368.0;
         obs[OBS_FLOOR_START + 3] = 0.04;
-        inject_physics_walk_flags(&mut obs, Some(false), Some(true));
         let ctx = RuleBotCtx {
             obs: &obs,
             facing: 1.0,
@@ -2977,7 +2973,6 @@ mod tests {
         let mut obs = [0.0_f32; OBS_DIM];
         set_touching_enemy(&mut obs, 0, -0.018, 0.0);
         set_touching_enemy(&mut obs, 1, 0.018, 0.0);
-        inject_physics_walk_flags(&mut obs, Some(false), Some(false));
         let ctx = RuleBotCtx {
             obs: &obs,
             facing: 1.0,

@@ -75,7 +75,7 @@ pub fn save_best_if_improved(
     snap.save_atomic(path)?;
     *last_saved_fitness = snap.fitness;
     eprintln!(
-        "最优个体已更新: peak {:.2} → {:.2} (gen={}, connections={}) → {}",
+        "最优个体已更新: rank_fit {:.2} → {:.2} (gen={}, connections={}) → {}",
         prev,
         snap.fitness,
         snap.generation,
