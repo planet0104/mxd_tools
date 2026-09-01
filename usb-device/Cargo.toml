@@ -1,6 +1,6 @@
 [package]
 edition      = "2024"
-name         = "usb-device"
+name         = "mxd-usb-hid"
 rust-version = "1.88"
 version      = "0.1.0"
 
@@ -9,21 +9,24 @@ name = "usb-device"
 path = "./src/bin/main.rs"
 
 [dependencies]
-esp-hal = { version = "~1.1.0", features = ["esp32s2", "unstable"] }
-esp-bootloader-esp-idf = { version = "0.5.0", features = ["esp32s2"] }
-critical-section = "1.2.0"
-# 依赖包名与本工程 package name 冲突，故重命名。
-usb-device-stack = { package = "usb-device", version = "0.3.2" }
-usbd-serial = "0.2.2"
+embassy-executor = { version = "0.10", features = ["executor-thread", "platform-cortex-m"] }
+embassy-rp = { version = "0.10", features = ["time-driver", "rp2040", "critical-section-impl", "rt", "executor-thread"] }
+embassy-usb = { version = "0.6" }
+embassy-time = { version = "0.5" }
+embassy-futures = { version = "0.1" }
 usbd-hid = "0.10.1"
+cortex-m = "0.7"
+cortex-m-rt = "0.7"
+critical-section = "1.2.0"
+panic-halt = "0.2"
+static_cell = "2"
+portable-atomic = { version = "1", features = ["unsafe-assume-single-core"] }
 
 [profile.dev]
-# The default debug profile is too slow and too big for resource-constrained devices.
-# Always build with some optimizations enabled.
 opt-level = "s"
 
 [profile.release]
-codegen-units = 1     # LLVM can perform better optimizations using a single thread
-debug         = 2     # prefer slower builds but better debugging experience
-lto           = 'fat'
-opt-level     = 's'
+codegen-units = 1
+debug         = 2
+lto           = "thin"
+opt-level     = "s"

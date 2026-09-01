@@ -1,6 +1,6 @@
-# usb-device
+# mxd-usb-hid（usb-device）
 
-ESP32-S2 纯 Rust（`no_std` / bare-metal）USB 复合设备固件。
+RP2040 纯 Rust（`no_std` / bare-metal）USB 复合设备固件。
 
 电脑枚举后同时提供：
 
@@ -10,54 +10,63 @@ ESP32-S2 纯 Rust（`no_std` / bare-metal）USB 复合设备固件。
 
 通过串口发送文本命令，即可模拟键盘按键与鼠标移动/按键/滚轮。
 
-> 不依赖 ESP-IDF。基于 [`esp-hal`](https://github.com/esp-rs/esp-hal) + [`usb-device`](https://crates.io/crates/usb-device) + [`usbd-hid`](https://crates.io/crates/usbd-hid) + [`usbd-serial`](https://crates.io/crates/usbd-serial)。
+> 基于 [Embassy](https://github.com/embassy-rs/embassy)（`embassy-rp` + `embassy-usb`）+ [`usbd-hid`](https://crates.io/crates/usbd-hid)。
 
 本目录是独立 Cargo 工程，与上级 `mxd_tools` **互不关联**：各自有独立的 `Cargo.toml`、`target/` 与 `.cargo/config.toml`。请始终在本目录内编译/烧录。
 
 ## 硬件
 
-| 信号 | ESP32-S2 引脚 |
-|------|----------------|
-| USB D+ | GPIO20 |
-| USB D- | GPIO19 |
+| 项目 | 说明 |
+|------|------|
+| MCU | RP2040（Raspberry Pi Pico 等） |
+| USB | 板载 USB 口直连电脑（Pico 的 USB 口，非 UART 调试口） |
 
-请使用板载 **USB-OTG / native USB** 口接到电脑，不要用 UART 下载口当 HID/CDC 设备口。
-
-VID/PID：`0x303A` / `0x4002`（Espressif VID + 自定义 PID）。
+VID/PID：`0x2E8A` / `0x4002`（Raspberry Pi 官方 VID + 自定义 PID）。
 
 ## 开发环境
 
-1. 安装 [espup](https://github.com/esp-rs/espup) 并安装 Espressif Rust 工具链：
+1. 安装 Rust stable 与 RP2040 目标：
 
    ```powershell
-   cargo install espup --locked
-   espup install
-   # Windows 还需按提示执行 export 脚本，或确保 rustup 能使用 channel = "esp"
+   rustup target add thumbv6m-none-eabi
+   rustup component add rust-src
    ```
 
-2. 安装烧录工具：
+   本工程已通过 `rust-toolchain.toml` 自动选用 stable + `thumbv6m-none-eabi`。
+
+2. 烧录工具（二选一）：
 
    ```powershell
-   cargo install espflash --locked
-   ```
+   # probe-rs（默认 runner，适合 SWD 调试器）
+   cargo install probe-rs-tools --locked
 
-3. 本工程已通过 `rust-toolchain.toml` 指定 `channel = "esp"`，进入目录后 cargo 会自动选用。
+   # 或生成 UF2 拖拽到 Pico（需改 .cargo/config.toml 的 runner）
+   cargo install elf2uf2-rs --locked
+   ```
 
 ## 编译与烧录
 
 ```powershell
 cd usb-device
 cargo build
-cargo run          # 等价于编译 + espflash flash --monitor
 cargo build --release
+cargo run          # probe-rs 编译并烧录
 ```
 
-首次接入电脑时，系统应出现键盘、鼠标各一个，以及一个 CDC 串口。用任意串口工具（115200 波特率通常即可，CDC 实际由 USB 驱动）打开该串口。
+若使用 Pico 拖拽 UF2，将 `.cargo/config.toml` 中 runner 改为：
+
+```toml
+runner = "elf2uf2-rs -d"
+```
+
+然后 `cargo run --release`，把生成的 UF2 拖入 Pico 的 U 盘。
+
+首次接入电脑时，系统应出现键盘、鼠标各一个，以及一个 CDC 串口。用任意串口工具打开该 CDC 口（波特率设置通常不影响 CDC，选 115200 即可）。
 
 连接成功后设备会回复：
 
 ```text
-ESP32-S2 USB HID+CDC ready. Type help
+RP2040 USB HID+CDC ready. Type help
 ```
 
 ## 串口命令协议
@@ -155,19 +164,20 @@ m0
 ```text
 usb-device/
 ├── Cargo.toml
-├── rust-toolchain.toml      # channel = "esp"
-├── .cargo/config.toml       # xtensa-esp32s2-none-elf + espflash
-├── build.rs
+├── rust-toolchain.toml      # stable + thumbv6m-none-eabi
+├── .cargo/config.toml       # probe-rs / elf2uf2 runner
 └── src/
     ├── lib.rs
     ├── ascii.rs             # ASCII → HID 键码
-    ├── cmd.rs               # CDC 命令解析
+    ├── cmd.rs               # 命令解析辅助
+    ├── io.rs                # Embassy USB 命令执行
     ├── state.rs             # 键盘/鼠标状态
     └── bin/main.rs          # USB 复合设备主循环
 ```
 
 ## 注意
 
-- 首次枚举若串口驱动异常，可尝试重新插拔，或确认系统识别为复合设备（设备类 `0xEF` + IAD）。
-- `type` / `kp` / `mc` 等命令执行期间会持续 poll USB，避免总线超时。
+- Pico 请用 **USB 口**（GPIO 复用 USB），不要用 3-pin UART 口当 HID 设备。
+- 首次枚举若串口驱动异常，可尝试重新插拔。
+- `type` / `kp` / `mc` 等命令执行期间 Embassy 异步栈持续运行，避免 USB 超时。
 - 本工程与上级 `mxd_tools` 的 OpenCV / LLVM 等主机环境变量已在本目录 `.cargo/config.toml` 中显式 `unset`，避免互相干扰。
