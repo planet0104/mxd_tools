@@ -76,11 +76,7 @@ impl YoloDetector {
             .try_extract_tensor::<f32>()
             .context("解析输出张量失败")?;
         Ok(decode_yolo_output_flat(
-            &out_shape,
-            out_data,
-            &metas[0],
-            self.conf,
-            self.iou,
+            &out_shape, out_data, &metas[0], self.conf, self.iou,
         ))
     }
 
@@ -133,14 +129,8 @@ impl YoloDetector {
             }
             let offset = i * plane;
             let mut slot = Vec::with_capacity(plane);
-            let meta = letterbox_rgb_into(
-                rgb,
-                *w,
-                *h,
-                self.imgsz,
-                &mut self.letterbox_bufs,
-                &mut slot,
-            )?;
+            let meta =
+                letterbox_rgb_into(rgb, *w, *h, self.imgsz, &mut self.letterbox_bufs, &mut slot)?;
             self.input_buf[offset..offset + plane].copy_from_slice(&slot);
             metas.push(meta);
         }
@@ -156,11 +146,7 @@ impl YoloDetector {
             .try_extract_tensor::<f32>()
             .context("解析 batch 输出张量失败")?;
         Ok(decode_yolo_batch_output(
-            &out_shape,
-            out_data,
-            &metas,
-            self.conf,
-            self.iou,
+            &out_shape, out_data, &metas, self.conf, self.iou,
         ))
     }
 

@@ -33,7 +33,11 @@ impl OrtDevice {
     }
 }
 
-pub fn build_session(onnx: &Path, device: OrtDevice, intra_threads: usize) -> Result<(Session, String)> {
+pub fn build_session(
+    onnx: &Path,
+    device: OrtDevice,
+    intra_threads: usize,
+) -> Result<(Session, String)> {
     if !onnx.is_file() {
         anyhow::bail!("找不到 ONNX: {}", onnx.display());
     }

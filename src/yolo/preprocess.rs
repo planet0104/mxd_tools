@@ -47,12 +47,8 @@ pub fn letterbox_rgb_into(
 
     let src = Mat::new_rows_cols_with_bytes::<Vec3b>(h as i32, w as i32, rgb)
         .map_err(|e| anyhow::anyhow!("mat from rgb: {e}"))?;
-    imgproc::cvt_color_def(
-        &src,
-        &mut bufs.bgr,
-        imgproc::COLOR_RGB2BGR,
-    )
-    .map_err(|e| anyhow::anyhow!("cvt_color: {e}"))?;
+    imgproc::cvt_color_def(&src, &mut bufs.bgr, imgproc::COLOR_RGB2BGR)
+        .map_err(|e| anyhow::anyhow!("cvt_color: {e}"))?;
     imgproc::resize(
         &bufs.bgr,
         &mut bufs.resized,

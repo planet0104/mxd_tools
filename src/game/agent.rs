@@ -190,7 +190,7 @@ impl AgentController {
         sim.movement_gate.set_last_observation(&obs);
 
         self.sense.prepare(&obs);
-        let ctx = RuleBotCtx::from_vision(&obs, &self.sense, self.bot.farm_y);
+        let ctx = RuleBotCtx::from_vision(&obs, &self.sense);
         self.last_input = self.bot.decide(ctx);
         self.sense.after_decide(&self.last_input, &obs);
         result.timing.policy_ms = t0.elapsed().as_secs_f64() * 1000.0;
@@ -238,8 +238,7 @@ fn vision_agent_loop(
                 sim_snapshot,
             } => {
                 let worker_start = Instant::now();
-                let queue_wait_ms =
-                    now_ns().saturating_sub(submitted_ns) as f64 / 1_000_000.0;
+                let queue_wait_ms = now_ns().saturating_sub(submitted_ns) as f64 / 1_000_000.0;
                 let t0 = Instant::now();
                 let step = match pipeline.perceive_with_snapshot(&rgb, sim_snapshot) {
                     Ok(s) => s,
@@ -258,11 +257,7 @@ fn vision_agent_loop(
                     worker_total_ms: worker_start.elapsed().as_secs_f64() * 1000.0,
                 };
                 if result_tx
-                    .send(VisionAgentResult {
-                        tick,
-                        step,
-                        timing,
-                    })
+                    .send(VisionAgentResult { tick, step, timing })
                     .is_err()
                 {
                     break;

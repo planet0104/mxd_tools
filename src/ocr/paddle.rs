@@ -119,7 +119,12 @@ fn preprocess_into(img: &RgbImage, out: &mut Vec<f32>) -> u32 {
     dw
 }
 
-fn ctc_greedy_decode_row(logits: &[f32], seq_len: usize, num_classes: usize, dict: &[String]) -> String {
+fn ctc_greedy_decode_row(
+    logits: &[f32],
+    seq_len: usize,
+    num_classes: usize,
+    dict: &[String],
+) -> String {
     let mut prev: Option<usize> = None;
     let mut text = String::new();
     for t in 0..seq_len {
@@ -239,7 +244,9 @@ pub fn recognize_rgb_batch(imgs: &[&RgbImage]) -> Result<Vec<String>> {
         return Ok(Vec::new());
     }
     let engine = engine()?;
-    let mut guard = engine.lock().map_err(|e| anyhow::anyhow!("OCR 引擎锁失败: {e}"))?;
+    let mut guard = engine
+        .lock()
+        .map_err(|e| anyhow::anyhow!("OCR 引擎锁失败: {e}"))?;
     guard.recognize_batch_inner(imgs)
 }
 

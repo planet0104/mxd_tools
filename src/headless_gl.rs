@@ -45,8 +45,8 @@ fn hide_gl_window_windows() -> bool {
     use windows::Win32::System::Threading::GetCurrentProcessId;
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetClassNameW, GetWindowLongPtrW, GetWindowThreadProcessId, SetWindowLongPtrW,
-        SetWindowPos, ShowWindow, GWL_EXSTYLE, SW_HIDE, SWP_FRAMECHANGED, SWP_NOACTIVATE,
-        SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+        SetWindowPos, ShowWindow, GWL_EXSTYLE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+        SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
     };
 
     struct EnumCtx {
@@ -54,7 +54,10 @@ fn hide_gl_window_windows() -> bool {
         hwnd: HWND,
     }
 
-    unsafe extern "system" fn enum_miniquad_window(hwnd: HWND, lparam: LPARAM) -> windows::core::BOOL {
+    unsafe extern "system" fn enum_miniquad_window(
+        hwnd: HWND,
+        lparam: LPARAM,
+    ) -> windows::core::BOOL {
         let ctx = &mut *(lparam.0 as *mut EnumCtx);
         let mut pid = 0u32;
         GetWindowThreadProcessId(hwnd, Some(&mut pid));

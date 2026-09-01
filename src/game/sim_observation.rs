@@ -142,10 +142,7 @@ fn box_on_screen(x1: f32, y1: f32, x2: f32, y2: f32) -> bool {
 }
 
 fn push_det(out: &mut Vec<Detection>, label: &'static str, x1: f32, y1: f32, x2: f32, y2: f32) {
-    let class_id = CLASS_NAMES
-        .iter()
-        .position(|&n| n == label)
-        .unwrap_or(0);
+    let class_id = CLASS_NAMES.iter().position(|&n| n == label).unwrap_or(0);
     out.push(Detection {
         class_id,
         label,

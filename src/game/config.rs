@@ -95,7 +95,9 @@ impl VisionPaceConfig {
     /// 由检测频率（Hz）换算：`interval = round(60 / hz)`，钳制到 `[1, 60]`。
     pub fn from_detect_hz(hz: f32) -> Self {
         let hz = hz.clamp(1.0, super::types::LOGIC_HZ);
-        let ticks = (super::types::LOGIC_HZ / hz).round().clamp(1.0, super::types::LOGIC_HZ) as u32;
+        let ticks = (super::types::LOGIC_HZ / hz)
+            .round()
+            .clamp(1.0, super::types::LOGIC_HZ) as u32;
         Self {
             vision_interval_ticks: ticks,
         }
@@ -120,9 +122,18 @@ mod pace_tests {
 
     #[test]
     fn detect_hz_roundtrips_common_values() {
-        assert_eq!(VisionPaceConfig::from_detect_hz(5.0).vision_interval_ticks, 12);
-        assert_eq!(VisionPaceConfig::from_detect_hz(10.0).vision_interval_ticks, 6);
-        assert_eq!(VisionPaceConfig::from_detect_hz(60.0).vision_interval_ticks, 1);
+        assert_eq!(
+            VisionPaceConfig::from_detect_hz(5.0).vision_interval_ticks,
+            12
+        );
+        assert_eq!(
+            VisionPaceConfig::from_detect_hz(10.0).vision_interval_ticks,
+            6
+        );
+        assert_eq!(
+            VisionPaceConfig::from_detect_hz(60.0).vision_interval_ticks,
+            1
+        );
         assert!((VisionPaceConfig::from_detect_hz(5.0).detect_hz() - 5.0).abs() < 0.01);
         assert!((VisionPaceConfig::from_detect_hz(10.0).detect_hz() - 10.0).abs() < 0.01);
     }

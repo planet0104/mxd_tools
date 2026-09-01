@@ -6,13 +6,13 @@ use anyhow::Result;
 
 use super::config::VisionPaceConfig;
 use super::headless_vision::HeadlessVisionEnv;
+use super::human_pace::HumanPace;
 use super::input::InputFrame;
 use super::observation::{
     obs_assess_enemy_contact, obs_enemy_in_attack_range, obs_enemy_in_attack_range_platform,
     obs_has_enemy, obs_platform_edge, OBS_DIM, OBS_ENEMY_SLOTS, OBS_ENEMY_START, OBS_SLOT_DIM,
 };
 use super::rule_bot::{visit_key, RuleBot, RuleBotCtx, VisionSenseState};
-use super::human_pace::HumanPace;
 use super::sim::GameSim;
 use super::types::{LOGIC_DT, LOGIC_HZ};
 use std::time::{Duration, Instant};
@@ -83,18 +83,11 @@ impl ProbeDriver {
         &self.sense
     }
 
-    /// sim.tick 之后用真值坐标覆盖推算，避免撞墙虚走导致 stuck 失效。
-    pub fn after_sim_tick(&mut self, sim: &GameSim) {
-        self.sense
-            .sync_truth_pos(sim.state.player.x, sim.state.player.y);
-        self.sense.sync_truth_climbing(sim.state.player.climbing);
-    }
-
     pub fn apply_observation(&mut self, sim: &mut GameSim, vtick: u32, obs: [f32; OBS_DIM]) {
         self.last_obs = obs;
         sim.movement_gate.set_last_observation(&obs);
         self.sense.prepare(&obs);
-        let ctx = RuleBotCtx::from_vision(&obs, &self.sense, self.bot.farm_y);
+        let ctx = RuleBotCtx::from_vision(&obs, &self.sense);
         self.input = self.bot.decide(ctx);
         self.sense.after_decide(&self.input, &obs);
         self.pace.on_intent(self.input, vtick);
@@ -177,7 +170,6 @@ impl ProbeDriver {
         let tick_start = Instant::now();
         let paced = self.paced_input_for_sim(sim, tick);
         sim.tick(&paced);
-        self.after_sim_tick(sim);
         if self.wall_clock_pacing {
             Self::sleep_to_logic_hz(tick_start);
         }
@@ -680,7 +672,10 @@ pub async fn run_episode(
             let (fx, fy) = pos_ring[ring_i];
             let moved = (px - fx).abs() + (py - fy).abs();
             let attacking = paced.attack
-                || obs_enemy_in_attack_range(sim.movement_gate.last_observation(), sim.state.player.facing);
+                || obs_enemy_in_attack_range(
+                    sim.movement_gate.last_observation(),
+                    sim.state.player.facing,
+                );
             let (pr, pl) = sim.physics_walk_ok_pair();
             let at_cliff = pr == Some(false) || pl == Some(false);
             if moved < STUCK_MOVE_EPS
@@ -885,10 +880,7 @@ pub fn build_parallel_probe_jobs(episode_seeds: &[u64]) -> Vec<(String, Vec<Stri
             "first_platform".to_string(),
             vec!["--probe".into(), "first_platform".into()],
         ),
-        (
-            "spawn".to_string(),
-            vec!["--probe".into(), "spawn".into()],
-        ),
+        ("spawn".to_string(), vec!["--probe".into(), "spawn".into()]),
     ];
     for &seed in episode_seeds {
         jobs.push((
@@ -1120,7 +1112,10 @@ pub fn assert_yolo_probes(summary: &YoloProbeSummary) -> Result<(), String> {
     assert_yolo_probes_with(summary, YoloProbeSet::All)
 }
 
-pub fn assert_yolo_probes_with(summary: &YoloProbeSummary, set: YoloProbeSet) -> Result<(), String> {
+pub fn assert_yolo_probes_with(
+    summary: &YoloProbeSummary,
+    set: YoloProbeSet,
+) -> Result<(), String> {
     let check_ep = set == YoloProbeSet::All || set == YoloProbeSet::Episodes;
     let check_fp = set == YoloProbeSet::All || set == YoloProbeSet::FirstPlatform;
     let check_spawn = set == YoloProbeSet::All || set == YoloProbeSet::SpawnJump;
@@ -1136,7 +1131,10 @@ pub fn assert_yolo_probes_with(summary: &YoloProbeSummary, set: YoloProbeSet) ->
                 .iter()
                 .map(|r| format!("seed={} {:?}", r.seed, r.failures))
                 .collect();
-            return Err(format!("bot_probe too many seeds failed: {}", msg.join("; ")));
+            return Err(format!(
+                "bot_probe too many seeds failed: {}",
+                msg.join("; ")
+            ));
         }
     }
 
@@ -1160,4 +1158,46 @@ pub fn assert_yolo_probes_with(summary: &YoloProbeSummary, set: YoloProbeSet) ->
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod pure_vision_tests {
+    use super::*;
+    use crate::game::observation::{OBS_FLOOR_START, OBS_SLOT_DIM};
+    use crate::game::{default_map_path, GameMap};
+
+    fn observation(landmark_shift: f32) -> [f32; OBS_DIM] {
+        let mut obs = [0.0; OBS_DIM];
+        obs[0] = 0.5;
+        obs[1] = 0.5;
+        for i in 0..2 {
+            let base = OBS_FLOOR_START + i * OBS_SLOT_DIM;
+            obs[base] = 0.25 + i as f32 * 0.35 - landmark_shift;
+            obs[base + 1] = 0.65;
+            obs[base + 2] = 0.28;
+            obs[base + 3] = 0.04;
+        }
+        obs
+    }
+
+    #[test]
+    fn probe_driver_position_comes_from_vision_not_sim_truth() {
+        let map = GameMap::load(&default_map_path()).expect("load default map");
+        let mut sim = GameSim::new_preview(map, 7);
+        let mut driver = ProbeDriver::new_realtime(7);
+        driver.apply_observation(&mut sim, 0, observation(0.0));
+        sim.state.player.x = 9_999.0;
+        sim.state.player.y = 9_999.0;
+        driver.apply_observation(&mut sim, 1, observation(0.05));
+
+        let sense = driver.sense();
+        let expected_dx = crate::game::types::WINDOW_W * 0.05;
+        assert!(
+            (sense.est_x - expected_dx).abs() < 4.0,
+            "est_x={}",
+            sense.est_x
+        );
+        assert!(sense.est_y.abs() < 4.0, "est_y={}", sense.est_y);
+        assert!((sense.est_x - sim.state.player.x).abs() > 1_000.0);
+    }
 }

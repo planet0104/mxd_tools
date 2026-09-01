@@ -35,9 +35,7 @@ fn arg_path(args: &[String], key: &str) -> Option<PathBuf> {
 }
 
 fn parse_seeds(s: &str) -> Vec<u64> {
-    s.split(',')
-        .filter_map(|p| p.trim().parse().ok())
-        .collect()
+    s.split(',').filter_map(|p| p.trim().parse().ok()).collect()
 }
 
 #[macroquad::main(window_conf)]

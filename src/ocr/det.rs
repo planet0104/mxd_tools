@@ -89,8 +89,9 @@ fn resize_for_det(w: u32, h: u32) -> (u32, u32) {
 fn preprocess_det(img: &RgbImage, buf: &mut Vec<f32>) -> Result<DetMeta> {
     let (sw, sh) = img.dimensions();
     let (dw, dh) = resize_for_det(sw, sh);
-    let src = Mat::new_rows_cols_with_bytes::<opencv::core::Vec3b>(sh as i32, sw as i32, img.as_raw())
-        .map_err(|e| anyhow::anyhow!("det mat from rgb: {e}"))?;
+    let src =
+        Mat::new_rows_cols_with_bytes::<opencv::core::Vec3b>(sh as i32, sw as i32, img.as_raw())
+            .map_err(|e| anyhow::anyhow!("det mat from rgb: {e}"))?;
     let mut dst = Mat::default();
     imgproc::resize(
         &src,
@@ -131,14 +132,23 @@ fn box_score_fast(prob: &Mat, pts: &[(f32, f32)]) -> Result<f32> {
     let xs = pts.iter().map(|p| p.0);
     let ys = pts.iter().map(|p| p.1);
     let xmin = xs.clone().fold(f32::INFINITY, f32::min).max(0.0) as i32;
-    let xmax = xs.fold(f32::NEG_INFINITY, f32::max).min(prob.cols() as f32 - 1.0) as i32;
+    let xmax = xs
+        .fold(f32::NEG_INFINITY, f32::max)
+        .min(prob.cols() as f32 - 1.0) as i32;
     let ymin = ys.clone().fold(f32::INFINITY, f32::min).max(0.0) as i32;
-    let ymax = ys.fold(f32::NEG_INFINITY, f32::max).min(prob.rows() as f32 - 1.0) as i32;
+    let ymax = ys
+        .fold(f32::NEG_INFINITY, f32::max)
+        .min(prob.rows() as f32 - 1.0) as i32;
     if xmax < xmin || ymax < ymin {
         return Ok(0.0);
     }
     let roi = prob
-        .roi(opencv::core::Rect::new(xmin, ymin, xmax - xmin + 1, ymax - ymin + 1))
+        .roi(opencv::core::Rect::new(
+            xmin,
+            ymin,
+            xmax - xmin + 1,
+            ymax - ymin + 1,
+        ))
         .map_err(|e| anyhow::anyhow!("prob roi: {e}"))?;
     let mut mask = Mat::zeros(roi.rows(), roi.cols(), opencv::core::CV_8UC1)
         .map_err(|e| anyhow::anyhow!("mask zeros: {e}"))?
@@ -152,10 +162,16 @@ fn box_score_fast(prob: &Mat, pts: &[(f32, f32)]) -> Result<f32> {
         ));
     }
     let pts_vec = Vector::<Vector<Point>>::from(vec![poly]);
-    imgproc::fill_poly(&mut mask, &pts_vec, Scalar::all(255.0), imgproc::LINE_8, 0, Point::new(0, 0))
-        .map_err(|e| anyhow::anyhow!("fill_poly: {e}"))?;
-    let mean = core::mean(&roi, &mask)
-        .map_err(|e| anyhow::anyhow!("mean: {e}"))?;
+    imgproc::fill_poly(
+        &mut mask,
+        &pts_vec,
+        Scalar::all(255.0),
+        imgproc::LINE_8,
+        0,
+        Point::new(0, 0),
+    )
+    .map_err(|e| anyhow::anyhow!("fill_poly: {e}"))?;
+    let mean = core::mean(&roi, &mask).map_err(|e| anyhow::anyhow!("mean: {e}"))?;
     Ok(mean[0] as f32)
 }
 
@@ -184,8 +200,12 @@ fn unclip_quad(pts: [(f32, f32); 4], ratio: f32) -> [(f32, f32); 4] {
 fn quad_to_aabb(pts: &[(f32, f32); 4], meta: &DetMeta) -> Option<TextBox> {
     let scale_x = meta.src_w as f32 / meta.dst_w as f32;
     let scale_y = meta.src_h as f32 / meta.dst_h as f32;
-    let xs = pts.iter().map(|p| (p.0 * scale_x).clamp(0.0, meta.src_w as f32 - 1.0));
-    let ys = pts.iter().map(|p| (p.1 * scale_y).clamp(0.0, meta.src_h as f32 - 1.0));
+    let xs = pts
+        .iter()
+        .map(|p| (p.0 * scale_x).clamp(0.0, meta.src_w as f32 - 1.0));
+    let ys = pts
+        .iter()
+        .map(|p| (p.1 * scale_y).clamp(0.0, meta.src_h as f32 - 1.0));
     let x1 = xs.clone().fold(f32::INFINITY, f32::min);
     let x2 = xs.fold(f32::NEG_INFINITY, f32::max);
     let y1 = ys.clone().fold(f32::INFINITY, f32::min);
@@ -232,7 +252,9 @@ fn decode_db_boxes(prob: &[f32], rows: usize, cols: usize, meta: &DetMeta) -> Re
 
     let mut boxes = Vec::new();
     for i in 0..contours.len() {
-        let contour = contours.get(i).map_err(|e| anyhow::anyhow!("contour get: {e}"))?;
+        let contour = contours
+            .get(i)
+            .map_err(|e| anyhow::anyhow!("contour get: {e}"))?;
         let Some(mut quad) = min_area_quad(&contour) else {
             continue;
         };
@@ -256,7 +278,11 @@ fn decode_db_boxes(prob: &[f32], rows: usize, cols: usize, meta: &DetMeta) -> Re
         boxes.push(tb);
     }
 
-    boxes.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    boxes.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     Ok(boxes)
 }
 
@@ -292,6 +318,8 @@ pub fn detect_text_boxes(img: &RgbImage) -> Result<Vec<TextBox>> {
         return Ok(Vec::new());
     }
     let engine = det_engine()?;
-    let mut guard = engine.lock().map_err(|e| anyhow::anyhow!("det 引擎锁失败: {e}"))?;
+    let mut guard = engine
+        .lock()
+        .map_err(|e| anyhow::anyhow!("det 引擎锁失败: {e}"))?;
     guard.detect_inner(img)
 }

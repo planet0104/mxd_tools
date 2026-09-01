@@ -2,9 +2,9 @@
 
 use super::input::InputFrame;
 use super::observation::{
-    obs_climb_grab_ready, obs_enemy_in_attack_range, obs_enemy_in_attack_range_platform, obs_floor_ahead, obs_has_drop,
-    obs_has_floor_signal, obs_has_same_level_enemy, obs_jump_allowed, obs_vertical_nav_allowed,
-    OBS_DIM,
+    obs_climb_grab_ready, obs_enemy_in_attack_range, obs_enemy_in_attack_range_platform,
+    obs_floor_ahead, obs_has_drop, obs_has_floor_signal, obs_has_same_level_enemy,
+    obs_jump_allowed, obs_vertical_nav_allowed, OBS_DIM,
 };
 
 /// ÃÂÃÂ©ÃÂÃÂÃÂÃÂ¨ÃÂÃÂ¦ÃÂÃÂÃÂÃÂ§ÃÂÃÂ¤ÃÂÃÂ¸ÃÂÃÂÃÂÃÂ¤ÃÂÃÂ¸ÃÂÃÂÃÂÃÂ¦ÃÂÃÂÃÂÃÂÃÂÃÂ¯ÃÂÃÂ¼ÃÂÃÂÃÂÃÂ§ÃÂÃÂÃÂÃÂ± sim ÃÂÃÂ¦ÃÂÃÂ¯ÃÂÃÂ tick ÃÂÃÂ¦ÃÂÃÂÃÂÃÂÃÂÃÂ©ÃÂÃÂÃÂÃÂ ÃÂÃÂ¯ÃÂÃÂ¼ÃÂÃÂÃÂÃÂ£ÃÂÃÂÃÂÃÂ
@@ -88,8 +88,7 @@ impl MovementGate {
     pub fn filter_input(&self, input: &InputFrame, ctx: MovementGateCtx) -> InputFrame {
         let mut out = *input;
 
-        let both_cliffs =
-            ctx.physics_right_ok == Some(false) && ctx.physics_left_ok == Some(false);
+        let both_cliffs = ctx.physics_right_ok == Some(false) && ctx.physics_left_ok == Some(false);
         let either_cliff =
             ctx.physics_right_ok == Some(false) || ctx.physics_left_ok == Some(false);
 
@@ -100,8 +99,7 @@ impl MovementGate {
         if !both_cliffs {
             if out.left && !self.walk_allowed(-1.0, ctx) {
                 let keep = jump_left_intent
-                    && (ctx.physics_drop_left == Some(true)
-                        || ctx.physics_left_ok == Some(false));
+                    && (ctx.physics_drop_left == Some(true) || ctx.physics_left_ok == Some(false));
                 if !keep {
                     out.left = false;
                 }
@@ -199,9 +197,7 @@ impl MovementGate {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::observation::{
-        inject_physics_walk_flags, OBS_ENEMY_START, OBS_FLOOR_START,
-    };
+    use crate::game::observation::{inject_physics_walk_flags, OBS_ENEMY_START, OBS_FLOOR_START};
 
     fn floor_slot(values: &mut [f32], dx: f32, dy: f32, w: f32) {
         values[OBS_FLOOR_START] = dx;
@@ -231,7 +227,7 @@ mod tests {
             physics_drop_left: None,
             sim_mob_in_melee: false,
             allow_combat_leap: false,
-                    adjacent_climb: false,
+            adjacent_climb: false,
             allow_step_up: false,
         };
         let mut inp = InputFrame::default();
@@ -261,7 +257,7 @@ mod tests {
             physics_drop_left: None,
             sim_mob_in_melee: true,
             allow_combat_leap: false,
-                    adjacent_climb: false,
+            adjacent_climb: false,
             allow_step_up: false,
         };
         let mut inp = InputFrame::default();
@@ -291,7 +287,7 @@ mod tests {
             physics_drop_left: None,
             sim_mob_in_melee: true,
             allow_combat_leap: false,
-                    adjacent_climb: false,
+            adjacent_climb: false,
             allow_step_up: false,
         };
         let mut inp = InputFrame::default();
@@ -319,7 +315,7 @@ mod tests {
             physics_drop_left: None,
             sim_mob_in_melee: false,
             allow_combat_leap: false,
-                    adjacent_climb: false,
+            adjacent_climb: false,
             allow_step_up: false,
         };
         let mut inp = InputFrame::default();
@@ -404,7 +400,7 @@ mod tests {
             physics_drop_left: None,
             sim_mob_in_melee: false,
             allow_combat_leap: false,
-                    adjacent_climb: false,
+            adjacent_climb: false,
             allow_step_up: false,
         };
         let mut inp = InputFrame::default();

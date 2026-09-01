@@ -114,7 +114,13 @@ pub fn decode_yolo_output(
     iou_thres: f32,
 ) -> Vec<Detection> {
     let shape_i64: Vec<i64> = output.shape().iter().map(|&d| d as i64).collect();
-    decode_yolo_output_flat(&shape_i64, output.as_slice().unwrap_or(&[]), meta, conf_thres, iou_thres)
+    decode_yolo_output_flat(
+        &shape_i64,
+        output.as_slice().unwrap_or(&[]),
+        meta,
+        conf_thres,
+        iou_thres,
+    )
 }
 
 fn clip_xyxy(x1: f32, y1: f32, x2: f32, y2: f32, w: u32, h: u32) -> (f32, f32, f32, f32) {

@@ -23,7 +23,10 @@ fn build_game_preview() {
         .args(["build", "--release", "--bin", "game_preview"])
         .status()
         .expect("cargo build game_preview");
-    assert!(status.success(), "cargo build --release --bin game_preview failed");
+    assert!(
+        status.success(),
+        "cargo build --release --bin game_preview failed"
+    );
 }
 
 #[test]

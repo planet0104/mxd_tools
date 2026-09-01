@@ -222,7 +222,10 @@ mod tests {
         for tick in 0..50 {
             pace.on_intent(InputFrame::default(), tick);
         }
-        assert_eq!(pace.idle_until, 0, "standing wait must not start explore rest");
+        assert_eq!(
+            pace.idle_until, 0,
+            "standing wait must not start explore rest"
+        );
     }
 
     #[test]

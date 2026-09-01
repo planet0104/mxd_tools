@@ -115,9 +115,7 @@ fn main() -> Result<()> {
         .context("--iou")?;
     let out_dir = arg_value(&args, "--out")
         .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("runs/detect/yolo_rust")
-        });
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("runs/detect/yolo_rust"));
     let no_draw = arg_flag(&args, "--no-draw");
 
     let mut det = YoloDetector::load_with_thresholds(&model, device, conf, iou, 640)?;
@@ -149,10 +147,7 @@ fn main() -> Result<()> {
         if !no_draw {
             let mut vis = img;
             draw_dets(&mut vis, &dets);
-            let stem = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("out");
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
             let out_path = out_dir.join(format!("{stem}_pred.jpg"));
             vis.save(&out_path)
                 .with_context(|| format!("保存失败: {}", out_path.display()))?;

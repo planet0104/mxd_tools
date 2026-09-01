@@ -327,13 +327,7 @@ impl GameMap {
     }
 
     /// 前方水平移动；侧墙/高台阻挡只对当前 foothold 同 layer+group。
-    pub fn walk_ahead(
-        &self,
-        x: f32,
-        feet_y: f32,
-        to_x: f32,
-        fh: Option<(i32, i32)>,
-    ) -> WalkAhead {
+    pub fn walk_ahead(&self, x: f32, feet_y: f32, to_x: f32, fh: Option<(i32, i32)>) -> WalkAhead {
         use crate::game::types::{FALL_PROBE, SAME_LEVEL_TOL, WALL_HIT_H};
 
         let y_hi = feet_y - WALL_HIT_H;
@@ -367,7 +361,10 @@ impl GameMap {
         }
 
         // 前方无同层脚点：下方有可接住的平台则自然下落；否则视为地图/虚空边缘挡死。
-        if self.ground_below_at(to_x, feet_y + 2.0, FALL_PROBE).is_some() {
+        if self
+            .ground_below_at(to_x, feet_y + 2.0, FALL_PROBE)
+            .is_some()
+        {
             return WalkAhead::Fall;
         }
 
@@ -649,7 +646,10 @@ impl GameMap {
                 group: p.group,
             };
             // 取最接近脚底的平台顶
-            if best.map(|b| (py - feet_y).abs() < (b.y - feet_y).abs()).unwrap_or(true) {
+            if best
+                .map(|b| (py - feet_y).abs() < (b.y - feet_y).abs())
+                .unwrap_or(true)
+            {
                 best = Some(info);
             }
         }
@@ -898,7 +898,9 @@ mod tests {
         let hint = map.nearest_adjacent_climb(416.0, 1225.0);
         assert!(
             hint.is_none()
-                || hint.map(|h| (h.dx + 416.0 - 488.0).abs() > 1.0).unwrap_or(true),
+                || hint
+                    .map(|h| (h.dx + 416.0 - 488.0).abs() > 1.0)
+                    .unwrap_or(true),
             "spawn ground must not chase rope@488"
         );
         // 右岛梯子底 1191，脚点 1225 → 可上爬。
@@ -937,7 +939,10 @@ mod tests {
         let map = load_default_map().expect("default map");
         let (lo, hi) = map.playable_x_bounds();
         assert!(lo < hi);
-        assert!((lo - 81.0).abs() < 1.0, "left bound should be ~81, got {lo}");
+        assert!(
+            (lo - 81.0).abs() < 1.0,
+            "left bound should be ~81, got {lo}"
+        );
         assert!(hi < map.width);
         assert!(hi < map.width - 16.0);
     }
@@ -947,7 +952,11 @@ mod tests {
         let map = load_default_map().expect("default map");
         let y = 1225.0;
         let span = map.platform_span_at(100.0, y).expect("ground span");
-        assert!((span.0 - 77.0).abs() < 1.0, "leftmost ground x=77, got {}", span.0);
+        assert!(
+            (span.0 - 77.0).abs() < 1.0,
+            "leftmost ground x=77, got {}",
+            span.0
+        );
         let ahead = map.walk_ahead(78.0, y, 76.0, Some((2, 0)));
         assert!(
             matches!(ahead, WalkAhead::Blocked),

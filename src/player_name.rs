@@ -48,7 +48,8 @@ pub fn find_named_player(
     target_name: &str,
     min_player_conf: f32,
 ) -> Result<Option<NamedPlayerHit>> {
-    find_named_player_verbose(img, detections, target_name, min_player_conf, false).map(|(hit, _)| hit)
+    find_named_player_verbose(img, detections, target_name, min_player_conf, false)
+        .map(|(hit, _)| hit)
 }
 
 /// 使用指定 OCR 运行时（GPU batch 服务用）。
@@ -80,7 +81,11 @@ pub fn find_named_player_with_ocr_verbose(
         .iter()
         .filter(|d| d.label == PLAYER_LABEL && d.conf >= min_player_conf)
         .collect();
-    players.sort_by(|a, b| b.conf.partial_cmp(&a.conf).unwrap_or(std::cmp::Ordering::Equal));
+    players.sort_by(|a, b| {
+        b.conf
+            .partial_cmp(&a.conf)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     'players: for det in players {
         let (rx, ry, rw, rh) = name_search_region(det, img.width(), img.height());
@@ -132,8 +137,7 @@ pub fn find_named_player_with_ocr_verbose(
             .map(|(b, bdist)| {
                 let b_score = player_score(b.match_score, *bdist);
                 score > b_score
-                    || (score == b_score
-                        && (dist < *bdist || hit.match_score > b.match_score))
+                    || (score == b_score && (dist < *bdist || hit.match_score > b.match_score))
             })
             .unwrap_or(true)
         {
@@ -145,8 +149,7 @@ pub fn find_named_player_with_ocr_verbose(
     }
 
     if best.is_none() {
-        let (fallback, fb_attempts) =
-            scan_name_plates_fallback_runtime(ocr, img, target_name)?;
+        let (fallback, fb_attempts) = scan_name_plates_fallback_runtime(ocr, img, target_name)?;
         if verbose {
             attempts.extend(fb_attempts);
         }
@@ -174,7 +177,11 @@ pub fn find_named_player_verbose(
         .iter()
         .filter(|d| d.label == PLAYER_LABEL && d.conf >= min_player_conf)
         .collect();
-    players.sort_by(|a, b| b.conf.partial_cmp(&a.conf).unwrap_or(std::cmp::Ordering::Equal));
+    players.sort_by(|a, b| {
+        b.conf
+            .partial_cmp(&a.conf)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     'players: for det in players {
         let (rx, ry, rw, rh) = name_search_region(det, img.width(), img.height());
@@ -226,8 +233,7 @@ pub fn find_named_player_verbose(
             .map(|(b, bdist)| {
                 let b_score = player_score(b.match_score, *bdist);
                 score > b_score
-                    || (score == b_score
-                        && (dist < *bdist || hit.match_score > b.match_score))
+                    || (score == b_score && (dist < *bdist || hit.match_score > b.match_score))
             })
             .unwrap_or(true)
         {
@@ -531,11 +537,7 @@ fn invert_rgb(img: &RgbImage) -> RgbImage {
 
 fn normalize_name(s: &str) -> String {
     s.chars()
-        .filter(|c| {
-            *c == '_'
-                || c.is_ascii_alphanumeric()
-                || ('\u{4e00}'..='\u{9fff}').contains(c)
-        })
+        .filter(|c| *c == '_' || c.is_ascii_alphanumeric() || ('\u{4e00}'..='\u{9fff}').contains(c))
         .collect()
 }
 
@@ -670,10 +672,7 @@ mod tests {
         use crate::game::types::{DEFAULT_PLAYER_NAME, TRAINING_NPC_NAMES};
         for npc in TRAINING_NPC_NAMES {
             let s = name_similarity(npc, DEFAULT_PLAYER_NAME);
-            assert!(
-                s < 0.55,
-                "装饰 NPC 名「{npc}」与主角相似度过高: {s:.2}"
-            );
+            assert!(s < 0.55, "装饰 NPC 名「{npc}」与主角相似度过高: {s:.2}");
         }
     }
 

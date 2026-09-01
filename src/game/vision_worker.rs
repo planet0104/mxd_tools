@@ -191,8 +191,7 @@ fn vision_worker_loop(
                 submitted_ns,
                 sim_snapshot,
             } => {
-                let queue_wait_ms =
-                    now_ns().saturating_sub(submitted_ns) as f64 / 1_000_000.0;
+                let queue_wait_ms = now_ns().saturating_sub(submitted_ns) as f64 / 1_000_000.0;
                 let t0 = Instant::now();
                 let step = match pipeline.perceive_with_snapshot(&rgb, sim_snapshot) {
                     Ok(s) => s,

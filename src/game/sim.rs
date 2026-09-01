@@ -3,9 +3,9 @@ use rand::{Rng, SeedableRng};
 
 use crate::game::camera::WorldCamera;
 use crate::game::config::GameSimConfig;
-use crate::game::movement_gate::{MovementGate, MovementGateCtx};
 use crate::game::input::InputFrame;
 use crate::game::map::{GameMap, WalkAhead};
+use crate::game::movement_gate::{MovementGate, MovementGateCtx};
 use crate::game::npc::{self, NpcPlayerState};
 use crate::game::types::*;
 use crate::game::vision::SimVisionSnapshot;
@@ -378,6 +378,8 @@ impl GameSim {
         self.movement_gate.filter_input(input, gate_ctx)
     }
 
+    /// 游戏世界自身的物理碰撞规则（是否能走/能跳/能砍），与 Bot 感知无关，
+    /// 必须用真实模拟状态：否则视觉延迟一帧就会让本该能砍/能爬的输入被误滤掉。
     fn movement_gate_ctx(&self) -> MovementGateCtx {
         let (physics_right_ok, physics_left_ok) = self.physics_walk_ok_pair();
         let (physics_drop_right, physics_drop_left) = self.physics_drop_ok_pair();
@@ -497,7 +499,12 @@ impl GameSim {
         }
         self.tick_player(&effective, dt);
         if self.config.bot_play {
-            npc::tick_npc_players(&mut self.npc_players, &mut self.state.mobs, dt, &mut self.rng);
+            npc::tick_npc_players(
+                &mut self.npc_players,
+                &mut self.state.mobs,
+                dt,
+                &mut self.rng,
+            );
         }
         self.tick_mobs(dt);
         self.tick_drops(input, dt);
@@ -693,7 +700,6 @@ impl GameSim {
         }
     }
 
-
     fn tick_player_move(&mut self, input: &InputFrame, dt: f32) {
         let h = input.horizontal();
         let (
@@ -758,9 +764,9 @@ impl GameSim {
         let desire_x = prev_x + vx * dt;
         let y_hi = prev_y - WALL_HIT_H;
         let wall_fh = if on_ground { fh } else { None };
-        let mut new_x =
-            self.map
-                .resolve_wall_x(prev_x, desire_x, y_hi, prev_y - 2.0, wall_fh);
+        let mut new_x = self
+            .map
+            .resolve_wall_x(prev_x, desire_x, y_hi, prev_y - 2.0, wall_fh);
 
         // 腾空：禁止水平飞入「脚下到虚空线都无脚点」的竖直列（跳二台擦边掉缝的根因）。
         if !on_ground && (new_x - prev_x).abs() > 0.01 {
@@ -912,9 +918,10 @@ impl GameSim {
         };
         let y1 = p.y - 80.0;
         let y2 = p.y + 24.0;
-        self.state.mobs.iter().any(|m| {
-            m.alive && m.x >= x1 && m.x <= x2 && m.y >= y1 && m.y <= y2
-        })
+        self.state
+            .mobs
+            .iter()
+            .any(|m| m.alive && m.x >= x1 && m.x <= x2 && m.y >= y1 && m.y <= y2)
     }
 
     /// 是否有怪落在当前挥砍命中框内（YOLO 误判时的最终裁决）。
@@ -927,9 +934,10 @@ impl GameSim {
         const STRIKE_DX: f32 = 90.0;
         const STRIKE_DY: f32 = 40.0;
         let p = &self.state.player;
-        self.state.mobs.iter().any(|m| {
-            m.alive && (m.x - p.x).abs() <= STRIKE_DX && (m.y - p.y).abs() <= STRIKE_DY
-        })
+        self.state
+            .mobs
+            .iter()
+            .any(|m| m.alive && (m.x - p.x).abs() <= STRIKE_DX && (m.y - p.y).abs() <= STRIKE_DY)
     }
 
     /// 最近同层可接战怪：用于正面接战 / 避免背后追。
@@ -982,16 +990,20 @@ impl GameSim {
 
     /// 高度带 + 水平半径内是否有活怪（本段农怪未清判定）。
     pub fn mobs_near_xy(&self, band_y: f32, y_tol: f32, x: f32, x_tol: f32) -> bool {
-        self.state.mobs.iter().any(|m| {
-            m.alive && (m.y - band_y).abs() <= y_tol && (m.x - x).abs() <= x_tol
-        })
+        self.state
+            .mobs
+            .iter()
+            .any(|m| m.alive && (m.y - band_y).abs() <= y_tol && (m.x - x).abs() <= x_tol)
     }
 
     /// 是否有怪在与玩家可普攻的同一高度带（整层平台，不限水平距离）。
     pub fn mob_on_attackable_footing(&self) -> bool {
         const ENGAGE_DY: f32 = 36.0;
         let p = &self.state.player;
-        self.state.mobs.iter().any(|m| m.alive && (m.y - p.y).abs() <= ENGAGE_DY)
+        self.state
+            .mobs
+            .iter()
+            .any(|m| m.alive && (m.y - p.y).abs() <= ENGAGE_DY)
     }
 
     fn try_attack_mobs(&mut self) {
@@ -1092,8 +1104,7 @@ impl GameSim {
 
         self.state.touch_hits = self.state.touch_hits.saturating_add(1);
         let tick = self.state.tick;
-        self.state.player.x =
-            Self::safe_hurt_knockback_x(&self.map, old_x, feet_y, knock_dir);
+        self.state.player.x = Self::safe_hurt_knockback_x(&self.map, old_x, feet_y, knock_dir);
 
         if self.config.preview || self.config.bot_play {
             eprintln!(
@@ -1119,7 +1130,10 @@ impl GameSim {
             return x;
         }
         let proposed = x + knock_dir * KNOCK_DIST;
-        if map.stand_at(proposed, feet_y + 40.0, GROUND_PROBE).is_some() {
+        if map
+            .stand_at(proposed, feet_y + 40.0, GROUND_PROBE)
+            .is_some()
+        {
             if let Some((lo, hi)) = map.platform_span_at(x, feet_y) {
                 const BODY_INSET: f32 = 4.0;
                 return proposed.clamp(lo + BODY_INSET, hi - BODY_INSET);
@@ -1255,7 +1269,14 @@ mod control_tests {
     fn walk_right_moves_player() {
         let mut s = sim(1);
         let x0 = s.state.player.x;
-        tick_n(&mut s, &InputFrame { right: true, ..Default::default() }, 30);
+        tick_n(
+            &mut s,
+            &InputFrame {
+                right: true,
+                ..Default::default()
+            },
+            30,
+        );
         assert!(
             s.state.player.x > x0 + 10.0,
             "walk right: x0={x0} x1={}",
@@ -1421,10 +1442,7 @@ mod control_tests {
             ..Default::default()
         });
         let hp = s.state.mobs[0].hp;
-        assert!(
-            hp < 50,
-            "attack should damage mob, hp={hp}"
-        );
+        assert!(hp < 50, "attack should damage mob, hp={hp}");
     }
 
     #[test]

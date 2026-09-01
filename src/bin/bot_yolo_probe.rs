@@ -13,8 +13,8 @@ use macroquad::prelude::*;
 use mxd_tools::game::{
     assert_yolo_probes_with, build_parallel_episode_jobs, default_parallel_episode_seeds,
     default_probe_seeds, default_yolo_model_path, run_parallel_probe_pool,
-    run_parallel_probe_subprocess, run_yolo_probes, BotProbeConfig, DEFAULT_PARALLEL_JOBS,
-    HeadlessVisionEnv, YoloProbeSet,
+    run_parallel_probe_subprocess, run_yolo_probes, BotProbeConfig, HeadlessVisionEnv,
+    YoloProbeSet, DEFAULT_PARALLEL_JOBS,
 };
 use mxd_tools::headless_gl;
 
@@ -38,9 +38,7 @@ fn arg_usize(args: &[String], key: &str, default: usize) -> usize {
 }
 
 fn parse_seeds(s: &str) -> Vec<u64> {
-    s.split(',')
-        .filter_map(|p| p.trim().parse().ok())
-        .collect()
+    s.split(',').filter_map(|p| p.trim().parse().ok()).collect()
 }
 
 fn parse_seeds_arg(args: &[String]) -> Vec<u64> {
@@ -65,7 +63,10 @@ fn run_parallel_coordinator(args: &[String]) -> ! {
 
     eprintln!("阶段1/2: first_platform + spawn（串行，避免 OCR/YOLO 冷启动争抢）");
     for (name, args_vec) in [
-        ("first_platform", vec!["--probe".into(), "first_platform".into()]),
+        (
+            "first_platform",
+            vec!["--probe".into(), "first_platform".into()],
+        ),
         ("spawn", vec!["--probe".into(), "spawn".into()]),
     ] {
         if !run_parallel_probe_subprocess(&exe, model.as_deref(), name, &args_vec) {
@@ -123,9 +124,7 @@ async fn main() {
     };
 
     let cfg = BotProbeConfig::default();
-    eprintln!(
-        "YOLO bot 探针: probe={probe:?} seeds={episode_seeds:?} (YOLO 后台线程 + GL 主线程)"
-    );
+    eprintln!("YOLO bot 探针: probe={probe:?} seeds={episode_seeds:?} (YOLO 后台线程 + GL 主线程)");
 
     let summary = match run_yolo_probes(&mut vision, &cfg, probe, &episode_seeds).await {
         Ok(s) => s,

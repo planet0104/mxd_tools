@@ -54,7 +54,15 @@ pub fn mark_player_diamond(img: &mut RgbImage, fx: f64, fy: f64) {
     }
 }
 
-pub fn draw_rect(img: &mut RgbImage, x: u32, y: u32, w: u32, h: u32, color: Rgb<u8>, thickness: i32) {
+pub fn draw_rect(
+    img: &mut RgbImage,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+    color: Rgb<u8>,
+    thickness: i32,
+) {
     let iw = img.width() as i32;
     let ih = img.height() as i32;
     let x0 = x as i32;

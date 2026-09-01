@@ -100,11 +100,7 @@ fn wiki_search_id(keyword: &str) -> Option<u64> {
 fn candidates(name: &str) -> Vec<String> {
     let text = name.trim().to_string();
     let mut out = vec![text.clone()];
-    out.push(
-        text.replace('-', ":")
-            .replace('：', ":")
-            .replace('/', ":"),
-    );
+    out.push(text.replace('-', ":").replace('：', ":").replace('/', ":"));
     let parts: Vec<&str> = text
         .split(|c| matches!(c, '-' | ':' | '：' | '/' | '｜' | '|'))
         .map(str::trim)
@@ -146,7 +142,11 @@ fn map_label(map_id: u64, fallback: &str) -> String {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .trim();
-    let name = info.get("name").and_then(|v| v.as_str()).unwrap_or("").trim();
+    let name = info
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
     if !street.is_empty() && !name.is_empty() {
         format!("{street}_{name}")
     } else if !name.is_empty() {

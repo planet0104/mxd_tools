@@ -62,7 +62,10 @@ fn main() -> Result<()> {
     let source = PathBuf::from(arg_value(&args, "--source").context("需要 --source")?);
     let target_name = arg_value(&args, "--name").context("需要 --name")?;
     let device = YoloDevice::parse(arg_value(&args, "--device").unwrap_or("cpu"));
-    let conf: f32 = arg_value(&args, "--conf").unwrap_or("0.25").parse().context("--conf")?;
+    let conf: f32 = arg_value(&args, "--conf")
+        .unwrap_or("0.25")
+        .parse()
+        .context("--conf")?;
     let player_conf: f32 = arg_value(&args, "--player-conf")
         .unwrap_or("0.20")
         .parse()
@@ -205,7 +208,11 @@ fn run_bench(
         );
     }
 
-    println!("\n===== 全部 {} 张汇总 (各 {} 次) =====", images.len(), iters);
+    println!(
+        "\n===== 全部 {} 张汇总 (各 {} 次) =====",
+        images.len(),
+        iters
+    );
     print_stats("YOLO", &all_yolo_ms);
     print_stats("OCR ", &all_ocr_ms);
     print_stats("合计", &all_total_ms);

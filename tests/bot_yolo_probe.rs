@@ -8,8 +8,8 @@ use std::path::PathBuf;
 use macroquad::prelude::*;
 use mxd_tools::game::{
     build_parallel_episode_jobs, default_parallel_episode_seeds, default_yolo_model_path,
-    run_parallel_probe_pool, run_parallel_probe_subprocess, BotProbeConfig, DEFAULT_PARALLEL_JOBS,
-    HeadlessVisionEnv, YoloProbeSet,
+    run_parallel_probe_pool, run_parallel_probe_subprocess, BotProbeConfig, HeadlessVisionEnv,
+    YoloProbeSet, DEFAULT_PARALLEL_JOBS,
 };
 use mxd_tools::headless_gl;
 
@@ -39,7 +39,10 @@ fn run_parallel_coordinator(args: &[String]) -> ! {
     let episode_seeds = default_parallel_episode_seeds(jobs_n);
 
     for (name, probe_args) in [
-        ("first_platform", vec!["--probe".into(), "first_platform".into()]),
+        (
+            "first_platform",
+            vec!["--probe".into(), "first_platform".into()],
+        ),
         ("spawn", vec!["--probe".into(), "spawn".into()]),
     ] {
         if !run_parallel_probe_subprocess(&exe, model.as_deref(), name, &probe_args) {

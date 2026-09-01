@@ -9,8 +9,8 @@ use std::env;
 use std::path::{Path, PathBuf};
 
 use macroquad::prelude::*;
-use mxd_tools::game::{self, GameSim, InputFrame, LOGIC_DT, WINDOW_H, WINDOW_W};
 use mxd_tools::game::view::{self, GameViewAssets};
+use mxd_tools::game::{self, GameSim, InputFrame, LOGIC_DT, WINDOW_H, WINDOW_W};
 use mxd_tools::headless_gl;
 
 fn window_conf() -> Conf {

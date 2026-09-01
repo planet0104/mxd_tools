@@ -40,7 +40,8 @@ fn load_font() -> Font<'static> {
         }
     }
     // 回退到项目字体
-    let project_font = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/fonts/VonwaonBitmap-16px.ttf");
+    let project_font =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/fonts/VonwaonBitmap-16px.ttf");
     if let Ok(data) = fs::read(&project_font) {
         if let Some(font) = Font::try_from_vec(data) {
             eprintln!("字体: {}", project_font.display());
@@ -69,7 +70,15 @@ fn class_color(id: usize) -> Rgb<u8> {
     Rgb(c)
 }
 
-fn draw_rect(img: &mut RgbImage, x1: u32, y1: u32, x2: u32, y2: u32, color: Rgb<u8>, thickness: u32) {
+fn draw_rect(
+    img: &mut RgbImage,
+    x1: u32,
+    y1: u32,
+    x2: u32,
+    y2: u32,
+    color: Rgb<u8>,
+    thickness: u32,
+) {
     if x2 <= x1 || y2 <= y1 {
         return;
     }
@@ -112,7 +121,12 @@ fn draw_label(
 
     // 测量文字尺寸
     let text_w = (glyphs.last().unwrap().position().x
-        + glyphs.last().unwrap().unpositioned().h_metrics().advance_width)
+        + glyphs
+            .last()
+            .unwrap()
+            .unpositioned()
+            .h_metrics()
+            .advance_width)
         .ceil() as i32;
     let text_h = (v_metrics.ascent - v_metrics.descent).ceil() as i32;
     let pad = 1i32;
@@ -187,7 +201,16 @@ fn draw_dets(img: &mut RgbImage, dets: &[Detection], font: &Font, scale: f32) {
             // 画在框内部左上角
             y1 as i32 + 2
         };
-        draw_label(img, &label, label_x, label_y, Rgb([255, 255, 255]), color, font, scale);
+        draw_label(
+            img,
+            &label,
+            label_x,
+            label_y,
+            Rgb([255, 255, 255]),
+            color,
+            font,
+            scale,
+        );
     }
 }
 
@@ -276,8 +299,14 @@ fn main() -> Result<()> {
     let model = PathBuf::from(arg_value(&args, "--model").context("需要 --model")?);
     let source = PathBuf::from(arg_value(&args, "--source").context("需要 --source")?);
     let device = YoloDevice::parse(arg_value(&args, "--device").unwrap_or("cpu"));
-    let conf: f32 = arg_value(&args, "--conf").unwrap_or("0.25").parse().context("--conf")?;
-    let iou: f32 = arg_value(&args, "--iou").unwrap_or("0.7").parse().context("--iou")?;
+    let conf: f32 = arg_value(&args, "--conf")
+        .unwrap_or("0.25")
+        .parse()
+        .context("--conf")?;
+    let iou: f32 = arg_value(&args, "--iou")
+        .unwrap_or("0.7")
+        .parse()
+        .context("--iou")?;
     let out_dir = arg_value(&args, "--out")
         .map(PathBuf::from)
         .unwrap_or_else(default_out_dir);
@@ -353,7 +382,10 @@ fn main() -> Result<()> {
     println!("\n===== 总结 =====");
     println!("图片数: {}", images.len());
     println!("总检测数: {}", total_dets);
-    println!("出现类别: {}", seen_classes.into_iter().collect::<Vec<_>>().join(", "));
+    println!(
+        "出现类别: {}",
+        seen_classes.into_iter().collect::<Vec<_>>().join(", ")
+    );
     println!("输出目录: {}", out_dir.display());
 
     Ok(())

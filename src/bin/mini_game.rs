@@ -13,11 +13,11 @@ use std::env;
 use std::path::PathBuf;
 
 use macroquad::prelude::*;
-use mxd_tools::game::{
-    self, default_yolo_model_path, GameSim, InputFrame, LOGIC_DT, VISION_CONF_THRESH, VisionPipeline,
-    VisionStep, WINDOW_H, WINDOW_W,
-};
 use mxd_tools::game::view;
+use mxd_tools::game::{
+    self, default_yolo_model_path, GameSim, InputFrame, VisionPipeline, VisionStep, LOGIC_DT,
+    VISION_CONF_THRESH, WINDOW_H, WINDOW_W,
+};
 use mxd_tools::yolo::YoloDevice;
 
 fn window_conf() -> Conf {
@@ -111,8 +111,7 @@ async fn main() {
 
         acc += get_frame_time();
         while acc >= LOGIC_DT {
-            let attack_held =
-                is_key_down(KeyCode::LeftControl) || is_key_down(KeyCode::J);
+            let attack_held = is_key_down(KeyCode::LeftControl) || is_key_down(KeyCode::J);
             let potion_held = is_key_down(KeyCode::Key1);
             let mut input = poll_input();
             input.attack = attack_buf || attack_held;

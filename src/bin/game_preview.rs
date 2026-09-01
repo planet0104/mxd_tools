@@ -18,10 +18,11 @@ use macroquad::prelude::*;
 use mxd_tools::game::action::input_label;
 use mxd_tools::game::view;
 use mxd_tools::game::{
-    self, default_yolo_model_path, DeferredCaptureVision, FirstPlatformTracker, GameSim, InputFrame,
-    LOGIC_DT, ProbeDriver, VisionAnchorConfig, VisionPaceConfig, VisionPipeline, VISION_CONF_THRESH,
-    FIRST_PLATFORM_PROBE_TICKS, evaluate_first_platform_report, format_first_platform_preview_done,
-    OBS_FLOOR_SLOTS, OBS_FLOOR_START, OBS_SLOT_DIM, WINDOW_H, WINDOW_W,
+    self, default_yolo_model_path, evaluate_first_platform_report,
+    format_first_platform_preview_done, DeferredCaptureVision, FirstPlatformTracker, GameSim,
+    InputFrame, ProbeDriver, VisionAnchorConfig, VisionPaceConfig, VisionPipeline,
+    FIRST_PLATFORM_PROBE_TICKS, LOGIC_DT, OBS_FLOOR_SLOTS, OBS_FLOOR_START, OBS_SLOT_DIM,
+    VISION_CONF_THRESH, WINDOW_H, WINDOW_W,
 };
 use mxd_tools::yolo::YoloDevice;
 
@@ -129,7 +130,9 @@ impl PreviewState {
 }
 
 fn arg_value<'a>(args: &'a [String], key: &str) -> Option<&'a String> {
-    args.iter().position(|a| a == key).and_then(|i| args.get(i + 1))
+    args.iter()
+        .position(|a| a == key)
+        .and_then(|i| args.get(i + 1))
 }
 
 fn arg_u64(args: &[String], key: &str, default: u64) -> u64 {
@@ -309,7 +312,6 @@ async fn run_first_platform_probe_loop(
             }
         }
         state.sim.tick(&input);
-        driver.after_sim_tick(&state.sim);
         fp_tracker.on_tick(&state.sim);
         if let Some(rest) = Duration::from_secs_f32(LOGIC_DT).checked_sub(tick_start.elapsed()) {
             std::thread::sleep(rest);
@@ -336,7 +338,7 @@ fn log_decision(
     let bot = driver.bot();
     let sense = driver.sense();
     let obs = driver.last_obs();
-    let ctx = RuleBotCtx::from_vision(obs, sense, bot.farm_y);
+    let ctx = RuleBotCtx::from_vision(obs, sense);
     let (mob_dx, mob_dy, mob_dir) = ctx
         .engage
         .map(|e| (e.dx, e.dy, e.mob_dir))
@@ -350,25 +352,41 @@ fn log_decision(
     let pdl = Some(obs_floor_drop_ahead(obs, -1.0));
     let farm_local = obs_farm_band_enemies(obs, iw, 260.0);
     let farm_y_any = farm_local;
+    let (visual_dx, visual_dy) = sense.visual_delta();
+    let node = sense.location_node();
+    let (net, path, span_x, span_y) = bot.progress_metrics();
     let _ = obs_nearest_same_level_enemy_px(obs, iw, ih);
     eprintln!(
-        "BOT sense=yolo+ocr ctx=vision tick={} intent={} effective={} reason={} seek={} flips={} farm_local={} farm_y_any={} perch={} kills={} sense_kills={} alive={} sim_pos=({:.0},{:.0}) est_pos=({:.0},{:.0}) engage_dx={:.0} dy={:.0} dir={:.0} walkR={:?} walkL={:?} dropR={:?} dropL={:?} step={:?} cliffR={} cliffL={}",
+        "BOT sense=yolo+ocr ctx=vision tick={} intent={} effective={} reason={} loop={} escape={} candidate={} failed_exits={} seek={} flips={} farm_local={} farm_y_any={} perch={} sim_kills={} alive={} sim_pos=({:.0},{:.0}) est_pos=({:.0},{:.0}) visual_delta=({:.1},{:.1}) visual_conf={} node=({},{},{}) progress=net:{:.0}/path:{:.0}/span:{:.0}x{:.0} engage_dx={:.0} dy={:.0} dir={:.0} walkR={:?} walkL={:?} dropR={:?} dropL={:?} step={:?} cliffR={} cliffL={}",
         tick,
         input_label(intended),
         input_label(effective),
         bot.last_reason,
+        bot.loop_kind_name(),
+        bot.escape_phase_name(),
+        bot.escape_candidate_name(),
+        bot.failed_exit_count(),
         bot.explore_seeking_vertical(),
         bot.dir_flip_streak_pub(),
         farm_local,
         farm_y_any,
         bot.perching,
         sim.state.kills,
-        sense.kills,
         alive,
         p.x,
         p.y,
         sense.est_x,
         sense.est_y,
+        visual_dx,
+        visual_dy,
+        sense.visual_confidence(),
+        node.x,
+        node.y,
+        node.terrain,
+        net,
+        path,
+        span_x,
+        span_y,
         mob_dx,
         mob_dy,
         mob_dir,
@@ -516,8 +534,8 @@ async fn main() {
     };
     let rt = view::new_render_target();
     let interval = cli.pace.vision_interval_ticks;
-    let mut auto_probe = (cli.auto_ticks > 0 && cli.probe.is_none())
-        .then(|| AutoProbe::new(cli.auto_ticks));
+    let mut auto_probe =
+        (cli.auto_ticks > 0 && cli.probe.is_none()).then(|| AutoProbe::new(cli.auto_ticks));
     let mut fp_tracker = cli
         .probe
         .map(|_| FirstPlatformTracker::new(state.sim.state.player.x, state.sim.state.player.y));
@@ -533,15 +551,7 @@ async fn main() {
     if cli.probe == Some(PreviewProbe::FirstPlatform) {
         let tracker = fp_tracker.expect("first_platform tracker");
         run_first_platform_probe_loop(
-            &cli,
-            &map,
-            &assets,
-            state,
-            vision,
-            driver,
-            &rt,
-            interval,
-            tracker,
+            &cli, &map, &assets, state, vision, driver, &rt, interval, tracker,
         )
         .await;
         return;
@@ -610,7 +620,6 @@ async fn main() {
                     }
                 }
                 state.sim.tick(&input);
-                driver.after_sim_tick(&state.sim);
                 if let Some(probe) = auto_probe.as_mut() {
                     probe.on_tick(state.sim.state.player.x);
                     if probe.sample_n >= probe.limit {

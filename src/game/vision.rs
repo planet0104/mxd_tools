@@ -101,12 +101,8 @@ impl VisionPipeline {
         let w = frame.width();
         let h = frame.height();
         let self_player = self.resolve_self_player(frame, detections, target_name, sim_snapshot)?;
-        let observation = VisionObservation::from_detections(
-            detections,
-            self_player.as_ref(),
-            w,
-            h,
-        );
+        let observation =
+            VisionObservation::from_detections(detections, self_player.as_ref(), w, h);
         Ok(VisionStep {
             detections: detections.to_vec(),
             self_player,

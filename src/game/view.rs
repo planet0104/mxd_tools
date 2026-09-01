@@ -6,16 +6,15 @@ use std::path::PathBuf;
 use image::RgbImage;
 use macroquad::prelude::*;
 
+use super::npc::NpcPlayerState;
+use super::types::TRAINING_NPC_SPRITES;
 use super::{
-    load_default_map, load_ui_layout, mob_sprite_dir, player_sprite_dir, player_sprite_dir_named,
-    portal_sprite_dir, ui_texture_path, DropKind, GameModal, GameSim, MobAnim, MobState,
-    PlayerAnim, PlayerState, Portal, UiLayoutFile, assets_root, drop_texture_path,
+    assets_root, drop_texture_path, load_default_map, load_ui_layout, mob_sprite_dir,
+    player_sprite_dir, player_sprite_dir_named, portal_sprite_dir, ui_texture_path, DropKind,
+    GameModal, GameSim, MobAnim, MobState, PlayerAnim, PlayerState, Portal, UiLayoutFile, UiRect,
     ATTACK_DURATION, DEFAULT_PLAYER_NAME, LOGIC_DT, NAME_TAG_BG_ALPHA, NAME_TAG_FONT_SIZE,
     NAME_TAG_GAP_BELOW_FEET, NAME_TAG_PAD_X, NAME_TAG_PAD_Y, WINDOW_H, WINDOW_W, WORLD_VIEW_H,
-    UiRect,
 };
-use super::types::TRAINING_NPC_SPRITES;
-use super::npc::NpcPlayerState;
 
 pub struct AnimFrames {
     pub textures: Vec<Texture2D>,
@@ -95,7 +94,11 @@ pub fn render_target_to_rgb(rt: &RenderTarget) -> RgbImage {
             if i + 2 >= img.bytes.len() {
                 continue;
             }
-            out.put_pixel(x, y, image::Rgb([img.bytes[i], img.bytes[i + 1], img.bytes[i + 2]]));
+            out.put_pixel(
+                x,
+                y,
+                image::Rgb([img.bytes[i], img.bytes[i + 1], img.bytes[i + 2]]),
+            );
         }
     }
     out
@@ -106,7 +109,13 @@ pub fn draw_content(assets: &GameViewAssets, sim: &GameSim) {
     let cam_x = sim.state.cam_x;
     let cam_y = sim.state.cam_y;
 
-    draw_rectangle(0.0, 0.0, WINDOW_W, WORLD_VIEW_H, Color::new(0.05, 0.05, 0.08, 1.0));
+    draw_rectangle(
+        0.0,
+        0.0,
+        WINDOW_W,
+        WORLD_VIEW_H,
+        Color::new(0.05, 0.05, 0.08, 1.0),
+    );
     draw_map(&assets.map_bg, cam_x, cam_y);
 
     for portal in &sim.map.portals {
@@ -203,12 +212,7 @@ fn draw_map_actors_y_sorted(assets: &GameViewAssets, sim: &GameSim, cam_x: f32, 
             }
             MapActorDraw::Npc(npc) => {
                 draw_npc_player(assets, npc, cam_x, cam_y);
-                draw_player_name_tag(
-                    &assets.name_font,
-                    &npc.name,
-                    npc.x - cam_x,
-                    npc.y - cam_y,
-                );
+                draw_player_name_tag(&assets.name_font, &npc.name, npc.x - cam_x, npc.y - cam_y);
             }
         }
     }
@@ -322,10 +326,7 @@ async fn load_player_anims(dir: &PathBuf) -> Result<HashMap<String, AnimFrames>,
         "walk1".into(),
         load_anim_dir(dir, "walk1", 4, PLAYER_WALK_FPS).await?,
     );
-    player.insert(
-        "jump".into(),
-        load_anim_dir(dir, "jump", 1, 1.0).await?,
-    );
+    player.insert("jump".into(), load_anim_dir(dir, "jump", 1, 1.0).await?);
     player.insert(
         "alert".into(),
         load_anim_dir(dir, "alert", 3, PLAYER_ALERT_FPS).await?,
@@ -433,7 +434,12 @@ fn texture_from_rgba(img: image::RgbaImage) -> Texture2D {
     tex
 }
 
-async fn load_anim_dir(dir: &PathBuf, prefix: &str, count: usize, fps: f32) -> Result<AnimFrames, String> {
+async fn load_anim_dir(
+    dir: &PathBuf,
+    prefix: &str,
+    count: usize,
+    fps: f32,
+) -> Result<AnimFrames, String> {
     let mut raw: Vec<image::RgbaImage> = Vec::new();
     for i in 0..count {
         let name = format!("{prefix}_{i}.png");
@@ -586,7 +592,10 @@ fn draw_player(assets: &GameViewAssets, p: &PlayerState, cam_x: f32, cam_y: f32)
         .filter(|a| !a.textures.is_empty())
         .or_else(|| {
             if key == "swingO1" {
-                assets.player.get("alert").filter(|a| !a.textures.is_empty())
+                assets
+                    .player
+                    .get("alert")
+                    .filter(|a| !a.textures.is_empty())
             } else {
                 None
             }
@@ -719,7 +728,13 @@ fn draw_ui_shell(assets: &GameViewAssets, sim: &GameSim) {
 
     let mp = &assets.ui_layout.dynamic_overlay.mp_bar;
     draw_rectangle(mp.x, mp.y, mp.w, mp.h, Color::new(0.15, 0.15, 0.2, 0.9));
-    draw_rectangle(mp.x, mp.y, mp.w * 0.8, mp.h, Color::new(0.2, 0.35, 0.9, 1.0));
+    draw_rectangle(
+        mp.x,
+        mp.y,
+        mp.w * 0.8,
+        mp.h,
+        Color::new(0.2, 0.35, 0.9, 1.0),
+    );
 
     let text = format!(
         "HP {}/{}  药:{}  币:{}  击杀:{}  [I]背包 [1]喝药 [Z]拾取",
@@ -737,13 +752,7 @@ fn draw_ui_shell(assets: &GameViewAssets, sim: &GameSim) {
 
     if sim.state.modal == GameModal::Inventory {
         let inv = &assets.ui_layout.inventory_window;
-        draw_rectangle(
-            inv.x,
-            inv.y,
-            inv.w,
-            inv.h,
-            Color::new(0.1, 0.1, 0.15, 0.92),
-        );
+        draw_rectangle(inv.x, inv.y, inv.w, inv.h, Color::new(0.1, 0.1, 0.15, 0.92));
         draw_rectangle_lines(inv.x, inv.y, inv.w, inv.h, 2.0, WHITE);
         draw_text("物品栏 (I 关闭)", inv.x + 12.0, inv.y + 24.0, 22.0, WHITE);
         draw_text(
@@ -763,11 +772,23 @@ fn draw_ui_shell(assets: &GameViewAssets, sim: &GameSim) {
                 ..Default::default()
             },
         );
-        draw_text("点击或按 1 使用", inv.x + 60.0, inv.y + 100.0, 18.0, LIGHTGRAY);
+        draw_text(
+            "点击或按 1 使用",
+            inv.x + 60.0,
+            inv.y + 100.0,
+            18.0,
+            LIGHTGRAY,
+        );
     }
 
     if sim.state.modal == GameModal::GameOver {
-        draw_rectangle(0.0, 0.0, WINDOW_W, WINDOW_H, Color::new(0.0, 0.0, 0.0, 0.55));
+        draw_rectangle(
+            0.0,
+            0.0,
+            WINDOW_W,
+            WINDOW_H,
+            Color::new(0.0, 0.0, 0.0, 0.55),
+        );
         draw_text(
             "Game Over — 按 R 重开",
             WINDOW_W * 0.5 - 120.0,
@@ -788,7 +809,13 @@ pub fn draw_yolo_overlay(detections: &[crate::yolo::Detection], min_conf: f32) {
         let h = d.y2 - d.y1;
         draw_rectangle_lines(d.x1, d.y1, w, h, 2.0, Color::new(0.2, 1.0, 0.35, 0.9));
         let label = format!("{} {:.0}%", d.label, d.conf * 100.0);
-        draw_text(&label, d.x1, d.y1 - 4.0, 14.0, Color::new(0.2, 1.0, 0.35, 1.0));
+        draw_text(
+            &label,
+            d.x1,
+            d.y1 - 4.0,
+            14.0,
+            Color::new(0.2, 1.0, 0.35, 1.0),
+        );
     }
 }
 
@@ -807,13 +834,7 @@ pub fn draw_yolo_floor_overlay(detections: &[crate::yolo::Detection], min_conf: 
         let label = format!("地板 {:.0}%", d.conf * 100.0);
         draw_text(&label, d.x1, (d.y1 - 4.0).max(12.0), 14.0, floor_color);
     }
-    draw_text(
-        &format!("YOLO 地板框: {n}"),
-        12.0,
-        22.0,
-        18.0,
-        floor_color,
-    );
+    draw_text(&format!("YOLO 地板框: {n}"), 12.0, 22.0, 18.0, floor_color);
 }
 
 /// 标记 OCR 匹配到的自身玩家脚点。

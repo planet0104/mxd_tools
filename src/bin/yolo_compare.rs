@@ -102,7 +102,11 @@ fn match_dets(py: &[DumpDet], rust: &[Detection], iou_thr: f32) -> MatchStats {
     let mut class_mismatch = 0usize;
 
     let mut py_sorted = py.to_vec();
-    py_sorted.sort_by(|a, b| b.conf.partial_cmp(&a.conf).unwrap_or(std::cmp::Ordering::Equal));
+    py_sorted.sort_by(|a, b| {
+        b.conf
+            .partial_cmp(&a.conf)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     for p in &py_sorted {
         let mut best_j = None;
@@ -175,10 +179,9 @@ fn main() -> Result<()> {
 
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let source = PathBuf::from(arg_value(&args, "--source").context("需要 --source")?);
-    let onnx = PathBuf::from(arg_value(&args, "--onnx").unwrap_or("models/yolo_nangang_e1000.onnx"));
-    let pt = PathBuf::from(
-        arg_value(&args, "--pt").unwrap_or("models/yolo_nangang_e1000_best.pt"),
-    );
+    let onnx =
+        PathBuf::from(arg_value(&args, "--onnx").unwrap_or("models/yolo_nangang_e1000.onnx"));
+    let pt = PathBuf::from(arg_value(&args, "--pt").unwrap_or("models/yolo_nangang_e1000_best.pt"));
     let conf: f32 = arg_value(&args, "--conf").unwrap_or("0.25").parse()?;
     let iou: f32 = arg_value(&args, "--iou").unwrap_or("0.7").parse()?;
     let match_iou: f32 = arg_value(&args, "--match-iou").unwrap_or("0.5").parse()?;
@@ -249,10 +252,7 @@ fn main() -> Result<()> {
     let mut worst: Option<(String, f32)> = None;
 
     for path in &images {
-        let name = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("?");
+        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("?");
         let Some(py_img) = by_name.get(name) else {
             eprintln!("跳过（Python dump 无此文件）: {name}");
             continue;

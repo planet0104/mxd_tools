@@ -822,7 +822,11 @@ fn encode_slot(
 }
 
 /// 写入物理「右/左前方同层可走」标志（1=可走，0=悬崖/挡墙）。
-pub fn inject_physics_walk_flags(values: &mut [f32], right_ok: Option<bool>, left_ok: Option<bool>) {
+pub fn inject_physics_walk_flags(
+    values: &mut [f32],
+    right_ok: Option<bool>,
+    left_ok: Option<bool>,
+) {
     if values.len() < OBS_DIM {
         return;
     }
@@ -871,7 +875,10 @@ mod tests {
         let obs = VisionObservation::from_detections(&dets, Some(&self_hit), 1368, 768);
         let near_dx = obs.values[OBS_SELF];
         let far_dx = obs.values[OBS_SELF + OBS_SLOT_DIM];
-        assert!(near_dx.abs() < far_dx.abs(), "nearest floor should be first slot");
+        assert!(
+            near_dx.abs() < far_dx.abs(),
+            "nearest floor should be first slot"
+        );
     }
 
     #[test]
