@@ -69,3 +69,11 @@ harness = false
 name = "game_preview_first_platform"
 path = "tests/game_preview_first_platform.rs"
 harness = true
+
+[[bin]]
+name = "neat_trainer"
+path = "src/bin/neat_trainer.rs"
+
+[[bin]]
+name = "neat_preview"
+path = "src/bin/neat_preview.rs"

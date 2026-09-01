@@ -3,12 +3,14 @@ use rand::{Rng, SeedableRng};
 
 use crate::game::camera::WorldCamera;
 use crate::game::config::GameSimConfig;
+use crate::game::fitness::TrainingFitness;
 use crate::game::input::InputFrame;
 use crate::game::map::{GameMap, WalkAhead};
 use crate::game::movement_gate::{MovementGate, MovementGateCtx};
 use crate::game::npc::{self, NpcPlayerState};
 use crate::game::types::*;
 use crate::game::vision::SimVisionSnapshot;
+use crate::yolo::Detection;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GameModal {
@@ -154,6 +156,7 @@ pub struct GameSim {
     /// 训练用装饰玩家（YOLO「玩家」干扰，OCR 排除自身）
     pub npc_players: Vec<NpcPlayerState>,
     pub movement_gate: MovementGate,
+    pub fitness: TrainingFitness,
     spawn_x: f32,
     spawn_y: f32,
     rng: StdRng,
@@ -172,6 +175,11 @@ impl GameSim {
     /// 预览模式：自动玩环境 + 受击不死，便于持续观察。
     pub fn new_preview(map: GameMap, seed: u64) -> Self {
         Self::new_with_config(map, seed, GameSimConfig::preview())
+    }
+
+    /// NEAT 训练：装饰 NPC、波次刷怪、视觉适应度计分。
+    pub fn new_training(map: GameMap, seed: u64) -> Self {
+        Self::new_with_config(map, seed, GameSimConfig::training())
     }
 
     pub fn new_with_config(map: GameMap, seed: u64, config: GameSimConfig) -> Self {
@@ -220,6 +228,7 @@ impl GameSim {
             episode_seed: seed,
             npc_players: Vec::new(),
             movement_gate: MovementGate::default(),
+            fitness: TrainingFitness::default(),
             spawn_x,
             spawn_y,
             rng,
@@ -357,6 +366,13 @@ impl GameSim {
             cam_x: self.state.cam_x,
             cam_y: self.state.cam_y,
             episode_seed: self.episode_seed,
+        }
+    }
+
+    /// 每帧 YOLO 感知后调用，记录可见掉落框供适应度计分。
+    pub fn record_vision_loot(&mut self, detections: &[Detection]) {
+        if self.config.training {
+            self.fitness.record_visible_drops(detections);
         }
     }
 
@@ -498,6 +514,13 @@ impl GameSim {
             self.use_potion();
         }
         self.tick_player(&effective, dt);
+        if self.config.training {
+            let (px, py) = (self.state.player.x, self.state.player.y);
+            if self.fitness.tick_stagnation(px, py, self.state.tick) {
+                self.state.player.hp = 0;
+                self.state.modal = GameModal::GameOver;
+            }
+        }
         if self.config.bot_play {
             npc::tick_npc_players(
                 &mut self.npc_players,
@@ -1010,6 +1033,7 @@ impl GameSim {
         let p = &self.state.player;
         let (x1, x2, y1, y2) = Self::player_melee_aabb(p);
         let mut loot: Vec<(f32, f32)> = Vec::new();
+        let mut hits = 0u32;
         let mut kills = 0u32;
         for mob in &mut self.state.mobs {
             if !mob.alive {
@@ -1021,6 +1045,7 @@ impl GameSim {
                 mob.anim = MobAnim::Hit;
                 let kb = 28.0 * p.facing;
                 mob.x += kb;
+                hits += 1;
                 if mob.hp <= 0 {
                     mob.alive = false;
                     mob.die_t = 0.5;
@@ -1031,19 +1056,41 @@ impl GameSim {
                 }
             }
         }
+        if self.config.training {
+            for _ in 0..hits {
+                self.fitness.record_mob_hit(self.state.tick);
+            }
+            for _ in 0..kills {
+                self.fitness.record_mob_kill(self.state.tick);
+            }
+        }
         for (x, y) in loot {
             self.spawn_loot(x, y);
         }
     }
 
     fn spawn_loot(&mut self, x: f32, y: f32) {
-        self.state.drops.push(DropState {
-            kind: DropKind::Meso,
-            x,
-            y: y - 8.0,
-            alive: true,
-            bob_t: 0.0,
-        });
+        let training = self.config.training;
+        let meso_piles = if training {
+            self.rng
+                .gen_range(TRAINING_MESO_PILES_MIN..=TRAINING_MESO_PILES_MAX)
+        } else {
+            1
+        };
+        for i in 0..meso_piles {
+            let offset = if meso_piles > 1 {
+                (i as f32 - (meso_piles as f32 - 1.0) * 0.5) * 18.0
+            } else {
+                0.0
+            };
+            self.state.drops.push(DropState {
+                kind: DropKind::Meso,
+                x: x + offset,
+                y: y - 8.0,
+                alive: true,
+                bob_t: i as f32 * 0.15,
+            });
+        }
         let potion_chance = if self.config.bot_play {
             TRAINING_POTION_DROP_CHANCE
         } else {
@@ -1052,7 +1099,7 @@ impl GameSim {
         if self.rng.gen_bool(potion_chance as f64) {
             self.state.drops.push(DropState {
                 kind: DropKind::RedPotion,
-                x: x + 12.0,
+                x: x + 28.0,
                 y: y - 8.0,
                 alive: true,
                 bob_t: 0.3,
@@ -1106,7 +1153,8 @@ impl GameSim {
         let tick = self.state.tick;
         self.state.player.x = Self::safe_hurt_knockback_x(&self.map, old_x, feet_y, knock_dir);
 
-        if self.config.preview || self.config.bot_play {
+        // NEAT 训练时关掉逐帧伤害日志，避免并行刷屏；预览/规则 bot 仍打印。
+        if self.config.preview || (self.config.bot_play && !self.config.training) {
             eprintln!(
                 "DMG tick={} touch -{} hp {}→{} hits={} player=({:.0},{:.0}) mob_dx={:.0} facing={}",
                 tick,
@@ -1202,10 +1250,33 @@ impl GameSim {
             let (_drop_sx, _drop_sy) = (drop.x - self.state.cam_x, drop.y - self.state.cam_y);
             match drop.kind {
                 DropKind::Meso => {
-                    let amount = self.rng.gen_range(1..=5);
+                    let amount = if self.config.training {
+                        self.rng
+                            .gen_range(TRAINING_MESO_AMOUNT_MIN..=TRAINING_MESO_AMOUNT_MAX)
+                    } else {
+                        self.rng.gen_range(1..=5)
+                    };
+                    if self.config.training {
+                        self.fitness.try_score_pickup(
+                            DropKind::Meso,
+                            drop.x,
+                            drop.y,
+                            amount,
+                            self.state.tick,
+                        );
+                    }
                     self.state.meso += amount;
                 }
                 DropKind::RedPotion => {
+                    if self.config.training {
+                        self.fitness.try_score_pickup(
+                            DropKind::RedPotion,
+                            drop.x,
+                            drop.y,
+                            0,
+                            self.state.tick,
+                        );
+                    }
                     self.state.potions += 1;
                 }
             }

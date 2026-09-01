@@ -1,4 +1,5 @@
 pub mod game;
+pub mod neat;
 pub mod headless_gl;
 pub mod image_util;
 pub mod map_api;

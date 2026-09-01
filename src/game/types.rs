@@ -12,8 +12,14 @@ pub const TRAINING_NPC_NAMES: [&str; TRAINING_NPC_COUNT] =
     ["南港商人", "冒险萌新", "路过的骑士", "摆摊小贩"];
 pub const TRAINING_NPC_SPRITES: [&str; TRAINING_NPC_COUNT] =
     ["默认女新手", "男战士", "男魔法师", "男弓箭手"];
-/// 训练模式怪物掉落红药概率（金币已较频繁，少量红药够学盲喝即可）
-pub const TRAINING_POTION_DROP_CHANCE: f32 = 0.18;
+/// 训练模式怪物掉落红药概率（少量红药够学盲喝即可；主奖励为金币）
+pub const TRAINING_POTION_DROP_CHANCE: f32 = 0.08;
+/// NEAT 训练：每只怪金币堆数（含首堆）
+pub const TRAINING_MESO_PILES_MIN: u32 = 2;
+pub const TRAINING_MESO_PILES_MAX: u32 = 3;
+/// NEAT 训练：单堆金币数量
+pub const TRAINING_MESO_AMOUNT_MIN: u32 = 3;
+pub const TRAINING_MESO_AMOUNT_MAX: u32 = 8;
 /// 普通模式怪物掉落红药概率
 pub const NORMAL_POTION_DROP_CHANCE: f32 = 0.30;
 /// 名牌：脚点下方间距、内边距、字号（凤凰点阵体 16px，对齐原版 UIImageText）

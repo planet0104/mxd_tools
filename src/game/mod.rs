@@ -3,6 +3,10 @@ pub mod agent;
 pub mod bot_harness;
 pub mod camera;
 pub mod config;
+pub mod fitness_core;
+pub mod fitness {
+    pub use super::fitness_core::*;
+}
 pub mod headless_vision;
 pub mod human_pace;
 pub mod input;
@@ -37,6 +41,9 @@ pub use bot_harness::{
 };
 pub use camera::WorldCamera;
 pub use config::{GameSimConfig, VisionAnchorConfig, VisionPaceConfig};
+pub use fitness::{
+    FitnessShapingConfig, TrainingFitness, IDLE_FORFEIT_GRACE_TICKS, STAGNATION_TICKS,
+};
 pub use headless_vision::{default_yolo_model_path, DeferredCaptureVision, HeadlessVisionEnv};
 pub use human_pace::HumanPace;
 pub use input::InputFrame;

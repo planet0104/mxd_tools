@@ -29,13 +29,15 @@ impl VisionAnchorConfig {
     }
 }
 
-/// 游戏 / 规则 bot 运行配置。
+/// 游戏 / 规则 bot / NEAT 训练运行配置。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GameSimConfig {
     /// 自动玩模式：装饰 NPC、波次刷怪、零初始药水。
     pub bot_play: bool,
     /// 预览模式：受击 HP 最低保留 1，便于持续观察 bot。
     pub preview: bool,
+    /// NEAT 训练模式：启用视觉适应度计分、HP 归零结束。
+    pub training: bool,
 }
 
 impl Default for GameSimConfig {
@@ -43,6 +45,7 @@ impl Default for GameSimConfig {
         Self {
             bot_play: false,
             preview: false,
+            training: false,
         }
     }
 }
@@ -52,6 +55,7 @@ impl GameSimConfig {
         Self {
             bot_play: true,
             preview: false,
+            training: false,
         }
     }
 
@@ -60,6 +64,16 @@ impl GameSimConfig {
         Self {
             bot_play: true,
             preview: true,
+            training: false,
+        }
+    }
+
+    /// NEAT 训练：自动玩环境 + 视觉适应度 + 正常死亡。
+    pub fn training() -> Self {
+        Self {
+            bot_play: true,
+            preview: false,
+            training: true,
         }
     }
 }

@@ -34,6 +34,7 @@ pub struct DeferredCaptureVision {
     /// 最近一次 YOLO 结果（供预览叠框）。
     last_detections: Vec<crate::yolo::Detection>,
     last_self_player: Option<crate::player_name::NamedPlayerHit>,
+    last_step: Option<VisionStep>,
 }
 
 impl DeferredCaptureVision {
@@ -45,6 +46,7 @@ impl DeferredCaptureVision {
             drawn: false,
             last_detections: Vec::new(),
             last_self_player: None,
+            last_step: None,
         }
     }
 
@@ -58,6 +60,7 @@ impl DeferredCaptureVision {
         self.drawn = false;
         self.last_detections.clear();
         self.last_self_player = None;
+        self.last_step = None;
     }
 
     pub fn last_detections(&self) -> &[crate::yolo::Detection] {
@@ -72,10 +75,15 @@ impl DeferredCaptureVision {
         self.drawn
     }
 
+    pub fn last_vision_step(&self) -> Option<&VisionStep> {
+        self.last_step.as_ref()
+    }
+
     pub fn poll_observation(&mut self, sim: &GameSim) -> Option<(u32, [f32; OBS_DIM])> {
         let result = self.worker.poll_result()?;
         self.last_detections = result.step.detections.clone();
         self.last_self_player = result.step.self_player.clone();
+        self.last_step = Some(result.step.clone());
         self.pending_submit_tick = None;
         Some((result.tick, obs_from_step(sim, &result.step)))
     }
@@ -175,6 +183,9 @@ impl DeferredCaptureVision {
             .worker
             .infer_blocking(sim.state.tick as u32, rgb, Some(snap), INFER_TIMEOUT)
             .context("YOLO 感知")?;
+        self.last_detections = step.detections.clone();
+        self.last_self_player = step.self_player.clone();
+        self.last_step = Some(step.clone());
         self.clear_pending();
         Ok(obs_from_step(sim, &step))
     }
@@ -252,17 +263,30 @@ impl HeadlessVisionEnv {
     }
 
     /// 非阻塞取回最新推理观测（无新结果则 `None`）。
-    pub fn poll_observation(&mut self, sim: &GameSim) -> Option<(u32, [f32; OBS_DIM])> {
-        let result = self
-            .worker
-            .poll_result()
-            .map(|r| (r.tick, obs_from_step(sim, &r.step)))?;
+    pub fn poll_vision(&mut self, sim: &GameSim) -> Option<(u32, [f32; OBS_DIM], VisionStep)> {
+        let result = self.worker.poll_result()?;
         self.pending_submit_tick = None;
-        Some(result)
+        Some((
+            result.tick,
+            obs_from_step(sim, &result.step),
+            result.step,
+        ))
+    }
+
+    pub fn poll_observation(&mut self, sim: &GameSim) -> Option<(u32, [f32; OBS_DIM])> {
+        self.poll_vision(sim).map(|(t, o, _)| (t, o))
     }
 
     /// 阻塞式单帧观测（仅诊断；探针/游戏请用 schedule + poll）。
     pub async fn observe_sim_blocking(&mut self, sim: &GameSim) -> Result<[f32; OBS_DIM]> {
+        let (obs, _step) = self.observe_sim_blocking_with_step(sim).await?;
+        Ok(obs)
+    }
+
+    pub async fn observe_sim_blocking_with_step(
+        &mut self,
+        sim: &GameSim,
+    ) -> Result<([f32; OBS_DIM], VisionStep)> {
         let rgb = self.capture_rgb(sim).await;
         let snap = sim.vision_snapshot();
         let step = self
@@ -270,7 +294,7 @@ impl HeadlessVisionEnv {
             .infer_blocking(sim.state.tick as u32, rgb, Some(snap), INFER_TIMEOUT)
             .context("YOLO 感知")?;
         self.pending_submit_tick = None;
-        Ok(obs_from_step(sim, &step))
+        Ok((obs_from_step(sim, &step), step))
     }
 
     async fn capture_rgb(&self, sim: &GameSim) -> RgbImage {

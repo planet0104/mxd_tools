@@ -52,6 +52,36 @@ impl Action {
     }
 }
 
+/// 多输出 NEAT（每位一个 bool）合并为输入；冲突时 left+right 在 `horizontal()` 中抵消。
+pub fn actions_from_bits(bits: &[bool]) -> InputFrame {
+    let mut f = InputFrame::default();
+    if bits.first().copied().unwrap_or(false) {
+        f.left = true;
+    }
+    if bits.get(1).copied().unwrap_or(false) {
+        f.right = true;
+    }
+    if bits.get(2).copied().unwrap_or(false) {
+        f.jump = true;
+    }
+    if bits.get(3).copied().unwrap_or(false) {
+        f.attack = true;
+    }
+    if bits.get(4).copied().unwrap_or(false) {
+        f.pick_up = true;
+    }
+    if bits.get(5).copied().unwrap_or(false) {
+        f.use_potion = true;
+    }
+    if bits.get(6).copied().unwrap_or(false) {
+        f.up = true;
+    }
+    if bits.get(7).copied().unwrap_or(false) {
+        f.down = true;
+    }
+    f
+}
+
 pub fn action_to_input(action: Action) -> InputFrame {
     let mut f = InputFrame::default();
     match action {
