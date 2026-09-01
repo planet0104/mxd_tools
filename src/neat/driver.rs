@@ -8,7 +8,7 @@ use anyhow::Result;
 use crate::game::headless_vision::HeadlessVisionEnv;
 use crate::game::input::InputFrame;
 use crate::game::macro_action::{MacroAction, MacroRunner};
-use crate::game::observation::{inject_proprioception, OBS_DIM};
+use crate::game::observation::{inject_proprioception, obs_enemy_in_attack_range_strict, obs_has_platform_in_direction, obs_platform_edge, OBS_DIM};
 use crate::game::sim::GameSim;
 use crate::game::types::{WINDOW_H, WINDOW_W};
 use crate::neat::genome::Genome;
@@ -200,9 +200,36 @@ impl NeatDriver {
         // 宏执行中不重新决策：一个意图必须跑完，否则跳台/爬绳会被每帧抖动撕碎。
         self.runner.observe(&obs);
         if self.runner.is_idle() {
-            let compact = compact_obs(&obs, self.runner.last_failed());
-            let outputs = evaluate(&self.genome, &compact);
-            self.runner.begin(action_from_outputs(&outputs), &obs);
+            // 自动攻击反射：当敌人在攻击范围内时，直接攻击，不通过网络决策。
+            // 这解决了 NEAT 无法从零发现「攻击」动作的问题——攻击变成本能，
+            // 网络只需学会导航（走向敌人、跳台）。
+            if obs_enemy_in_attack_range_strict(&obs, -1.0)
+                || obs_enemy_in_attack_range_strict(&obs, 1.0)
+            {
+                self.runner.begin(MacroAction::Attack, &obs);
+            } else {
+                let compact = compact_obs(&obs, self.runner.last_failed());
+                let mut outputs = evaluate(&self.genome, &compact);
+
+                // 边缘屏蔽：站在平台边缘时，禁止朝虚空方向走。
+                // 同时禁止朝无平台方向跳，防止卡死在地图边缘反复跳台。
+                let at_left_edge = obs_platform_edge(&obs, -1.0);
+                let at_right_edge = obs_platform_edge(&obs, 1.0);
+                if at_left_edge {
+                    outputs[0] = f32::NEG_INFINITY; // WalkLeft 屏蔽
+                    if !obs_has_platform_in_direction(&obs, -1.0, WINDOW_W, WINDOW_H) {
+                        outputs[3] = f32::NEG_INFINITY; // JumpLeft 屏蔽（死胡同）
+                    }
+                }
+                if at_right_edge {
+                    outputs[1] = f32::NEG_INFINITY; // WalkRight 屏蔽
+                    if !obs_has_platform_in_direction(&obs, 1.0, WINDOW_W, WINDOW_H) {
+                        outputs[4] = f32::NEG_INFINITY; // JumpRight 屏蔽（死胡同）
+                    }
+                }
+
+                self.runner.begin(action_from_outputs(&outputs), &obs);
+            }
         }
     }
 
