@@ -87,6 +87,7 @@ impl ProbeDriver {
     pub fn after_sim_tick(&mut self, sim: &GameSim) {
         self.sense
             .sync_truth_pos(sim.state.player.x, sim.state.player.y);
+        self.sense.sync_truth_climbing(sim.state.player.climbing);
     }
 
     pub fn apply_observation(&mut self, sim: &mut GameSim, vtick: u32, obs: [f32; OBS_DIM]) {

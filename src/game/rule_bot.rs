@@ -276,8 +276,11 @@ impl<'a> RuleBotCtx<'a> {
                 .is_some();
         let under = obs_floor_underfoot(obs);
         // 脚下有台则本帧视为已落地（即使攀爬粘性尚未清），否则绳顶小台会永远 !on_ground 死按 up。
-        let climbing = sense.climbing && !under;
-        let on_ground = under;
+        // sim 真值攀爬状态优先：真值在绳上时，即使 YOLO 误判脚下有台，也必须保持攀爬，
+        // 否则决策层会停止按 up 并尝试左右走，而绳上左右无效 → 挂绳顶卡死。
+        let climbing = sense.climbing_truth || (sense.climbing && !under);
+        // 真值在绳上绝不视为落地；无真值（真实部署）时退化为原视觉判定。
+        let on_ground = under && !climbing;
         Self {
             obs,
             facing: sense.facing,
@@ -316,6 +319,8 @@ pub struct VisionSenseState {
     initialized: bool,
     /// 连续「脚下有地板且远离绳」决策帧；满额才清攀爬粘性。
     climb_ground_release: u32,
+    /// sim 真值攀爬状态（preview/探针每帧同步）；无 sim 的真实部署恒为 false。
+    climbing_truth: bool,
 }
 
 impl Default for VisionSenseState {
@@ -329,6 +334,7 @@ impl Default for VisionSenseState {
             same_level_enemies: 0,
             initialized: false,
             climb_ground_release: 0,
+            climbing_truth: false,
         }
     }
 }
@@ -406,6 +412,12 @@ impl VisionSenseState {
     pub fn sync_truth_pos(&mut self, x: f32, y: f32) {
         self.est_x = x;
         self.est_y = y;
+    }
+
+    /// 用 sim 真值覆盖攀爬状态（与 `sync_truth_pos` 同周期调用）。
+    /// 决策层据此在绳上保持攀爬，避免 YOLO 绳顶台误判「已落地」导致挂绳卡死。
+    pub fn sync_truth_climbing(&mut self, climbing: bool) {
+        self.climbing_truth = climbing;
     }
 }
 
@@ -580,8 +592,18 @@ impl RuleBot {
             // 腾空：若已在绳/梯或近绳，继续攀爬；否则保持换层起跳水平方向。
             if !ctx.on_ground {
                 // 绳顶小台：长时间 up 不动且有台阶 → 改登台，禁止死按 up。
+                // 直接强制起跳：角色已挂在绳顶（up 无位移），try_step_up 若仍选择
+                // 「走路接近」会在绳上左右空摆，必须 jump 登台/跳离绳。
                 if ctx.step_up_dx.is_some() && self.climb_up_stall >= 8 {
-                    if self.try_step_up(ctx, &mut out) {
+                    if let Some(dx) = ctx.step_up_dx {
+                        let jdir = if dx.abs() > 1.0 {
+                            dx.signum()
+                        } else if self.patrol_dir >= 0.0 {
+                            1.0
+                        } else {
+                            -1.0
+                        };
+                        set_move_dir(&mut out, jdir, true);
                         self.climb_up_stall = 0;
                         self.last_reason = "seek_climb_top";
                         self.note_move_dir(&out);
@@ -651,13 +673,13 @@ impl RuleBot {
                 return out;
             }
             // 绳中禁止 step_up 扯离；绳顶（脚下有台或长时间 up 后）允许登台。
+            // try_climb 水平对准超时后会放弃，再走台阶（避免 step=-100 时右对齐卡死）。
             let allow_step = !ctx.climbing
                 || obs_floor_underfoot(ctx.obs)
                 || self.climb_up_stall >= 8;
             if allow_step && self.try_step_up(ctx, &mut out) {
                 self.resolve_blocked_horizontal(ctx, &mut out);
                 self.strip_chase_toward_mob(ctx, &mut out);
-                // strip 后若只剩空走，改走换层边，禁止朝怪 step_up。
                 if !out.left && !out.right && !out.jump && !out.up {
                     let _ = self.try_edge_jump(ctx, &mut out);
                 }
@@ -1070,13 +1092,41 @@ impl RuleBot {
             return None;
         }
         let mut out = InputFrame::default();
-        if self.try_climb(ctx, &mut out) {
+        let dir = self.patrol_dir.signum();
+        let step_dir = ctx.step_up_dx.map(|dx| {
+            if dx.abs() > 1.0 {
+                dx.signum()
+            } else {
+                dir
+            }
+        });
+
+        // 绳上 / 近绳：禁止水平对准空走（绳上左右无效）。
+        // 视觉误判落地（YOLO 绳顶台）时 ctx.on_ground 可能为 true，obs_vertical_nav_allowed 兜底。
+        if ctx.climbing || obs_vertical_nav_allowed(ctx.obs, false) {
+            // 近绳且视觉有台阶 / 脚下有台 → 跳离绳登台（死按 up 挂绳顶无效，必须 jump 脱绳）。
+            if ctx.step_up_dx.is_some() || obs_floor_underfoot(ctx.obs) {
+                let jump_dir = ctx
+                    .step_up_dx
+                    .map(|dx| if dx.abs() > 1.0 { dx.signum() } else { dir })
+                    .unwrap_or(dir);
+                out.jump = true;
+                set_move_dir(&mut out, jump_dir, false);
+                out.up = false;
+                out.down = false;
+                return Some(out);
+            }
+            out.up = true;
+            out.jump = false;
+            out.left = false;
+            out.right = false;
             return Some(out);
         }
+
+        // 有台阶先登台，再抓绳（避免 seek_climb 右对齐抢掉 step=-100）。
         if self.try_step_up(ctx, &mut out) {
             return Some(out);
         }
-        let dir = self.patrol_dir.signum();
         if self.try_leave_edge(ctx, dir, &mut out) || self.try_leave_edge(ctx, -dir, &mut out) {
             return Some(out);
         }
@@ -1085,27 +1135,23 @@ impl RuleBot {
         }
 
         if self.stuck_phase == StuckPhase::ForceLeave {
-            // 死胡同：朝远离锚点方向强行跳。
-            let escape = if (ctx.player_x - self.stuck_anchor_x).abs() < 1.0 {
-                dir
-            } else if ctx.player_x >= self.stuck_anchor_x {
-                1.0
-            } else {
-                -1.0
-            };
+            let escape = step_dir.unwrap_or_else(|| {
+                if (ctx.player_x - self.stuck_anchor_x).abs() < 1.0 {
+                    dir
+                } else if ctx.player_x >= self.stuck_anchor_x {
+                    1.0
+                } else {
+                    -1.0
+                }
+            });
             set_move_dir(&mut out, escape, false);
-            if ctx.on_ground {
-                out.jump = true;
-            } else if ctx.climbing || obs_vertical_nav_allowed(ctx.obs, false) {
-                out.up = true;
-            } else {
-                out.jump = true;
-            }
+            out.jump = true;
             return Some(out);
         }
 
-        // Reverse：走开；禁止朝怪走把脱困撕成追怪。
-        set_move_dir(&mut out, dir, false);
+        // Reverse：走开；有台阶方向则优先朝台阶，禁止 try_climb 水平空对齐。
+        let walk = step_dir.unwrap_or(dir);
+        set_move_dir(&mut out, walk, false);
         Some(out)
     }
 
@@ -1710,7 +1756,12 @@ impl RuleBot {
         }
 
         if climb.dx.abs() > CLIMB_ALIGN_PX {
-            self.climb_attempt_ticks = 0;
+            // 水平对准久无进展会卡在绳旁（effective=right 但 sim 不动）：放弃抓绳改台阶/走路。
+            self.climb_attempt_ticks = self.climb_attempt_ticks.saturating_add(1);
+            if self.climb_attempt_ticks > 10 {
+                self.climb_attempt_ticks = 0;
+                return false;
+            }
             set_move_dir(out, climb.dx.signum(), false);
             return true;
         }
@@ -1751,12 +1802,15 @@ impl RuleBot {
             // 无地板 YOLO 时（oracle/单测）以 physics 为准，不误强制跳。
             let floor_ok =
                 !obs_has_floor_signal(ctx.obs) || obs_floor_ahead(ctx.obs, dir);
-            if Self::can_walk_dir(ctx, dir) && floor_ok && dx.abs() > STEP_UP_JUMP_DX {
+            // 卡死恢复中：视觉可走但物理不动（挂在绳上 / 被台阶侧墙挡住），
+            // 禁止只走路空转 —— 必须起跳登台或跳离绳。
+            let stuck_now = self.stuck_phase != StuckPhase::Normal;
+            if !stuck_now && Self::can_walk_dir(ctx, dir) && floor_ok && dx.abs() > STEP_UP_JUMP_DX {
                 set_move_dir(out, dir, false);
                 self.patrol_dir = dir;
                 return true;
             }
-            if self.should_allow_jump(ctx, dir, JumpPurpose::StepUp) {
+            if self.should_allow_jump(ctx, dir, JumpPurpose::StepUp) || stuck_now {
                 out.jump = true;
                 set_move_dir(out, dir, false);
                 self.patrol_dir = dir;
@@ -4477,5 +4531,65 @@ mod tests {
         let inp = bot.decide(ctx_at(621.0));
         assert_eq!(bot.last_reason, "stuck_recovery");
         assert!(inp.jump, "ForceLeave must jump off platform, got {:?}", inp);
+    }
+
+    #[test]
+    fn stuck_on_rope_top_prefers_step_up_not_climb_align() {
+        // 复现 (1020,904)：绳顶 + step≈-100 + climb 右对齐 → stuck_recovery 只 right 永不跳。
+        let mut bot = RuleBot::default();
+        bot.initialized = true;
+        bot.farm_y = 904.0;
+        bot.spawn_y = 1225.0;
+        bot.spawn_y_band = visit_key(500.0, 1225.0).1;
+        bot.last_y_band = visit_key(1020.0, 904.0).1;
+        bot.explore_mode = ExploreMode::SeekVertical;
+        bot.stuck_phase = StuckPhase::ForceLeave;
+        bot.stuck_ticks = STUCK_TICKS + STUCK_REVERSE_TICKS + 5;
+        bot.stuck_anchor_x = 1020.0;
+        bot.stuck_anchor_y = 904.0;
+        bot.last_x = 1020.0;
+        bot.last_y = 904.0;
+        bot.patrol_dir = 1.0;
+
+        let obs = [0.0_f32; OBS_DIM];
+        let ctx = RuleBotCtx {
+            obs: &obs,
+            facing: 1.0,
+            on_ground: true,
+            climbing: false,
+            hp: 100,
+            max_hp: 100,
+            potions: 0,
+            player_x: 1020.0,
+            player_y: 904.0,
+            kills: 7,
+            physics_right_ok: Some(true),
+            physics_left_ok: Some(true),
+            physics_drop_right: Some(false),
+            physics_drop_left: Some(false),
+            sim_mob_in_melee: false,
+            sim_mob_on_attackable_footing: false,
+            engage: None,
+            engage_wide: None,
+            climb: Some(ClimbHint {
+                dx: 100.0,
+                dir: ClimbDir::Up,
+            }),
+            step_up_dx: Some(-100.0),
+            farm_band_mobs: false,
+        };
+
+        let inp = bot.decide(ctx);
+        assert_eq!(bot.last_reason, "stuck_recovery");
+        assert!(
+            inp.left || inp.jump,
+            "must step/jump toward ledge, not climb-align right: {:?}",
+            inp
+        );
+        assert!(
+            !inp.right || inp.jump,
+            "must not only walk right: {:?}",
+            inp
+        );
     }
 }

@@ -5,7 +5,13 @@
 # （脚本默认安装 x64-windows-static-md）
 
 [env]
-LIBCLANG_PATH = { value = 'C:\Program Files\LLVM\bin', force = true }
+# opencv-binding-generator：CLANG_PATH 直指 clang.exe；LIBCLANG_PATH 给 libclang.dll。
+# 用 8.3 短路径，避免 "Program Files" 空格导致 cargo [env] PATH 注入失效。
+CLANG_PATH = { value = 'C:\PROGRA~1\LLVM\bin\clang.exe', force = true }
+LIBCLANG_PATH = { value = 'C:\PROGRA~1\LLVM\bin', force = true }
+PATH = { value = 'C:\PROGRA~1\LLVM\bin;{value}', force = true }
+# Clang 19+ 解析 MSVC 头需要显式 MS 兼容；否则 vcruntime.h / corecrt 会爆。
+OPENCV_CLANG_ARGS = { value = '--target=x86_64-pc-windows-msvc -fms-compatibility -fms-extensions -fdeclspec', force = true }
 
 OPENCV_INCLUDE_PATHS = { value = 'C:\Users\glsa-\vcpkg\installed\x64-windows-static-md\include\opencv4', force = true }
 OPENCV_LINK_PATHS = { value = 'C:\Users\glsa-\vcpkg\installed\x64-windows-static-md\lib', force = true }
