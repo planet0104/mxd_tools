@@ -10,12 +10,9 @@
 
 use std::collections::HashSet;
 
-use super::observation::{
-    obs_enemy_in_attack_range, obs_floor_ahead, obs_floor_drop_ahead, obs_has_nearby_platform_enemy,
-    obs_has_platform_in_direction, obs_nearest_same_level_enemy_px, obs_platform_edge, OBS_DIM,
-    OBS_PROPRIO_START,
-};
-use super::types::{DropKind, WINDOW_H, WINDOW_W};
+use super::observation::{obs_enemy_in_attack_range, obs_has_nearby_platform_enemy, OBS_DIM,
+    OBS_PROPRIO_START};
+use super::types::DropKind;
 use crate::yolo::Detection;
 
 const MESO_LABEL: &str = "金币";
@@ -64,47 +61,8 @@ const STAGNATION_PENALTY: f32 = 20.0;
 const STAGNATION_PENALTY_CAP: f32 = 120.0;
 pub const IDLE_FORFEIT_GRACE_TICKS: u32 = 300;
 
-/// 本台连续无怪多久算「已清层」。必须足够长，防止个体走远几步就「清台」刷探索分。
-const CLEAR_BAND_NO_ENEMY_TICKS: u32 = 300;
-
-// ── 行为引导：教网络「先清台 → 再走到边缘 → 跳向有平台的方向」 ──
-
-/// 清台一次性奖励：当前平台近处怪全灭后触发。
-const PTS_PLATFORM_CLEAR_ONCE: f32 = 35.0;
-/// 朝同台敌人方向走（每 tick 微量，引导靠拢）。
-const PTS_WALK_TOWARD_ENEMY: f32 = 2.0;
-const WALK_TOWARD_ENEMY_CAP: f32 = 120.0;
-/// 清台后走向平台边缘（每 tick，引导去跳台）。
-const PTS_WALK_TOWARD_EDGE: f32 = 0.3;
-const WALK_TOWARD_EDGE_CAP: f32 = 100.0;
-/// 在边缘跳向有平台的方向（一次性）。
-const PTS_JUMP_TOWARD_PLATFORM: f32 = 12.0;
-/// 不在边缘乱跳惩罚（每跳一次）。
-const PENALTY_JUMP_NOT_EDGE: f32 = 5.0;
-const JUMP_NOT_EDGE_CAP: f32 = 80.0;
-/// 有怪时跳跃惩罚（无论是否在边缘：清怪前禁止跳台）。
-const PENALTY_JUMP_WHEN_ENEMIES: f32 = 8.0;
-const JUMP_WHEN_ENEMIES_CAP: f32 = 120.0;
-/// 行走时前方无地板（即将掉下边缘）但未跳：小罚，引导在边缘起跳。
-const PENALTY_WALK_INTO_VOID: f32 = 1.0;
-const WALK_INTO_VOID_CAP: f32 = 30.0;
-/// 有怪时朝远离敌人方向走（每 tick）。
-const PENALTY_WALK_AWAY_FROM_ENEMY: f32 = 0.3;
-const WALK_AWAY_FROM_ENEMY_CAP: f32 = 60.0;
-/// 有怪时尝试攻击（无论是否命中）：鼓励网络使用攻击动作。
-const PTS_ATTACK_ATTEMPT: f32 = 1.0;
-const ATTACK_ATTEMPT_CAP: f32 = 60.0;
-/// 在边缘跳向前方无平台处：惩罚，防止卡死在地图边缘反复跳。
-/// 无 cap — 永远不能靠跳够次数来豁免惩罚。
-const PENALTY_JUMP_AT_DEAD_END: f32 = 20.0;
-/// 返回最近离开的 y-band 惩罚：防止在相邻平台间反复弹跳刷分。
-const PENALTY_Y_BAND_OSCILLATION: f32 = 15.0;
-const Y_BAND_OSCILLATION_TICKS: u64 = 300; // 5 秒内返回即罚
-/// 跳台后落回原地（YOLO 看到平台但实际够不到）：惩罚。
-const PENALTY_FAILED_JUMP: f32 = 15.0;
-/// 教师奖励：动作匹配启发式"正确动作"时给。
-const PTS_TEACHER_BONUS: f32 = 2.0;
-const TEACHER_CAP: f32 = 120.0;
+/// 本台连续无怪多久算「已清层」。
+const CLEAR_BAND_NO_ENEMY_TICKS: u32 = 45;
 
 /// 与 rule_bot 探索网格一致（80×120 px）。
 const X_CELL_PX: f32 = 80.0;
@@ -158,18 +116,6 @@ pub struct FitnessPreviewDiag {
     pub idle_forfeit: bool,
     pub kills: u32,
     pub meso_events: u32,
-    pub jump_not_edge_penalty: f32,
-    pub jump_toward_platform_bonus: f32,
-    pub walk_toward_enemy_score: f32,
-    pub walk_toward_edge_score: f32,
-    pub walk_into_void_penalty: f32,
-    pub jump_when_enemies_penalty: f32,
-    pub walk_away_from_enemy_penalty: f32,
-    pub attack_attempt_score: f32,
-    pub jump_at_dead_end_penalty: f32,
-    pub platform_clear_bonus_given: bool,
-    pub failed_jump_penalty: f32,
-    pub teacher_score: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -210,22 +156,6 @@ pub struct TrainingFitness {
     visited_cells: HashSet<(i32, i32)>,
     visited_y_bands: HashSet<i32>,
     spawn_y_band: Option<i32>,
-    /// 之前所在的 y-band（用于振荡检测）。
-    last_y_band: Option<i32>,
-    /// 再上一个 y-band（振荡检测：检测 A→B→A 模式）。
-    prev_y_band: Option<i32>,
-    /// y-band 最近一次变化的 tick。
-    y_band_changed_at_tick: u64,
-    /// 已跳过的平台对 (from_y_band, direction_sign)，跳台奖励只给一次。
-    jumped_pairs: HashSet<(i32, i32)>,
-    /// 上一个输入帧是否包含跳跃（用于检测跳跃结束）。
-    was_jumping: bool,
-    /// 跳跃开始时所在的 y-band（用于检测失败跳台）。
-    jump_start_y_band: Option<i32>,
-    /// 失败跳台惩罚累计（诊断用）。
-    failed_jump_penalty: f32,
-    /// 教师奖励累计（诊断用）。
-    teacher_score: f32,
     spawn_x: Option<f32>,
     left_spawn_band: bool,
     no_same_level_enemy_ticks: u32,
@@ -234,28 +164,6 @@ pub struct TrainingFitness {
     prev_attack: bool,
     empty_swings: u32,
     empty_attack_streak: u32,
-    /// 上一 tick 是否按着跳跃键：跳边判定按「次」计。
-    prev_jump: bool,
-    /// 非边缘跳累计惩罚。
-    jump_not_edge_penalty: f32,
-    /// 边缘跳向平台累计奖励。
-    jump_toward_platform_bonus: f32,
-    /// 走向敌人累计奖励。
-    walk_toward_enemy_score: f32,
-    /// 清台后走向边缘累计奖励。
-    walk_toward_edge_score: f32,
-    /// 走向虚空（该跳却没跳）累计惩罚。
-    walk_into_void_penalty: f32,
-    /// 有怪时跳跃累计惩罚。
-    jump_when_enemies_penalty: f32,
-    /// 有怪时远离敌人累计惩罚。
-    walk_away_from_enemy_penalty: f32,
-    /// 有怪时尝试攻击累计奖励。
-    attack_attempt_score: f32,
-    /// 在死胡同边缘跳跃累计惩罚。
-    jump_at_dead_end_penalty: f32,
-    /// 当前平台是否已给过清台奖励。
-    platform_clear_bonus_given: bool,
 }
 
 impl Default for TrainingFitness {
@@ -302,14 +210,6 @@ impl TrainingFitness {
             visited_cells: HashSet::new(),
             visited_y_bands: HashSet::new(),
             spawn_y_band: None,
-            last_y_band: None,
-            prev_y_band: None,
-            y_band_changed_at_tick: 0,
-            jumped_pairs: HashSet::new(),
-            was_jumping: false,
-            jump_start_y_band: None,
-            failed_jump_penalty: 0.0,
-            teacher_score: 0.0,
             spawn_x: None,
             left_spawn_band: false,
             no_same_level_enemy_ticks: 0,
@@ -317,17 +217,6 @@ impl TrainingFitness {
             prev_attack: false,
             empty_swings: 0,
             empty_attack_streak: 0,
-            prev_jump: false,
-            jump_not_edge_penalty: 0.0,
-            jump_toward_platform_bonus: 0.0,
-            walk_toward_enemy_score: 0.0,
-            walk_toward_edge_score: 0.0,
-            walk_into_void_penalty: 0.0,
-            jump_when_enemies_penalty: 0.0,
-            walk_away_from_enemy_penalty: 0.0,
-            attack_attempt_score: 0.0,
-            jump_at_dead_end_penalty: 0.0,
-            platform_clear_bonus_given: false,
         }
     }
 
@@ -366,29 +255,10 @@ impl TrainingFitness {
             self.pressed_right = true;
         }
 
-        // ── 失败跳台检测：跳完后落回原地 → 惩罚 ──
-        if input.jump {
-            if !self.was_jumping {
-                self.was_jumping = true;
-                self.jump_start_y_band = Some(visit_key(self.last_x, self.last_y).1);
-            }
-        } else if self.was_jumping {
-            self.was_jumping = false;
-            if let Some(start_band) = self.jump_start_y_band.take() {
-                let current_band = visit_key(self.last_x, self.last_y).1;
-                if current_band == start_band {
-                    // 跳台失败：落回同一平台（YOLO 看到平台但实际够不到）
-                    self.failed_jump_penalty += PENALTY_FAILED_JUMP;
-                    self.score -= PENALTY_FAILED_JUMP;
-                }
-            }
-        }
-
-        // ── 空砍只在按下那一刻结算 ──
+        // 空砍只在按下那一刻结算：动作宏一次挥砍按键持续数 tick，不能重复扣。
         let swing = input.attack && !self.prev_attack;
         self.prev_attack = input.attack;
         if swing {
-            let has_enemies = obs_has_nearby_platform_enemy(&self.last_obs);
             let facing = self.attack_facing(input);
             if obs_enemy_in_attack_range(&self.last_obs, facing) {
                 self.empty_attack_streak = 0;
@@ -400,142 +270,6 @@ impl TrainingFitness {
                         .min(EMPTY_SWING_PENALTY_CAP - self.empty_attack_penalty);
                     self.empty_attack_penalty += applied;
                     self.score -= applied;
-                }
-            }
-            // 有怪时尝试攻击就给奖励，鼓励网络使用攻击动作（与空砍惩罚独立）。
-            if has_enemies && self.attack_attempt_score < ATTACK_ATTEMPT_CAP {
-                let applied =
-                    PTS_ATTACK_ATTEMPT.min(ATTACK_ATTEMPT_CAP - self.attack_attempt_score);
-                self.attack_attempt_score += applied;
-                self.score += applied;
-            }
-        }
-
-        // ── 跳跃边缘引导 ──
-        let jump_pressed = input.jump && !self.prev_jump;
-        self.prev_jump = input.jump;
-        if jump_pressed {
-            let walking_left = input.left && !input.right;
-            let walking_right = input.right && !input.left;
-            let at_left_edge = obs_platform_edge(&self.last_obs, -1.0);
-            let at_right_edge = obs_platform_edge(&self.last_obs, 1.0);
-            let at_edge = (walking_left && at_left_edge) || (walking_right && at_right_edge);
-            let has_enemies = obs_has_nearby_platform_enemy(&self.last_obs);
-
-            if has_enemies {
-                // 有怪时：禁止跳跃，无论是否在边缘。清怪是第一要务。
-                if self.jump_when_enemies_penalty < JUMP_WHEN_ENEMIES_CAP {
-                    let applied = PENALTY_JUMP_WHEN_ENEMIES
-                        .min(JUMP_WHEN_ENEMIES_CAP - self.jump_when_enemies_penalty);
-                    self.jump_when_enemies_penalty += applied;
-                    self.score -= applied;
-                }
-            } else if at_edge {
-                // 清台后：在边缘跳向有平台的方向 → 奖励，跳向无平台处 → 惩罚
-                let dir = if walking_left { -1.0_f32 } else { 1.0_f32 };
-                if obs_has_platform_in_direction(&self.last_obs, dir, WINDOW_W, WINDOW_H) {
-                    // 每个 (y_band, 方向) 对只奖励一次，防止反复弹跳刷分。
-                    let y_band = visit_key(self.last_x, self.last_y).1;
-                    let dir_sign = dir as i32;
-                    if self.jumped_pairs.insert((y_band, dir_sign)) {
-                        self.jump_toward_platform_bonus += PTS_JUMP_TOWARD_PLATFORM;
-                        self.score += PTS_JUMP_TOWARD_PLATFORM;
-                    }
-                } else {
-                    // 防止卡死在地图边缘反复跳（无 cap，永远不能豁免）
-                    self.jump_at_dead_end_penalty += PENALTY_JUMP_AT_DEAD_END;
-                    self.score -= PENALTY_JUMP_AT_DEAD_END;
-                }
-            } else if walking_left || walking_right {
-                // 清台但非边缘乱跳：小额惩罚
-                if self.jump_not_edge_penalty < JUMP_NOT_EDGE_CAP {
-                    let applied = PENALTY_JUMP_NOT_EDGE
-                        .min(JUMP_NOT_EDGE_CAP - self.jump_not_edge_penalty);
-                    self.jump_not_edge_penalty += applied;
-                    self.score -= applied;
-                }
-            }
-        }
-
-        // ── 行走引导：朝敌人 / 朝有平台的边缘 / 远离敌人惩罚 ──
-        let walking_left = input.left && !input.right;
-        let walking_right = input.right && !input.left;
-        if walking_left || walking_right {
-            let dir = if walking_left { -1.0_f32 } else { 1.0_f32 };
-            let at_edge = if walking_left {
-                obs_platform_edge(&self.last_obs, -1.0)
-            } else {
-                obs_platform_edge(&self.last_obs, 1.0)
-            };
-            let has_enemies = obs_has_nearby_platform_enemy(&self.last_obs);
-
-            if has_enemies {
-                // 有敌人在附近：朝敌人走给奖励，远离敌人给惩罚
-                if let Some((dx, _dy)) =
-                    obs_nearest_same_level_enemy_px(&self.last_obs, WINDOW_W, WINDOW_H)
-                {
-                    if dx.signum() == dir {
-                        // 朝敌人走：奖励
-                        if self.walk_toward_enemy_score < WALK_TOWARD_ENEMY_CAP {
-                            let applied = PTS_WALK_TOWARD_ENEMY
-                                .min(WALK_TOWARD_ENEMY_CAP - self.walk_toward_enemy_score);
-                            self.walk_toward_enemy_score += applied;
-                            self.score += applied;
-                        }
-                    } else if dx.abs() > 4.0 {
-                        // 远离敌人（且不是贴脸微调）：惩罚
-                        if self.walk_away_from_enemy_penalty < WALK_AWAY_FROM_ENEMY_CAP {
-                            let applied = PENALTY_WALK_AWAY_FROM_ENEMY.min(
-                                WALK_AWAY_FROM_ENEMY_CAP - self.walk_away_from_enemy_penalty,
-                            );
-                            self.walk_away_from_enemy_penalty += applied;
-                            self.score -= applied;
-                        }
-                    }
-                }
-            } else if self.band_is_cleared() {
-                // 清台后：只奖励朝有平台的方向走，惩罚朝无平台方向走。
-                let dir_has = obs_has_platform_in_direction(&self.last_obs, dir, WINDOW_W, WINDOW_H);
-                let other_has = obs_has_platform_in_direction(&self.last_obs, -dir, WINDOW_W, WINDOW_H);
-
-                if dir_has && !at_edge {
-                    // 朝有平台边缘走 → 奖励
-                    if self.walk_toward_edge_score < WALK_TOWARD_EDGE_CAP {
-                        let applied = PTS_WALK_TOWARD_EDGE
-                            .min(WALK_TOWARD_EDGE_CAP - self.walk_toward_edge_score);
-                        self.walk_toward_edge_score += applied;
-                        self.score += applied;
-                    }
-                } else if !dir_has && other_has {
-                    // 朝无平台方向走，但另一边有平台 → 惩罚（引导掉头）
-                    if self.walk_away_from_enemy_penalty < WALK_AWAY_FROM_ENEMY_CAP {
-                        let applied = PENALTY_WALK_AWAY_FROM_ENEMY.min(
-                            WALK_AWAY_FROM_ENEMY_CAP - self.walk_away_from_enemy_penalty,
-                        );
-                        self.walk_away_from_enemy_penalty += applied;
-                        self.score -= applied;
-                    }
-                }
-
-                // 在边缘却没跳 → 小罚，引导在边缘起跳
-                if at_edge && !input.jump && self.walk_into_void_penalty < WALK_INTO_VOID_CAP {
-                    let applied = PENALTY_WALK_INTO_VOID
-                        .min(WALK_INTO_VOID_CAP - self.walk_into_void_penalty);
-                    self.walk_into_void_penalty += applied;
-                    self.score -= applied;
-                }
-
-                // 前方无地板且无 jump 缓冲 → 即将掉下边缘，引导起跳
-                if !at_edge && !obs_floor_ahead(&self.last_obs, dir) {
-                    if !obs_floor_drop_ahead(&self.last_obs, dir)
-                        && !input.jump
-                        && self.walk_into_void_penalty < WALK_INTO_VOID_CAP
-                    {
-                        let applied = PENALTY_WALK_INTO_VOID
-                            .min(WALK_INTO_VOID_CAP - self.walk_into_void_penalty);
-                        self.walk_into_void_penalty += applied;
-                        self.score -= applied;
-                    }
                 }
             }
         }
@@ -563,59 +297,6 @@ impl TrainingFitness {
             self.blocked_walk_penalty += applied;
             self.score -= applied;
         }
-
-        // ── 教师奖励：动作匹配启发式"正确动作"时给 +2 ──
-        if self.teacher_score < TEACHER_CAP {
-            if let Some(_) = self.teacher_action_match(input) {
-                self.teacher_score += PTS_TEACHER_BONUS;
-                self.score += PTS_TEACHER_BONUS;
-            }
-        }
-    }
-
-    /// 返回 Some(()) 如果当前动作匹配启发式"正确动作"。
-    fn teacher_action_match(&self, input: &super::InputFrame) -> Option<()> {
-        let obs = &self.last_obs;
-        // 有怪时：朝最近的平台怪走。
-        if obs_has_nearby_platform_enemy(obs) {
-            if let Some((dx, _)) =
-                obs_nearest_same_level_enemy_px(obs, crate::game::WINDOW_W, crate::game::WINDOW_H)
-            {
-                if dx < 0.0 && input.left && !input.right && !input.jump && !input.attack {
-                    return Some(());
-                }
-                if dx > 0.0 && input.right && !input.left && !input.jump && !input.attack {
-                    return Some(());
-                }
-            }
-        }
-        // 清台后：朝边缘走，或在边缘朝有平台方向跳。
-        if self.band_is_cleared() {
-            let at_left = obs_platform_edge(obs, -1.0);
-            let at_right = obs_platform_edge(obs, 1.0);
-            if at_right && obs_has_platform_in_direction(obs, 1.0, WINDOW_W, WINDOW_H) && input.jump && input.right {
-                return Some(());
-            }
-            if at_left && obs_has_platform_in_direction(obs, -1.0, WINDOW_W, WINDOW_H) && input.jump && input.left {
-                return Some(());
-            }
-            if !at_left && !at_right && !input.jump && !input.attack {
-                let has_right = obs_has_platform_in_direction(obs, 1.0, WINDOW_W, WINDOW_H);
-                let has_left = obs_has_platform_in_direction(obs, -1.0, WINDOW_W, WINDOW_H);
-                // 优先朝有平台的方向走
-                if has_right && !has_left && input.right && !input.left {
-                    return Some(());
-                }
-                if has_left && !has_right && input.left && !input.right {
-                    return Some(());
-                }
-                // 两侧都有/都没有平台：任意方向走均可
-                if (input.right && !input.left) || (input.left && !input.right) {
-                    return Some(());
-                }
-            }
-        }
-        None
     }
 
     fn proprio_flag(&self, offset: usize) -> bool {
@@ -746,18 +427,6 @@ impl TrainingFitness {
             idle_forfeit: self.idle_forfeit,
             kills: self.mob_kill_events,
             meso_events: self.meso_events,
-            jump_not_edge_penalty: self.jump_not_edge_penalty,
-            jump_toward_platform_bonus: self.jump_toward_platform_bonus,
-            walk_toward_enemy_score: self.walk_toward_enemy_score,
-            walk_toward_edge_score: self.walk_toward_edge_score,
-            walk_into_void_penalty: self.walk_into_void_penalty,
-            jump_when_enemies_penalty: self.jump_when_enemies_penalty,
-            walk_away_from_enemy_penalty: self.walk_away_from_enemy_penalty,
-            attack_attempt_score: self.attack_attempt_score,
-            jump_at_dead_end_penalty: self.jump_at_dead_end_penalty,
-            platform_clear_bonus_given: self.platform_clear_bonus_given,
-            failed_jump_penalty: self.failed_jump_penalty,
-            teacher_score: self.teacher_score,
         }
     }
 
@@ -770,7 +439,6 @@ impl TrainingFitness {
             return;
         }
         let key = visit_key(x, y);
-        // 新网格：小额奖励，不受清台限制（鼓励移动）。
         if self.visited_cells.insert(key) && self.explore_score < NEW_CELL_CAP {
             let applied = PTS_NEW_CELL.min(NEW_CELL_CAP - self.explore_score);
             self.explore_score += applied;
@@ -781,33 +449,7 @@ impl TrainingFitness {
             self.spawn_y_band = Some(y_band);
         }
         let is_new_band = self.visited_y_bands.insert(y_band);
-
-        // 振荡检测 A→B→A：检测是否返回了上上个 y-band。
-        if let Some(current_band) = self.last_y_band {
-            if y_band != current_band {
-                // y-band 变化
-                if let Some(prev) = self.prev_y_band {
-                    if y_band == prev {
-                        let elapsed =
-                            self.last_episode_tick.saturating_sub(self.y_band_changed_at_tick);
-                        if elapsed < Y_BAND_OSCILLATION_TICKS {
-                            self.score -= PENALTY_Y_BAND_OSCILLATION;
-                        }
-                    }
-                }
-                // 推移历史：prev ← last, last ← current
-                self.prev_y_band = Some(current_band);
-                self.last_y_band = Some(y_band);
-                self.y_band_changed_at_tick = self.last_episode_tick;
-            }
-        } else {
-            self.last_y_band = Some(y_band);
-        }
-
-        // 平台有怪时：不给 y-band 和平台切换奖励，强制先清怪。
-        let band_clear = self.band_is_cleared();
-
-        if is_new_band && band_clear {
+        if is_new_band {
             self.explore_score += PTS_NEW_Y_BAND;
             self.score += PTS_NEW_Y_BAND;
         }
@@ -830,7 +472,6 @@ impl TrainingFitness {
             && is_new_band
             && changed_band
             && (climbing || left_horizontally)
-            && band_clear
             && self.platform_change_score < PLATFORM_CHANGE_CAP
         {
             let applied =
@@ -842,20 +483,9 @@ impl TrainingFitness {
 
     fn tick_band_clear(&mut self) {
         if obs_has_nearby_platform_enemy(&self.last_obs) {
-            if self.no_same_level_enemy_ticks > 0 {
-                // 敌人重新出现（到了新平台），重置清台奖励标记
-                self.platform_clear_bonus_given = false;
-            }
             self.no_same_level_enemy_ticks = 0;
         } else {
             self.no_same_level_enemy_ticks = self.no_same_level_enemy_ticks.saturating_add(1);
-            // 首次达到清台阈值：给一次性奖励
-            if self.no_same_level_enemy_ticks == CLEAR_BAND_NO_ENEMY_TICKS
-                && !self.platform_clear_bonus_given
-            {
-                self.platform_clear_bonus_given = true;
-                self.score += PTS_PLATFORM_CLEAR_ONCE;
-            }
         }
     }
 
@@ -1091,9 +721,6 @@ mod tests {
     #[test]
     fn exploration_rewards_new_cell_and_y_band() {
         let mut f = TrainingFitness::with_shaping(FitnessShapingConfig::disabled());
-        // 无怪场景：拨快「清台」时钟，让 band_is_cleared() 返回 true。
-        f.mob_kill_events = 1;
-        f.last_obs = [0.0; OBS_DIM];
         f.tick_stagnation(100.0, 1225.0, 1, true, false);
         assert!(f.explore_score >= PTS_NEW_CELL + PTS_NEW_Y_BAND);
     }

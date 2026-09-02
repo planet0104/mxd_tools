@@ -226,8 +226,6 @@ const ATTACK_GATE_DY: f32 = 80.0 / 768.0;
 pub const ENEMY_SAME_LEVEL_DY: f32 = 70.0 / 768.0;
 /// 纯视觉决策用的更紧同层（约 32px）：排除上层台怪，避免空砍/假农怪带。
 pub const ENEMY_PLATFORM_DY: f32 = 32.0 / 768.0;
-/// 攻击反射专用：比 platform 更紧，防止站在高台砍脚下平台的怪。
-pub const ENEMY_ATTACK_STRICT_DY: f32 = 20.0 / 768.0;
 
 /// 与 `sim::check_mob_touch` 对齐的玩家接触盒（归一化，以自身脚点为原点）。
 const PLAYER_CONTACT_HALF_W: f32 = 28.0 / 1368.0;
@@ -701,14 +699,6 @@ pub fn obs_platform_edge(values: &[f32], facing: f32) -> bool {
     obs_floor_underfoot(values) && !obs_floor_ahead(values, facing.signum())
 }
 
-/// 检查方向 dir 是否有可跳到的平台（同层 / 下方 / 上方）。
-pub fn obs_has_platform_in_direction(values: &[f32], dir: f32, img_w: f32, img_h: f32) -> bool {
-    obs_floor_ahead(values, dir)
-        || obs_floor_drop_ahead(values, dir)
-        || obs_step_up_dx(values, img_w, img_h)
-            .map_or(false, |dx| dx.signum() == dir)
-}
-
 /// 允许跳跃：仅平台边缘（行进方向前方无地板）。上方/backdrop 平台不算。
 pub fn obs_jump_allowed(values: &[f32], facing: f32, climbing: bool) -> bool {
     if climbing {
@@ -753,11 +743,6 @@ pub fn obs_enemy_in_attack_range(values: &[f32], facing: f32) -> bool {
 /// 纯视觉站砍：仅本台（紧同层），避免对上层台空挥。
 pub fn obs_enemy_in_attack_range_platform(values: &[f32], facing: f32) -> bool {
     obs_enemy_in_attack_range_with_dy(values, facing, ENEMY_PLATFORM_DY)
-}
-
-/// 攻击反射专用：极紧同层（12px），防止站在高台砍脚下怪。
-pub fn obs_enemy_in_attack_range_strict(values: &[f32], facing: f32) -> bool {
-    obs_enemy_in_attack_range_with_dy(values, facing, ENEMY_ATTACK_STRICT_DY)
 }
 
 fn obs_enemy_in_attack_range_with_dy(values: &[f32], facing: f32, max_dy: f32) -> bool {
