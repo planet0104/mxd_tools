@@ -50,13 +50,13 @@ impl Default for Compatibility {
     }
 }
 
-/// 选亲/排名：直接用终局分数。
-///
-/// 适应度已改为正分为主（不再有局末重罚把高分打成 -500），所以「峰值后崩盘」这种
-/// 需要用 peak 纠偏的情形不复存在；peak 只留作训练日志。混合 peak 反而制造过
-/// 「幸运终局被夹成 0 却压过真实探索者」的锁榜 bug。
+/// 选亲/排名：终局分为主，peak 高时掺入 35% 以保留探索型个体。
 pub fn rank_fitness(g: &Genome) -> f32 {
-    g.fitness
+    if g.peak_fitness > g.fitness + 1e-3 {
+        g.fitness * 0.65 + g.peak_fitness * 0.35
+    } else {
+        g.fitness
+    }
 }
 
 impl Genome {
@@ -67,7 +67,7 @@ impl Genome {
             adjusted_fitness: 0.0,
             peak_fitness: 0.0,
         };
-        let n = rng.gen_range(4..12);
+        let n = rng.gen_range(8..20);
         for _ in 0..n {
             let (i, o) = random_io_pair(rng);
             g.add_connection(rng, i, o);
@@ -150,11 +150,11 @@ pub fn mutate<R: Rng + ?Sized>(genome: &mut Genome, rng: &mut R) {
             c.weight = c.weight.clamp(-3.0, 3.0);
         }
     }
-    if rng.gen_bool(0.25) {
+    if rng.gen_bool(0.35) {
         let (i, o) = random_io_pair(rng);
         genome.add_connection(rng, i, o);
     }
-    if rng.gen_bool(0.08) {
+    if rng.gen_bool(0.15) {
         mutate_add_node(genome, rng);
     }
     if rng.gen_bool(0.01) {

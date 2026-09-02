@@ -44,6 +44,8 @@ pub struct GameSimConfig {
     pub movement_gate: bool,
     /// 挥砍时自动转向最近同层怪。NEAT 训练/预览必须关闭，否则单向狂砍也能打中。
     pub attack_auto_face: bool,
+    /// 怪物碰触是否掉血。NEAT 只练寻路时关闭，避免个体因被怪撞死而拿不到探索分。
+    pub mob_damage: bool,
 }
 
 impl Default for GameSimConfig {
@@ -55,6 +57,7 @@ impl Default for GameSimConfig {
             random_player_spawn: false,
             movement_gate: false,
             attack_auto_face: true,
+            mob_damage: true,
         }
     }
 }
@@ -68,6 +71,7 @@ impl GameSimConfig {
             random_player_spawn: super::types::TRAINING_RANDOM_PLAYER_SPAWN,
             movement_gate: true,
             attack_auto_face: true,
+            mob_damage: true,
         }
     }
 
@@ -80,10 +84,11 @@ impl GameSimConfig {
             random_player_spawn: super::types::TRAINING_RANDOM_PLAYER_SPAWN,
             movement_gate: true,
             attack_auto_face: true,
+            mob_damage: true,
         }
     }
 
-    /// NEAT 训练：自动玩环境 + 视觉适应度 + 正常死亡；无 MovementGate。
+    /// NEAT 训练：自动玩环境 + 视觉适应度；无 MovementGate；只练寻路，不受怪物伤害。
     pub fn training() -> Self {
         Self {
             bot_play: true,
@@ -92,10 +97,11 @@ impl GameSimConfig {
             random_player_spawn: super::types::TRAINING_RANDOM_PLAYER_SPAWN,
             movement_gate: false,
             attack_auto_face: false,
+            mob_damage: false,
         }
     }
 
-    /// NEAT 预览：与训练同感知约束；开 training 计分便于 diag 对照，preview 受击不死。
+    /// NEAT 预览：与训练同感知约束；开 training 计分便于 diag 对照。默认寻路预览（无伤害）。
     pub fn neat_preview() -> Self {
         Self {
             bot_play: true,
@@ -104,7 +110,13 @@ impl GameSimConfig {
             random_player_spawn: super::types::TRAINING_RANDOM_PLAYER_SPAWN,
             movement_gate: false,
             attack_auto_face: false,
+            mob_damage: false,
         }
+    }
+
+    pub fn with_mob_damage(mut self, on: bool) -> Self {
+        self.mob_damage = on;
+        self
     }
 }
 

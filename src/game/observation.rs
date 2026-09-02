@@ -707,6 +707,23 @@ pub fn obs_jump_allowed(values: &[f32], facing: f32, climbing: bool) -> bool {
     obs_platform_edge(values, facing)
 }
 
+/// 该方向存在 YOLO 可见、角色跳得上去的紧邻台阶（`obs_step_up_dx`，抬升 16–80px）。
+///
+/// 纯平台边沿（对侧太高时 step_up 为 None）不算——那种情况应走绳梯或换向，不应空跳。
+pub fn obs_jump_target_ahead(values: &[f32], direction: f32, img_w: f32, img_h: f32) -> bool {
+    if direction.abs() <= f32::EPSILON {
+        return false;
+    }
+    let Some(dx) = obs_step_up_dx(values, img_w, img_h) else {
+        return false;
+    };
+    if direction > 0.0 {
+        dx > 8.0
+    } else {
+        dx < -8.0
+    }
+}
+
 /// 绳/梯已对齐到可抓取距离（才应 jump+up，避免远处绳梯误跳）。
 pub fn obs_climb_grab_ready(values: &[f32]) -> bool {
     const GRAB_DX: f32 = 20.0 / 1368.0;
@@ -1072,17 +1089,52 @@ mod tests {
     #[test]
     fn jump_allowed_at_platform_edge() {
         let mut v = [0.0_f32; OBS_DIM];
-        // 窄地板仅盖住脚下，不延伸到前方走廊 → 平台边，允许跳。
+        // 窄地板仅盖住脚下，不延伸到前方走廊 → 平台边，但无 step_up 仍不可跳。
         v[OBS_FLOOR_START] = 0.0;
         v[OBS_FLOOR_START + 2] = 8.0 / 1368.0;
         v[OBS_FLOOR_START + 3] = 0.02;
         assert!(obs_floor_underfoot(&v));
         assert!(!obs_floor_ahead(&v, 1.0));
         assert!(obs_jump_allowed(&v, 1.0, false));
+        assert!(!obs_jump_target_ahead(&v, 1.0, 1368.0, 768.0));
         // 宽地板延伸到前方 → 非边缘，禁止无意义跳。
         v[OBS_FLOOR_START + 2] = 200.0 / 1368.0;
         assert!(obs_floor_ahead(&v, 1.0));
         assert!(!obs_jump_allowed(&v, 1.0, false));
+    }
+
+    #[test]
+    fn jump_target_requires_reachable_step_up_not_high_backdrop() {
+        let mut v = [0.0_f32; OBS_DIM];
+        v[OBS_FLOOR_START] = -20.0 / 1368.0;
+        v[OBS_FLOOR_START + 1] = 0.01;
+        v[OBS_FLOOR_START + 2] = 40.0 / 1368.0;
+        v[OBS_FLOOR_START + 3] = 0.02;
+        // 上方太远/太高的一台（>80px），YOLO 能看到但跳不上去。
+        v[OBS_FLOOR_START + OBS_SLOT_DIM] = 0.05;
+        v[OBS_FLOOR_START + OBS_SLOT_DIM + 1] = -0.15;
+        v[OBS_FLOOR_START + OBS_SLOT_DIM + 2] = 0.20;
+        v[OBS_FLOOR_START + OBS_SLOT_DIM + 3] = 0.05;
+        assert!(obs_platform_edge(&v, 1.0));
+        assert!(obs_step_up_dx(&v, 1368.0, 768.0).is_none());
+        assert!(!obs_jump_target_ahead(&v, 1.0, 1368.0, 768.0));
+    }
+
+    #[test]
+    fn jump_target_allows_reachable_step_up() {
+        let mut v = [0.0_f32; OBS_DIM];
+        v[OBS_FLOOR_START] = -20.0 / 1368.0;
+        v[OBS_FLOOR_START + 1] = 0.01;
+        v[OBS_FLOOR_START + 2] = 40.0 / 1368.0;
+        v[OBS_FLOOR_START + 3] = 0.02;
+        let b = OBS_FLOOR_START + OBS_SLOT_DIM;
+        v[b] = 0.10;
+        v[b + 1] = -0.055;
+        v[b + 2] = 0.12;
+        v[b + 3] = 0.04;
+        let dx = obs_step_up_dx(&v, 1368.0, 768.0).expect("reachable step");
+        assert!(dx > 8.0, "step target should be to the right, got {dx}");
+        assert!(obs_jump_target_ahead(&v, 1.0, 1368.0, 768.0));
     }
 
     #[test]

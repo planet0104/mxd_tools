@@ -2,7 +2,9 @@ pub mod action;
 pub mod agent;
 pub mod bot_harness;
 pub mod camera;
+pub mod combat_fsm;
 pub mod config;
+pub mod explore_memory;
 pub mod fitness_core;
 pub mod fitness {
     pub use super::fitness_core::*;
@@ -15,6 +17,7 @@ pub mod map;
 pub mod movement_gate;
 pub mod npc;
 pub mod observation;
+pub mod odometry;
 pub mod rule_bot;
 pub mod self_anchor;
 pub mod sim;
@@ -41,10 +44,12 @@ pub use bot_harness::{
     YoloProbeSummary, DEFAULT_PARALLEL_JOBS, FIRST_PLATFORM_PROBE_TICKS,
 };
 pub use camera::WorldCamera;
+pub use combat_fsm::CombatFsm;
 pub use config::{GameSimConfig, VisionAnchorConfig, VisionPaceConfig};
+pub use explore_memory::{ExploreHints, ExploreMemory};
 pub use fitness::{
-    FitnessPreviewDiag, FitnessShapingConfig, TrainingFitness, IDLE_FORFEIT_GRACE_TICKS,
-    STAGNATION_TICKS,
+    FitnessPreviewDiag, FitnessShapingConfig, TrainingFitness, CURRICULUM_VERTICAL_GEN,
+    EXPLORE_STALL_TICKS,
 };
 pub use headless_vision::{default_yolo_model_path, DeferredCaptureVision, HeadlessVisionEnv};
 pub use human_pace::HumanPace;
@@ -57,7 +62,7 @@ pub use observation::{
     inject_proprioception, obs_climb_grab_ready, obs_climb_hint, obs_enemy_in_attack_range,
     obs_farm_band_enemies, obs_floor_ahead, obs_floor_ahead_connected, obs_floor_drop_ahead,
     obs_floor_underfoot, obs_has_drop, obs_has_ladder_or_rope_signal, obs_has_nearby_platform_enemy,
-    obs_has_platform_enemy, obs_has_same_level_enemy, obs_jump_allowed,
+    obs_has_platform_enemy, obs_has_same_level_enemy, obs_jump_allowed, obs_jump_target_ahead,
     obs_nearest_same_level_enemy_px, obs_step_up_dx, VisionObservation,
     OBS_DIM, OBS_DROP_SLOTS, OBS_DROP_START, OBS_ENEMY_SLOTS, OBS_ENEMY_START, OBS_FLOOR_SLOTS,
     OBS_FLOOR_START, OBS_LADDER_SLOTS, OBS_LADDER_START, OBS_PROPRIO, OBS_PROPRIO_START,

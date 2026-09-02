@@ -82,6 +82,7 @@ pub struct EvalSlot {
     peak_fitness: f32,
     pending_submit_tick: Option<u32>,
     bootstrap_phase: u8,
+    frames_seen: u32,
 }
 
 impl EvalSlot {
@@ -96,6 +97,7 @@ impl EvalSlot {
             peak_fitness: 0.0,
             pending_submit_tick: None,
             bootstrap_phase: 0,
+            frames_seen: 0,
         }
     }
 
@@ -113,6 +115,7 @@ impl EvalSlot {
         self.peak_fitness = 0.0;
         self.pending_submit_tick = None;
         self.bootstrap_phase = 0;
+        self.frames_seen = 0;
     }
 
     fn clear(&mut self) {
@@ -122,6 +125,7 @@ impl EvalSlot {
         self.peak_fitness = 0.0;
         self.pending_submit_tick = None;
         self.bootstrap_phase = 0;
+        self.frames_seen = 0;
     }
 
     fn tick(
@@ -142,6 +146,7 @@ impl EvalSlot {
 
         if let Some(result) = self.worker.poll_result() {
             self.pending_submit_tick = None;
+            self.frames_seen += 1;
             sim.record_vision_loot(&result.step.detections);
             let obs = obs_from_step(sim, &result.step);
             let ocr = result.step.self_player.as_ref().map(|p| (p.x, p.y));
@@ -193,6 +198,19 @@ impl EvalSlot {
 
         if sim.is_episode_over() || self.logic_tick >= max_ticks {
             sim.fitness.finalize_episode();
+            if std::env::var_os("MXD_EP_LOG").is_some() {
+                let d = sim.fitness.preview_diag();
+                eprintln!(
+                    "EP id={} ticks={} frames={} cells={} bands={} score={:.1} conns={}",
+                    self.spawn_id,
+                    self.logic_tick,
+                    self.frames_seen,
+                    d.cells,
+                    d.y_bands,
+                    sim.fitness.score,
+                    driver.genome().connections.len(),
+                );
+            }
             let outcome = EvalOutcome {
                 final_fitness: sim.fitness.score,
                 peak_fitness: self.peak_fitness,
@@ -298,7 +316,9 @@ pub async fn run_parallel_trainer(
             s.next_spawn_id += 1;
             let genome = s.spawn_offspring(spawn_id);
             let episode_seed = cfg.seed.wrapping_add(spawn_id as u64);
-            slots[i].start(map, genome, spawn_id, episode_seed, cfg.shaping);
+            let gen = s.population.generation;
+            let shaping = cfg.shaping.with_curriculum(gen);
+            slots[i].start(map, genome, spawn_id, episode_seed, shaping);
         }
         eprintln!(
             "并行槽已启动: active={} / workers={} 目标局数={}",
@@ -350,7 +370,11 @@ pub async fn run_parallel_trainer(
                         }
                     }
                     if let Some((genome, id, episode_seed)) = start_next {
-                        slot.start(map, genome, id, episode_seed, cfg.shaping);
+                        let gen = {
+                            let s = shared.lock().expect("trainer lock");
+                            s.population.generation
+                        };
+                        slot.start(map, genome, id, episode_seed, cfg.shaping.with_curriculum(gen));
                     }
                 }
             }

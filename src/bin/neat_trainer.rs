@@ -4,7 +4,7 @@
 //! 主线程负责 GL 离屏渲染轮转。个体死亡后立即从 peak 排名前列补位。
 //!
 //! ```powershell
-//! # OBS 含本体反馈后旧基因组不兼容，请始终 --fresh
+//! # OBS 扩维后旧基因组不兼容，请始终 --fresh（当前 NEAT_OBS_DIM=21）
 //! cargo run --release --bin neat_trainer -- --fresh --generations 3000 --population 50 --workers 16 --elite-breed 8 --detect-hz 10 --fitness-shaping 0.5
 //! cargo run --release --bin neat_trainer -- --sequential --generations 50 --population 10
 //! ```
@@ -77,6 +77,8 @@ impl Cli {
             fresh: args.iter().any(|a| a == "--fresh"),
             fitness_shaping: FitnessShapingConfig {
                 memory_weight: arg_f32(args, "--fitness-shaping", 0.5),
+                hint_weight: arg_f32(args, "--hint-shaping", 0.35),
+                vertical_rewards: true,
             },
         }
     }
@@ -308,6 +310,7 @@ async fn run_sequential_trainer(
         let episode_seed = cli.seed.wrapping_add(spawn_id as u64);
 
         let mut scored = genome;
+        let shaping = cli.fitness_shaping.with_curriculum(population.generation);
         let outcome = evaluate_genome(
             &mut vision,
             map,
@@ -315,7 +318,7 @@ async fn run_sequential_trainer(
             episode_seed,
             cli.max_ticks,
             vision_interval,
-            cli.fitness_shaping,
+            shaping,
         )
         .await?;
         scored.fitness = outcome.final_fitness;

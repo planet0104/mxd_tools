@@ -1134,6 +1134,9 @@ impl GameSim {
     }
 
     fn check_mob_touch(&mut self) {
+        if !self.config.mob_damage {
+            return;
+        }
         if self.state.player.invuln_t > 0.0 || self.state.player.hurt_t > 0.0 {
             return;
         }

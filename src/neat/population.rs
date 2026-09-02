@@ -10,7 +10,7 @@ const STALE_SPECIES: u32 = 12;
 const FRESH_FRACTION: f32 = 0.22;
 /// 最优 peak 连续多少次评估未提升，则提高随机注入。
 const BEST_STAGNATION_EVALS: u32 = 80;
-const STAGNANT_FRESH_FRACTION: f32 = 0.55;
+const STAGNANT_FRESH_FRACTION: f32 = 0.25;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Species {
@@ -433,16 +433,14 @@ mod tests {
         let archive = pop.archive();
         assert_eq!(archive.len(), 2);
         assert!(rank_fitness(&archive[0]) > rank_fitness(&archive[1]));
-        assert_eq!(rank_fitness(&archive[0]), 95.0);
+        assert_eq!(rank_fitness(&archive[0]), 96.75);
     }
 
     #[test]
-    fn rank_ignores_peak_entirely() {
-        // 高 peak + 低终局不再有任何加成，也不再额外重罚：排名只看终局。
+    fn rank_blends_peak_when_higher_than_final() {
         let collapsed = scored(1.0, 40.0, 200.0);
         let steady = scored(2.0, 60.0, 60.0);
-        assert_eq!(rank_fitness(&collapsed), 40.0);
-        assert!(rank_fitness(&steady) > rank_fitness(&collapsed));
+        assert!(rank_fitness(&collapsed) > rank_fitness(&steady));
     }
 
     #[test]
@@ -451,7 +449,7 @@ mod tests {
         let walker = scored(2.0, -44.0, 0.0);
         let worse = scored(3.0, -80.0, 0.0);
         assert_eq!(rank_fitness(&lucky), 10.0);
-        assert_eq!(rank_fitness(&walker), -44.0);
+        assert!((rank_fitness(&walker) - (-28.6)).abs() < 0.01);
         assert!(rank_fitness(&walker) > rank_fitness(&worse));
     }
 

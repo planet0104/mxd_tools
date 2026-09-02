@@ -15,11 +15,12 @@ use macroquad::prelude::*;
 use mxd_tools::game::action::input_label;
 use mxd_tools::game::view;
 use mxd_tools::game::{
-    self, DeferredCaptureVision, GameSim, LOGIC_DT, VisionAnchorConfig, VisionPaceConfig,
+    self, DeferredCaptureVision, GameSim, GameSimConfig, LOGIC_DT, VisionAnchorConfig,
+    VisionPaceConfig,
     VisionPipeline, WINDOW_H, WINDOW_W, VISION_CONF_THRESH, OBS_PROPRIO_START,
     obs_climb_grab_ready, obs_enemy_in_attack_range, obs_floor_ahead, obs_has_drop,
     obs_has_ladder_or_rope_signal, obs_has_nearby_platform_enemy, obs_has_platform_enemy,
-    obs_has_same_level_enemy, obs_jump_allowed, obs_nearest_same_level_enemy_px,
+    obs_has_same_level_enemy, obs_jump_target_ahead, obs_nearest_same_level_enemy_px,
 };
 use mxd_tools::neat::{
     BestGenomeSnapshot, NeatDriver, DEFAULT_BEST_GENOME_FILE, DEFAULT_SESSION_BEST_FILE,
@@ -46,6 +47,8 @@ struct Cli {
     quiet: bool,
     /// 额外卡住诊断（OCR 位移/blocked、同层怪、近战等）。
     diag: bool,
+    /// 开砍怪状态机 + 怪物伤害；默认只看寻路。
+    combat: bool,
 }
 
 impl Cli {
@@ -67,6 +70,7 @@ impl Cli {
             watch: !args.iter().any(|a| a == "--no-watch"),
             quiet: args.iter().any(|a| a == "--quiet"),
             diag: args.iter().any(|a| a == "--diag") || !args.iter().any(|a| a == "--no-diag"),
+            combat: args.iter().any(|a| a == "--combat"),
         }
     }
 }
@@ -77,18 +81,30 @@ struct PreviewState {
     logic_tick: u32,
     episode_seed: u64,
     restart_cooldown: f32,
+    combat: bool,
 }
 
 impl PreviewState {
-    fn new(snapshot: BestGenomeSnapshot, map: &game::GameMap, episode_seed: u64) -> Self {
-        let sim = GameSim::new_neat_preview(map.clone(), episode_seed);
+    fn new(
+        snapshot: BestGenomeSnapshot,
+        map: &game::GameMap,
+        episode_seed: u64,
+        combat: bool,
+    ) -> Self {
+        let sim = Self::new_sim(map, episode_seed, combat);
         Self {
             snapshot,
             sim,
             logic_tick: 0,
             episode_seed,
             restart_cooldown: 0.0,
+            combat,
         }
+    }
+
+    fn new_sim(map: &game::GameMap, seed: u64, combat: bool) -> GameSim {
+        let cfg = GameSimConfig::neat_preview().with_mob_damage(combat);
+        GameSim::new_with_config(map.clone(), seed, cfg)
     }
 
     fn reload(&mut self, snapshot: BestGenomeSnapshot, map: &game::GameMap) {
@@ -97,12 +113,12 @@ impl PreviewState {
         } else {
             self.episode_seed
         };
-        *self = Self::new(snapshot, map, seed);
+        *self = Self::new(snapshot, map, seed, self.combat);
     }
 
     fn restart_episode(&mut self, map: &game::GameMap) {
         let seed = self.episode_seed.wrapping_add(self.logic_tick as u64);
-        self.sim = GameSim::new_neat_preview(map.clone(), seed);
+        self.sim = Self::new_sim(map, seed, self.combat);
         self.logic_tick = 0;
         self.restart_cooldown = 0.0;
     }
@@ -240,7 +256,7 @@ fn format_stuck_diag(
     let melee = obs_enemy_in_attack_range(obs, facing);
     let rope = obs_has_ladder_or_rope_signal(obs);
     let climb_ready = obs_climb_grab_ready(obs);
-    let jump_ok = obs_jump_allowed(obs, facing, sim.state.player.climbing);
+    let jump_ok = obs_jump_target_ahead(obs, facing, WINDOW_W, WINDOW_H);
     let floor_l = obs_floor_ahead(obs, -1.0);
     let floor_r = obs_floor_ahead(obs, 1.0);
     let drop = obs_has_drop(obs);
@@ -304,18 +320,13 @@ fn format_stuck_diag(
         tracker.still_streak,
     );
     let line3 = format!(
-        "fit score={:.1} emptyPen={:.0} emptyStk={} blkPen={:.0} touchPen={:.0} explore={:.0} stag={} wallPush={} cleared={} leftSpawn={} yBands={} forfeit={} kills={} mesoEv={}",
+        "fit score={:.1} explore={:.0} stall={} cells={} yBands={} leftSpawn={} forfeit={} kills={} mesoEv={}",
         fit.score,
-        fit.empty_attack_penalty,
-        fit.empty_attack_streak,
-        fit.blocked_walk_penalty,
-        fit.touch_hit_penalty,
         fit.explore_score,
-        fit.stagnation_ticks,
-        fit.wall_push_ticks,
-        fit.band_cleared as u8,
-        fit.left_spawn as u8,
+        fit.explore_stall_ticks,
+        fit.cells,
         fit.y_bands,
+        fit.left_spawn as u8,
         fit.idle_forfeit as u8,
         fit.kills,
         fit.meso_events,
@@ -341,12 +352,13 @@ async fn main() {
     };
 
     eprintln!(
-        "NEAT 预览: rank_fit={:.2} gen={} detect_hz={:.1} genome={} diag={}",
+        "NEAT 预览: rank_fit={:.2} gen={} detect_hz={:.1} genome={} diag={} mode={}",
         snapshot.fitness,
         snapshot.generation,
         cli.pace.detect_hz(),
         cli.genome.display(),
-        cli.diag
+        cli.diag,
+        if cli.combat { "combat" } else { "nav" },
     );
 
     let assets = match view::load_view_assets().await {
@@ -383,8 +395,8 @@ async fn main() {
     } else {
         cli.episode_seed
     };
-    let mut state = PreviewState::new(snapshot.clone(), &map, seed);
-    let mut driver = NeatDriver::new(state.snapshot.genome.clone());
+    let mut state = PreviewState::new(snapshot.clone(), &map, seed, cli.combat);
+    let mut driver = NeatDriver::new(state.snapshot.genome.clone()).with_combat(cli.combat);
     if let Err(e) = driver
         .bootstrap_vision_preview(&mut vision, &mut state.sim, &assets, &rt)
         .await
@@ -442,23 +454,20 @@ async fn main() {
                 let fit = state.sim.fitness.preview_diag();
                 if fit.idle_forfeit {
                     eprintln!(
-                        "EVENT episode_end FORFEIT tick={} score={:.1} wallPush={} stag={} emptyStk={} cleared={} emptyPen={:.0} hp={}",
+                        "EVENT episode_end FORFEIT(explore_stall) tick={} score={:.1} cells={} yBands={} hp={}",
                         state.logic_tick,
                         fit.score,
-                        fit.wall_push_ticks,
-                        fit.stagnation_ticks,
-                        fit.empty_attack_streak,
-                        fit.band_cleared as u8,
-                        fit.empty_attack_penalty,
+                        fit.cells,
+                        fit.y_bands,
                         state.sim.state.player.hp,
                     );
                 } else {
                     eprintln!(
-                        "EVENT episode_end tick={} score={:.1} hp={} cleared={} yBands={}",
+                        "EVENT episode_end tick={} score={:.1} hp={} cells={} yBands={}",
                         state.logic_tick,
                         fit.score,
                         state.sim.state.player.hp,
-                        fit.band_cleared as u8,
+                        fit.cells,
                         fit.y_bands,
                     );
                 }
@@ -492,7 +501,11 @@ async fn main() {
                     let fit = state.sim.fitness.preview_diag();
                     eprintln!(
                         "tick={vtick} act={} input={} live_fit={:.1} rank_fit={:.1} meso={} hp={}/{}",
-                        driver.current_action().map(|a| a.name()).unwrap_or("-"),
+                        if driver.combat_active() {
+                            "COMBAT"
+                        } else {
+                            driver.current_action().map(|a| a.name()).unwrap_or("-")
+                        },
                         input_label(&inp),
                         fit.score,
                         state.snapshot.fitness,

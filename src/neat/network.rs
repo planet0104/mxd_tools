@@ -39,21 +39,37 @@ pub fn evaluate(genome: &Genome, inputs: &[f32]) -> Vec<f32> {
         .collect()
 }
 
-/// 输出层互斥：取最大的一路作为本次动作。
+/// 动作互斥：只在 `allowed` 为 true 的输出里取 argmax。
 ///
-/// 未接线的输出恒为 0，接了线的输出经 sigmoid 恒 > 0，因此「有连接」天然胜出，
-/// 不存在旧版按键位那种左右同时按、up+down 互抵的无效组合。
-pub fn action_from_outputs(outputs: &[f32]) -> MacroAction {
-    let mut best = 0usize;
+/// 未连线的输出恒为 0，已连线的输出 sigmoid 后 > 0，因此「有连接」仍然胜出。
+/// 边缘撞墙等场景由 `MacroRunner::allowed` 屏蔽无效方向，这里不再回退到被禁动作。
+pub fn action_from_outputs(outputs: &[f32], allowed: &[bool; MACRO_ACTION_COUNT]) -> MacroAction {
+    let mut best_idx = None;
     let mut best_v = f32::NEG_INFINITY;
     for i in 0..MACRO_ACTION_COUNT {
+        if !allowed[i] {
+            continue;
+        }
         let v = outputs.get(i).copied().unwrap_or(0.0);
         if v > best_v {
             best_v = v;
-            best = i;
+            best_idx = Some(i);
         }
     }
-    MacroAction::from_index(best)
+    if let Some(i) = best_idx {
+        return MacroAction::from_index(i);
+    }
+    // 全部被屏蔽：仍按原始 argmax，由 begin() 当场判失败。
+    let mut raw_best = 0;
+    let mut raw_v = f32::NEG_INFINITY;
+    for i in 0..MACRO_ACTION_COUNT {
+        let v = outputs.get(i).copied().unwrap_or(0.0);
+        if v > raw_v {
+            raw_v = v;
+            raw_best = i;
+        }
+    }
+    MacroAction::from_index(raw_best)
 }
 
 fn topological_layers(genome: &Genome) -> Vec<Vec<usize>> {
@@ -108,6 +124,8 @@ mod tests {
     use crate::neat::genome::Genome;
     use rand::SeedableRng;
 
+    const ALL: [bool; MACRO_ACTION_COUNT] = [true; MACRO_ACTION_COUNT];
+
     #[test]
     fn outputs_match_action_count() {
         let mut rng = rand::rngs::StdRng::seed_from_u64(64);
@@ -119,16 +137,30 @@ mod tests {
 
     #[test]
     fn action_picks_strongest_output() {
-        let outputs = vec![0.1, 0.2, 0.9, 0.3, 0.4, 0.5];
-        assert_eq!(action_from_outputs(&outputs), MacroAction::Attack);
-        let outputs = vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.95];
-        assert_eq!(action_from_outputs(&outputs), MacroAction::Climb);
+        let outputs = vec![0.1, 0.9, 0.3, 0.4, 0.5];
+        assert_eq!(action_from_outputs(&outputs, &ALL), MacroAction::WalkRight);
+        let outputs = vec![0.1, 0.2, 0.3, 0.4, 0.95];
+        assert_eq!(action_from_outputs(&outputs, &ALL), MacroAction::Climb);
     }
 
     #[test]
     fn unconnected_outputs_lose_to_connected_ones() {
-        // sigmoid(0)=0.5：接了线的输出必然压过恒 0 的未接线输出。
-        let outputs = vec![0.0, 0.0, 0.0, 0.5, 0.0, 0.0];
-        assert_eq!(action_from_outputs(&outputs), MacroAction::JumpLeft);
+        let outputs = vec![0.0, 0.0, 0.5, 0.0, 0.0];
+        assert_eq!(action_from_outputs(&outputs, &ALL), MacroAction::JumpLeft);
+    }
+
+    #[test]
+    fn masked_action_falls_through_to_next_best() {
+        let outputs = vec![0.2, 0.9, 0.6, 0.1, 0.0];
+        let mut allowed = ALL;
+        allowed[MacroAction::WalkRight.index()] = false;
+        assert_eq!(action_from_outputs(&outputs, &allowed), MacroAction::JumpLeft);
+    }
+
+    #[test]
+    fn all_masked_falls_back_to_raw_argmax() {
+        let outputs = vec![0.2, 0.9, 0.6, 0.1, 0.0];
+        let none = [false; MACRO_ACTION_COUNT];
+        assert_eq!(action_from_outputs(&outputs, &none), MacroAction::WalkRight);
     }
 }
