@@ -4,12 +4,12 @@
 //! 去掉了与 explore_mode、perch 耦合的部分。不读任何 sim 状态；朝向记在 FSM 内，
 //! 站砍不出方向键（预览/自动玩靠 attack_auto_face；避免 CD 期间顶进怪）。
 
-use super::input::InputFrame;
-use super::observation::{
+use super::super::input::InputFrame;
+use super::super::observation::{
     obs_assess_enemy_contact, obs_nearest_same_level_enemy_px, obs_platform_edge,
     ENEMY_NEAR_PLATFORM_DX, ENEMY_PLATFORM_DY,
 };
-use super::types::{WINDOW_H, WINDOW_W};
+use super::super::types::{WINDOW_H, WINDOW_W};
 
 /// 进距即砍（略大于挥砍前伸，减少干走到怪身边还不抬刀）。
 const STRIKE_DX_PX: f32 = 110.0;

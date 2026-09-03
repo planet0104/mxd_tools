@@ -1,34 +1,18 @@
-use std::collections::VecDeque;
-
 use super::observation::{
     OBS_DIM, OBS_FLOOR_SLOTS, OBS_FLOOR_START, OBS_LADDER_SLOTS, OBS_LADDER_START, OBS_ROPE_SLOTS,
     OBS_ROPE_START, OBS_SLOT_DIM,
 };
 use super::types::{WINDOW_H, WINDOW_W};
 
-const MAX_SAMPLES: usize = 24;
-const MAX_TRANSITIONS: usize = 18;
-const BLOCKED_TRIGGER: u32 = 8;
-const SEEK_STAGNANT_TRIGGER: u32 = 24;
 /// 低置信度时拒绝的单帧最大位移（px），防止 180px 级误配来回跳。
 const LOW_CONF_MAX_SHIFT: f32 = 48.0;
 const LOW_CONF_MATCHES: u8 = 3;
-/// 视为「换层成功」的最小累计高度变化（px）。
-const HEIGHT_PROGRESS_PX: f32 = 45.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LocationNode {
     pub x: i32,
     pub y: i32,
     pub terrain: u16,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LoopKind {
-    None,
-    Blocked,
-    PingPong,
-    SeekStagnant,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -133,158 +117,6 @@ pub fn location_node(x: f32, y: f32, obs: &[f32; OBS_DIM]) -> LocationNode {
         x: (x / 64.0).floor() as i32,
         y: (y / 64.0).floor() as i32,
         terrain: terrain_fingerprint(&frame_features(obs)),
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct ProgressSample {
-    x: f32,
-    y: f32,
-}
-
-#[derive(Debug, Clone)]
-pub struct VisualProgressMonitor {
-    samples: VecDeque<ProgressSample>,
-    transitions: VecDeque<LocationNode>,
-    last_node: Option<LocationNode>,
-    blocked_ticks: u32,
-    seek_stagnant_ticks: u32,
-    last_y_cell: i32,
-    kind: LoopKind,
-    pub net_distance: f32,
-    pub path_distance: f32,
-    pub span_x: f32,
-    pub span_y: f32,
-}
-
-impl Default for VisualProgressMonitor {
-    fn default() -> Self {
-        Self {
-            samples: VecDeque::new(),
-            transitions: VecDeque::new(),
-            last_node: None,
-            blocked_ticks: 0,
-            seek_stagnant_ticks: 0,
-            last_y_cell: 0,
-            kind: LoopKind::None,
-            net_distance: 0.0,
-            path_distance: 0.0,
-            span_x: 0.0,
-            span_y: 0.0,
-        }
-    }
-}
-
-impl VisualProgressMonitor {
-    pub fn update(
-        &mut self,
-        x: f32,
-        y: f32,
-        node: LocationNode,
-        seeking: bool,
-        commanded_locomotion: bool,
-    ) {
-        let previous = self.samples.back().copied();
-        let moved = previous
-            .map(|p| (x - p.x).abs() + (y - p.y).abs())
-            .unwrap_or_default();
-
-        if commanded_locomotion && moved < 3.0 {
-            self.blocked_ticks = self.blocked_ticks.saturating_add(1);
-        } else if moved >= 3.0 {
-            self.blocked_ticks = 0;
-        }
-
-        if seeking {
-            self.seek_stagnant_ticks = self.seek_stagnant_ticks.saturating_add(1);
-        } else {
-            self.seek_stagnant_ticks = 0;
-        }
-
-        let height_progress = self
-            .samples
-            .front()
-            .map(|first| (y - first.y).abs() >= HEIGHT_PROGRESS_PX)
-            .unwrap_or(false);
-        let made_progress = height_progress;
-        if made_progress {
-            self.blocked_ticks = 0;
-            self.seek_stagnant_ticks = 0;
-            self.samples.clear();
-            self.transitions.clear();
-            self.kind = LoopKind::None;
-        }
-        self.last_y_cell = node.y;
-
-        if self.last_node != Some(node) {
-            self.transitions.push_back(node);
-            while self.transitions.len() > MAX_TRANSITIONS {
-                self.transitions.pop_front();
-            }
-            self.last_node = Some(node);
-        }
-
-        self.samples.push_back(ProgressSample { x, y });
-        while self.samples.len() > MAX_SAMPLES {
-            self.samples.pop_front();
-        }
-        self.recompute();
-
-        self.kind = if self.blocked_ticks >= BLOCKED_TRIGGER {
-            LoopKind::Blocked
-        } else if self.is_ping_pong() {
-            LoopKind::PingPong
-        } else if seeking && self.seek_stagnant_ticks >= SEEK_STAGNANT_TRIGGER && self.span_y < 40.0
-        {
-            LoopKind::SeekStagnant
-        } else {
-            LoopKind::None
-        };
-    }
-
-    pub fn kind(&self) -> LoopKind {
-        self.kind
-    }
-
-    pub fn clear_loop(&mut self) {
-        self.kind = LoopKind::None;
-        self.blocked_ticks = 0;
-        self.seek_stagnant_ticks = 0;
-        self.samples.clear();
-        self.transitions.clear();
-    }
-
-    fn is_ping_pong(&self) -> bool {
-        self.samples.len() >= 12
-            && self.path_distance >= 240.0
-            && self.span_x >= 80.0
-            && self.span_y < 45.0
-            && self.net_distance < 60.0
-            && self.transitions.len() >= 4
-    }
-
-    fn recompute(&mut self) {
-        let Some(first) = self.samples.front().copied() else {
-            return;
-        };
-        let last = self.samples.back().copied().unwrap_or(first);
-        self.net_distance = (last.x - first.x).abs() + (last.y - first.y).abs();
-        self.path_distance = 0.0;
-        let mut min_x = first.x;
-        let mut max_x = first.x;
-        let mut min_y = first.y;
-        let mut max_y = first.y;
-        let mut prev = first;
-        for sample in self.samples.iter().copied().skip(1) {
-            self.path_distance += (sample.x - prev.x).abs() + (sample.y - prev.y).abs();
-            min_x = min_x.min(sample.x);
-            max_x = max_x.max(sample.x);
-            min_y = min_y.min(sample.y);
-            max_y = max_y.max(sample.y);
-            prev = sample;
-        }
-        self.span_x = max_x - min_x;
-        self.span_y = max_y - min_y;
     }
 }
 
@@ -465,49 +297,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn normal_slow_walk_is_not_ping_pong() {
-        let mut monitor = VisualProgressMonitor::default();
-        for i in 0..24 {
-            let x = i as f32 * 10.0;
-            monitor.update(x, 0.0, node(x, 0.0), false, true);
-        }
-        assert_eq!(monitor.kind(), LoopKind::None);
-    }
 
-    #[test]
-    fn detects_platform_ping_pong() {
-        let mut monitor = VisualProgressMonitor::default();
-        let xs = [
-            320.0, 360.0, 400.0, 440.0, 480.0, 520.0, 480.0, 440.0, 400.0, 360.0, 320.0, 360.0,
-            400.0, 440.0, 480.0, 520.0, 480.0, 440.0, 400.0, 360.0, 320.0,
-        ];
-        for x in xs {
-            monitor.update(x, 1105.0, node(x, 1105.0), true, true);
-        }
-        assert_eq!(monitor.kind(), LoopKind::PingPong);
-    }
 
-    #[test]
-    fn detects_commanded_but_unmoving() {
-        let mut monitor = VisualProgressMonitor::default();
-        for _ in 0..10 {
-            monitor.update(100.0, 100.0, node(100.0, 100.0), false, true);
-        }
-        assert_eq!(monitor.kind(), LoopKind::Blocked);
-    }
 
-    #[test]
-    fn location_history_records_reentry_not_frames() {
-        let mut monitor = VisualProgressMonitor::default();
-        for _ in 0..12 {
-            monitor.update(100.0, 100.0, node(100.0, 100.0), false, false);
-        }
-        assert_eq!(monitor.transitions.len(), 1);
-        monitor.update(180.0, 100.0, node(180.0, 100.0), false, false);
-        monitor.update(100.0, 100.0, node(100.0, 100.0), false, false);
-        assert_eq!(monitor.transitions.len(), 3);
-    }
 
     #[test]
     fn rejects_low_confidence_large_shift() {
@@ -529,14 +321,5 @@ mod tests {
         );
     }
 
-    #[test]
-    fn height_change_clears_loop() {
-        let mut monitor = VisualProgressMonitor::default();
-        for _ in 0..10 {
-            monitor.update(100.0, 100.0, node(100.0, 100.0), true, true);
-        }
-        assert_eq!(monitor.kind(), LoopKind::Blocked);
-        monitor.update(100.0, 180.0, node(100.0, 180.0), true, true);
-        assert_eq!(monitor.kind(), LoopKind::None);
-    }
+
 }

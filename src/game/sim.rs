@@ -3,7 +3,6 @@ use rand::{Rng, SeedableRng};
 
 use crate::game::camera::WorldCamera;
 use crate::game::config::GameSimConfig;
-use crate::game::fitness::TrainingFitness;
 use crate::game::input::InputFrame;
 use crate::game::map::{GameMap, WalkAhead};
 use crate::game::movement_gate::{MovementGate, MovementGateCtx};
@@ -156,7 +155,6 @@ pub struct GameSim {
     /// 训练用装饰玩家（YOLO「玩家」干扰，OCR 排除自身）
     pub npc_players: Vec<NpcPlayerState>,
     pub movement_gate: MovementGate,
-    pub fitness: TrainingFitness,
     /// NavBot 执行 StepUp 时强制允许跳上台阶（不依赖物理 nearest_step 探针）。
     pub force_allow_step_up: bool,
     /// NavBot GoTo/Patrol：物理可走时放行左右（不被 YOLO 碎地板挡）。
@@ -181,16 +179,6 @@ impl GameSim {
     /// 预览模式：自动玩环境 + 受击不死，便于持续观察。
     pub fn new_preview(map: GameMap, seed: u64) -> Self {
         Self::new_with_config(map, seed, GameSimConfig::preview())
-    }
-
-    /// NEAT 预览：无 MovementGate，与训练感知约束一致。
-    pub fn new_neat_preview(map: GameMap, seed: u64) -> Self {
-        Self::new_with_config(map, seed, GameSimConfig::neat_preview())
-    }
-
-    /// NEAT 训练：装饰 NPC、波次刷怪、视觉适应度计分。
-    pub fn new_training(map: GameMap, seed: u64) -> Self {
-        Self::new_with_config(map, seed, GameSimConfig::training())
     }
 
     pub fn new_with_config(map: GameMap, seed: u64, config: GameSimConfig) -> Self {
@@ -243,7 +231,6 @@ impl GameSim {
             episode_seed: seed,
             npc_players: Vec::new(),
             movement_gate: MovementGate::default(),
-            fitness: TrainingFitness::default(),
             force_allow_step_up: false,
             force_allow_nav_walk: false,
             jump_prev: false,
@@ -413,12 +400,8 @@ impl GameSim {
         }
     }
 
-    /// 每帧 YOLO 感知后调用，记录可见掉落框供适应度计分。
-    pub fn record_vision_loot(&mut self, detections: &[Detection]) {
-        if self.config.training {
-            self.fitness.record_visible_drops(detections);
-        }
-    }
+    /// 每帧 YOLO 感知后调用（NavBot 预留钩子，当前无计分逻辑）。
+    pub fn record_vision_loot(&mut self, _detections: &[Detection]) {}
 
     /// 玩家是否已死亡（HP 归零）。
     pub fn is_episode_over(&self) -> bool {
@@ -561,22 +544,6 @@ impl GameSim {
         }
         self.tick_player(&effective, dt);
         self.jump_prev = effective.jump;
-        if self.config.training {
-            let (px, py) = (self.state.player.x, self.state.player.y);
-            let grounded = self.state.player.on_ground;
-            let climbing = self.state.player.climbing;
-            if self
-                .fitness
-                .tick_stagnation(px, py, self.state.tick, grounded, climbing)
-                || self.fitness.idle_forfeit
-            {
-                // 预览：认输结束本局，但不把 HP 置 0（避免看起来像「被怪砍死」）。
-                if !self.config.preview {
-                    self.state.player.hp = 0;
-                }
-                self.state.modal = GameModal::GameOver;
-            }
-        }
         if self.config.bot_play {
             npc::tick_npc_players(
                 &mut self.npc_players,
@@ -1098,8 +1065,6 @@ impl GameSim {
         let p = &self.state.player;
         let (x1, x2, y1, y2) = Self::player_melee_aabb(p);
         let mut loot: Vec<(f32, f32)> = Vec::new();
-        let mut hits = 0u32;
-        let mut kills = 0u32;
         for mob in &mut self.state.mobs {
             if !mob.alive {
                 continue;
@@ -1110,23 +1075,13 @@ impl GameSim {
                 mob.anim = MobAnim::Hit;
                 let kb = 28.0 * p.facing;
                 mob.x += kb;
-                hits += 1;
                 if mob.hp <= 0 {
                     mob.alive = false;
                     mob.die_t = 0.5;
                     mob.anim = MobAnim::Die;
                     self.state.kills += 1;
-                    kills += 1;
                     loot.push((mob.x, mob.y));
                 }
-            }
-        }
-        if self.config.training {
-            for _ in 0..hits {
-                self.fitness.record_mob_hit(self.state.tick);
-            }
-            for _ in 0..kills {
-                self.fitness.record_mob_kill(self.state.tick);
             }
         }
         for (x, y) in loot {
@@ -1135,14 +1090,9 @@ impl GameSim {
     }
 
     fn spawn_loot(&mut self, x: f32, y: f32) {
-        let training = self.config.training;
-        let meso_piles = if training {
-            self.rng
-                .gen_range(TRAINING_MESO_PILES_MIN..=TRAINING_MESO_PILES_MAX)
-        } else {
-            self.rng
-                .gen_range(NORMAL_MESO_PILES_MIN..=NORMAL_MESO_PILES_MAX)
-        };
+        let meso_piles = self
+            .rng
+            .gen_range(NORMAL_MESO_PILES_MIN..=NORMAL_MESO_PILES_MAX);
         for i in 0..meso_piles {
             let offset = if meso_piles > 1 {
                 (i as f32 - (meso_piles as f32 - 1.0) * 0.5) * 18.0
@@ -1157,8 +1107,8 @@ impl GameSim {
                 bob_t: i as f32 * 0.15,
             });
         }
-        // bot_play / training 与小游戏统一：药水稀有，主掉落是金币
-        let potion_chance = if training || self.config.bot_play {
+        // bot_play 与小游戏统一：药水稀有，主掉落是金币
+        let potion_chance = if self.config.bot_play {
             TRAINING_POTION_DROP_CHANCE
         } else {
             NORMAL_POTION_DROP_CHANCE
@@ -1221,13 +1171,9 @@ impl GameSim {
 
         self.state.touch_hits = self.state.touch_hits.saturating_add(1);
         let tick = self.state.tick;
-        if self.config.training {
-            self.fitness.record_player_hurt(damage);
-        }
         self.state.player.x = Self::safe_hurt_knockback_x(&self.map, old_x, feet_y, knock_dir);
 
-        // NEAT 训练时关掉逐帧伤害日志，避免并行刷屏；预览/规则 bot 仍打印。
-        if self.config.preview || (self.config.bot_play && !self.config.training) {
+        if self.config.preview || self.config.bot_play {
             eprintln!(
                 "DMG tick={} touch -{} hp {}→{} hits={} player=({:.0},{:.0}) mob_dx={:.0} facing={}",
                 tick,
@@ -1325,33 +1271,10 @@ impl GameSim {
             }
             match drop.kind {
                 DropKind::Meso => {
-                    let amount = if self.config.training {
-                        self.rng
-                            .gen_range(TRAINING_MESO_AMOUNT_MIN..=TRAINING_MESO_AMOUNT_MAX)
-                    } else {
-                        self.rng.gen_range(1..=5)
-                    };
-                    if self.config.training {
-                        self.fitness.try_score_pickup(
-                            DropKind::Meso,
-                            drop.x,
-                            drop.y,
-                            amount,
-                            self.state.tick,
-                        );
-                    }
+                    let amount = self.rng.gen_range(1..=5);
                     self.state.meso += amount;
                 }
                 DropKind::RedPotion => {
-                    if self.config.training {
-                        self.fitness.try_score_pickup(
-                            DropKind::RedPotion,
-                            drop.x,
-                            drop.y,
-                            0,
-                            self.state.tick,
-                        );
-                    }
                     self.state.potions += 1;
                 }
             }

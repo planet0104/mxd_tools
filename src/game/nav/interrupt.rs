@@ -1,6 +1,6 @@
-use super::super::combat_fsm::CombatFsm;
 use super::super::input::InputFrame;
 use super::super::observation::obs_enemy_in_attack_range_platform;
+use super::combat_fsm::CombatFsm;
 use super::types::{merge_frames, SubGoal};
 
 pub struct InterruptArbiter;

@@ -1,6 +1,7 @@
 //! Headless NavBot 多局探针：离屏渲染 + 真实 YOLO/OCR 观测（与 game_preview 一致）。
 
 use std::collections::HashSet;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
@@ -9,16 +10,22 @@ use super::headless_vision::HeadlessVisionEnv;
 use super::human_pace::HumanPace;
 use super::input::InputFrame;
 use super::map::GameMap;
-use super::explore_memory::visit_key;
 use super::nav::{GlobalStuckWatchdog, NavBot, NavBotConfig};
 use super::observation::{
     obs_assess_enemy_contact, obs_enemy_in_attack_range, obs_has_enemy, obs_platform_edge, OBS_DIM,
     OBS_ENEMY_SLOTS, OBS_ENEMY_START, OBS_SLOT_DIM,
 };
-use super::vision_sense::VisionSenseState;
 use super::sim::GameSim;
 use super::types::{LOGIC_DT, LOGIC_HZ};
-use std::time::{Duration, Instant};
+use super::vision_sense::VisionSenseState;
+
+/// 高度带网格（探测首层平台用）。
+fn visit_key(x: f32, y: f32) -> (i32, i32) {
+    (
+        (x / 80.0).floor() as i32,
+        (y / 120.0).floor() as i32,
+    )
+}
 
 /// 首平台探针逻辑时长（60Hz × 90s，与 headless / game_preview 探针一致）。
 pub const FIRST_PLATFORM_PROBE_TICKS: u32 = 5_400;

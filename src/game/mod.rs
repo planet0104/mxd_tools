@@ -1,24 +1,15 @@
 pub mod action;
-pub mod agent;
 pub mod bot_harness;
 pub mod camera;
-pub mod combat_fsm;
 pub mod config;
-pub mod explore_memory;
-pub mod fitness_core;
-pub mod fitness {
-    pub use super::fitness_core::*;
-}
 pub mod headless_vision;
 pub mod human_pace;
 pub mod input;
-pub mod macro_action;
 pub mod map;
 pub mod movement_gate;
 pub mod nav;
 pub mod npc;
 pub mod observation;
-pub mod odometry;
 pub mod self_anchor;
 pub mod sim;
 pub mod sim_observation;
@@ -34,7 +25,6 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 pub use action::{action_to_input, input_label, Action};
-pub use agent::{AgentController, VisionWorkerTiming};
 pub use bot_harness::{
     assert_yolo_probes, assert_yolo_probes_with, build_parallel_episode_jobs,
     build_parallel_probe_jobs, default_parallel_episode_seeds, default_probe_seeds,
@@ -45,20 +35,13 @@ pub use bot_harness::{
     YoloProbeSet, YoloProbeSummary, DEFAULT_PARALLEL_JOBS, FIRST_PLATFORM_PROBE_TICKS,
 };
 pub use camera::WorldCamera;
-pub use combat_fsm::CombatFsm;
 pub use config::{GameSimConfig, VisionAnchorConfig, VisionPaceConfig};
-pub use explore_memory::{visit_key, ExploreHints, ExploreMemory};
-pub use fitness::{
-    FitnessPreviewDiag, FitnessShapingConfig, TrainingFitness, CURRICULUM_VERTICAL_GEN,
-    EXPLORE_STALL_TICKS,
-};
 pub use headless_vision::{default_yolo_model_path, DeferredCaptureVision, HeadlessVisionEnv};
 pub use human_pace::HumanPace;
 pub use input::InputFrame;
-pub use macro_action::{MacroAction, MacroRunner, MACRO_ACTION_COUNT};
 pub use map::{ClimbDir, ClimbHint, GameMap, Portal};
 pub use movement_gate::{MovementGate, MovementGateCtx};
-pub use nav::{MapGraph, NavBot, NavBotConfig, NavCtx, SubGoal};
+pub use nav::{CombatFsm, MapGraph, NavBot, NavBotConfig, NavCtx, SubGoal};
 pub use npc::NpcPlayerState;
 pub use observation::{
     inject_proprioception, obs_climb_grab_ready, obs_climb_hint, obs_enemy_in_attack_range,
@@ -82,7 +65,7 @@ pub use types::{
 pub use vision::{
     assert_training_frame, filter_detections, SimVisionSnapshot, VisionPipeline, VisionStep,
 };
-pub use visual_progress::{LocationNode, LoopKind, VisualMotionEstimator, VisualProgressMonitor};
+pub use visual_progress::{LocationNode, VisualMotionEstimator};
 
 pub fn assets_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets")

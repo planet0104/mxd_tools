@@ -1,3 +1,63 @@
+/// 游戏 / NavBot 运行配置。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GameSimConfig {
+    /// 自动玩模式：装饰 NPC、波次刷怪、零初始药水。
+    pub bot_play: bool,
+    /// 预览模式：受击 HP 最低保留 1，便于持续观察 bot。
+    pub preview: bool,
+    /// 在多平台候选点中按 episode_seed 随机出生。
+    pub random_player_spawn: bool,
+    /// 规则 bot 输入门控。
+    pub movement_gate: bool,
+    /// 挥砍时自动转向最近同层怪。
+    pub attack_auto_face: bool,
+    /// 怪物碰触是否掉血。
+    pub mob_damage: bool,
+}
+
+impl Default for GameSimConfig {
+    fn default() -> Self {
+        Self {
+            bot_play: false,
+            preview: false,
+            random_player_spawn: false,
+            movement_gate: false,
+            attack_auto_face: true,
+            mob_damage: true,
+        }
+    }
+}
+
+impl GameSimConfig {
+    pub fn bot_play() -> Self {
+        Self {
+            bot_play: true,
+            preview: false,
+            random_player_spawn: super::types::TRAINING_RANDOM_PLAYER_SPAWN,
+            movement_gate: true,
+            attack_auto_face: true,
+            mob_damage: true,
+        }
+    }
+
+    /// 与自动玩相同环境，但不因 HP 归零结束。
+    pub fn preview() -> Self {
+        Self {
+            bot_play: true,
+            preview: true,
+            random_player_spawn: super::types::TRAINING_RANDOM_PLAYER_SPAWN,
+            movement_gate: true,
+            attack_auto_face: true,
+            mob_damage: true,
+        }
+    }
+
+    pub fn with_mob_damage(mut self, on: bool) -> Self {
+        self.mob_damage = on;
+        self
+    }
+}
+
 /// 自身锚点配置（YOLO+OCR 模式：OCR 脚点 ± 抖动，模拟定位偏差）。
 #[derive(Debug, Clone, Copy)]
 pub struct VisionAnchorConfig {
@@ -26,97 +86,6 @@ impl VisionAnchorConfig {
 
     pub fn uses_anchor_jitter(&self) -> bool {
         self.anchor_jitter_px > 0.0
-    }
-}
-
-/// 游戏 / 规则 bot / NEAT 训练运行配置。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct GameSimConfig {
-    /// 自动玩模式：装饰 NPC、波次刷怪、零初始药水。
-    pub bot_play: bool,
-    /// 预览模式：受击 HP 最低保留 1，便于持续观察 bot。
-    pub preview: bool,
-    /// NEAT 训练模式：启用视觉适应度计分、HP 归零结束。
-    pub training: bool,
-    /// 在多平台候选点中按 episode_seed 随机出生。
-    pub random_player_spawn: bool,
-    /// 规则 bot 输入门控；NEAT 训练/预览必须关闭（部署无此通道）。
-    pub movement_gate: bool,
-    /// 挥砍时自动转向最近同层怪。NEAT 训练/预览必须关闭，否则单向狂砍也能打中。
-    pub attack_auto_face: bool,
-    /// 怪物碰触是否掉血。NEAT 只练寻路时关闭，避免个体因被怪撞死而拿不到探索分。
-    pub mob_damage: bool,
-}
-
-impl Default for GameSimConfig {
-    fn default() -> Self {
-        Self {
-            bot_play: false,
-            preview: false,
-            training: false,
-            random_player_spawn: false,
-            movement_gate: false,
-            attack_auto_face: true,
-            mob_damage: true,
-        }
-    }
-}
-
-impl GameSimConfig {
-    pub fn bot_play() -> Self {
-        Self {
-            bot_play: true,
-            preview: false,
-            training: false,
-            random_player_spawn: super::types::TRAINING_RANDOM_PLAYER_SPAWN,
-            movement_gate: true,
-            attack_auto_face: true,
-            mob_damage: true,
-        }
-    }
-
-    /// 与自动玩相同环境，但不因 HP 归零结束。
-    pub fn preview() -> Self {
-        Self {
-            bot_play: true,
-            preview: true,
-            training: false,
-            random_player_spawn: super::types::TRAINING_RANDOM_PLAYER_SPAWN,
-            movement_gate: true,
-            attack_auto_face: true,
-            mob_damage: true,
-        }
-    }
-
-    /// NEAT 训练：自动玩环境 + 视觉适应度；无 MovementGate；只练寻路，不受怪物伤害。
-    pub fn training() -> Self {
-        Self {
-            bot_play: true,
-            preview: false,
-            training: true,
-            random_player_spawn: super::types::TRAINING_RANDOM_PLAYER_SPAWN,
-            movement_gate: false,
-            attack_auto_face: false,
-            mob_damage: false,
-        }
-    }
-
-    /// NEAT 预览：与训练同感知约束；开 training 计分便于 diag 对照。默认寻路预览（无伤害）。
-    pub fn neat_preview() -> Self {
-        Self {
-            bot_play: true,
-            preview: true,
-            training: true,
-            random_player_spawn: super::types::TRAINING_RANDOM_PLAYER_SPAWN,
-            movement_gate: false,
-            attack_auto_face: false,
-            mob_damage: false,
-        }
-    }
-
-    pub fn with_mob_damage(mut self, on: bool) -> Self {
-        self.mob_damage = on;
-        self
     }
 }
 
