@@ -1,7 +1,8 @@
 //! 砍怪状态机：纯 YOLO 槽位驱动，代码主动激活，本台怪清完自动交还寻路。
 //!
 //! 逻辑取自 rule_bot::try_combat 的核心分支（接触必砍 / 进距站砍 / 中距接近 / 悬崖不追），
-//! 去掉了与 explore_mode、perch 耦合的部分。不读任何 sim 状态，朝向由自己下过的方向键推出。
+//! 去掉了与 explore_mode、perch 耦合的部分。不读任何 sim 状态；朝向记在 FSM 内，
+//! 站砍不出方向键（预览/自动玩靠 attack_auto_face；避免 CD 期间顶进怪）。
 
 use super::input::InputFrame;
 use super::observation::{
@@ -10,8 +11,8 @@ use super::observation::{
 };
 use super::types::{WINDOW_H, WINDOW_W};
 
-/// 进距即砍（与挥砍前伸 ~90px 对齐）。
-const STRIKE_DX_PX: f32 = 90.0;
+/// 进距即砍（略大于挥砍前伸，减少干走到怪身边还不抬刀）。
+const STRIKE_DX_PX: f32 = 110.0;
 /// 连续多少个感知帧无本台怪才退出（≈48 tick，与清层判定一致）。
 const CLEAR_FRAMES: u32 = 8;
 /// 一刀的节奏：攻击冷却 0.35s≈21 tick，按键只给前 3 tick。
@@ -20,11 +21,11 @@ const SWING_PRESS_TICKS: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Step {
-    /// 站砍：出刀 tick 同时按朝向键，保证每一刀都朝着怪。
+    /// 站砍：只出刀，不按左右（避免 CD/硬直外顶进怪）。
     Strike(f32),
     /// 中距接近。
     Approach(f32),
-    /// 站着不动（怪在悬崖对面 / 暂时看不到）。
+    /// 站着不动（怪在悬崖对面）。
     Hold,
 }
 
@@ -91,33 +92,36 @@ impl CombatFsm {
             } else {
                 self.facing
             };
+            self.facing = toward;
             Step::Strike(toward)
         } else if let Some((dx, _)) = target {
             let toward = if dx >= 0.0 { 1.0 } else { -1.0 };
+            self.facing = toward;
             if dx.abs() <= STRIKE_DX_PX {
                 Step::Strike(toward)
             } else if dx.abs() <= engage_dx && !obs_platform_edge(obs, toward) {
+                // 只追到挥砍外缘；过近交给 Strike 站砍，避免贴怪推进。
                 Step::Approach(toward)
             } else {
                 Step::Hold
             }
         } else {
-            Step::Hold
+            // YOLO 闪断：仍 active 时续砍，避免导航接手穿过怪。
+            Step::Strike(self.facing)
         };
     }
 
     /// 每个 sim tick 调用；仅在 `is_active()` 时使用其输出。
     pub fn next_frame(&mut self) -> InputFrame {
         let mut f = InputFrame {
-            pick_up: true,
             ..Default::default()
         };
         match self.step {
             Step::Strike(toward) => {
+                self.facing = toward;
+                // 只攻击不推位移：CD 未好时若带方向会真的走进怪。
                 if self.swing_ticks % SWING_PERIOD_TICKS < SWING_PRESS_TICKS {
                     f.attack = true;
-                    set_dir(&mut f, toward);
-                    self.facing = toward;
                 }
                 self.swing_ticks += 1;
             }
@@ -180,7 +184,7 @@ mod tests {
     }
 
     #[test]
-    fn strikes_toward_close_enemy_on_the_left() {
+    fn strikes_close_enemy_without_walking() {
         let mut obs = [0.0_f32; OBS_DIM];
         floor_under(&mut obs);
         enemy(&mut obs, 0, -60.0, 0.0);
@@ -189,7 +193,8 @@ mod tests {
         assert!(fsm.is_active());
         let f = fsm.next_frame();
         assert!(f.attack);
-        assert!(f.left && !f.right, "出刀 tick 必须同时按朝向键");
+        assert!(!f.left && !f.right, "站砍不得推位移");
+        assert!(fsm.facing < 0.0, "内部朝向应对准左侧怪");
     }
 
     #[test]
@@ -200,11 +205,12 @@ mod tests {
         let mut fsm = CombatFsm::default();
         fsm.observe(&obs);
         for _ in 0..SWING_PRESS_TICKS {
-            assert!(fsm.next_frame().attack);
+            let f = fsm.next_frame();
+            assert!(f.attack && !f.left && !f.right);
         }
         for _ in SWING_PRESS_TICKS..SWING_PERIOD_TICKS {
             let f = fsm.next_frame();
-            assert!(!f.attack && !f.right, "冷却期间站着不动");
+            assert!(!f.attack && !f.right && !f.left, "冷却期间站着不动");
         }
         assert!(fsm.next_frame().attack, "冷却结束再出一刀");
     }
@@ -244,16 +250,33 @@ mod tests {
     }
 
     #[test]
-    fn contact_from_behind_turns_to_that_side() {
+    fn contact_from_behind_faces_that_side_internally() {
         let mut obs = [0.0_f32; OBS_DIM];
         floor_under(&mut obs);
-        // 怪在身后左侧、接触盒重叠。
         enemy(&mut obs, 0, -20.0, 0.0);
         let mut fsm = CombatFsm::default();
         fsm.facing = 1.0;
         fsm.observe(&obs);
         let f = fsm.next_frame();
-        assert!(f.attack && f.left);
+        assert!(f.attack && !f.left && !f.right);
+        assert!(fsm.facing < 0.0);
+    }
+
+    #[test]
+    fn sticky_strike_while_yolo_flickers() {
+        let mut obs = [0.0_f32; OBS_DIM];
+        floor_under(&mut obs);
+        enemy(&mut obs, 0, 50.0, 0.0);
+        let mut fsm = CombatFsm::default();
+        fsm.observe(&obs);
+        assert!(fsm.next_frame().attack);
+        let mut empty = [0.0_f32; OBS_DIM];
+        floor_under(&mut empty);
+        fsm.observe(&empty);
+        assert!(fsm.is_active());
+        let f = fsm.next_frame();
+        assert!(!f.left && !f.right);
+        assert!(matches!(fsm.step, Step::Strike(_)));
     }
 
     #[test]
@@ -269,6 +292,10 @@ mod tests {
         for _ in 0..CLEAR_FRAMES - 1 {
             fsm.observe(&empty);
             assert!(fsm.is_active(), "YOLO 闪断不应立刻退出");
+            assert!(
+                matches!(fsm.step, Step::Strike(_)),
+                "闪断期间应续砍"
+            );
         }
         fsm.observe(&empty);
         assert!(!fsm.is_active());

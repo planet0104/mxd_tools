@@ -2,6 +2,7 @@
 //!
 //! 每槽固定 4 维几何量 `(Δx/W, Δy/H, w/W, h/H)`，**不含类别 one-hot**。
 //! YOLO 类别名仅用于筛选进哪组槽位（敌人/地板/梯绳等），编码内容一律是位置+大小。
+//! 掉落特例：药水槽的 `w` 取负号（`obs_drop_is_meso`），便于拾取优先金币。
 
 use crate::player_name::NamedPlayerHit;
 use crate::yolo::Detection;
@@ -38,7 +39,7 @@ const LADDER: &str = "梯子";
 const ROPE: &str = "绳子";
 const ENEMY_LABELS: [&str; 5] = ["花蘑菇", "蓝蜗牛", "绿蜗牛", "红蜗牛", "树怪"];
 /// 敌人槽位：五类怪物在 YOLO 侧合并为「敌人」，只编码框的几何，不区分种类。
-const DROP_LABELS: [&str; 2] = ["金币", "药水"];
+/// 掉落：金币/药水由 `fill_drop_slots` 单独填充；药水槽 w 取负号区分种类。
 
 #[derive(Debug, Clone)]
 pub struct VisionObservation {
@@ -95,17 +96,15 @@ impl VisionObservation {
             OBS_ENEMY_SLOTS,
             SlotAnchor::Foot,
         );
-        offset = fill_nearest_slots(
+        offset = fill_drop_slots(
             &mut obs.values,
             offset,
             detections,
-            |d| DROP_LABELS.contains(&d.label),
             ax,
             ay,
             img_w,
             img_h,
             OBS_DROP_SLOTS,
-            SlotAnchor::Center,
         );
         offset = fill_nearest_slots(
             &mut obs.values,
@@ -140,13 +139,18 @@ impl VisionObservation {
 pub fn obs_slot_active(values: &[f32], slot_start: usize, slot_count: usize) -> bool {
     for i in 0..slot_count {
         let base = slot_start + i * OBS_SLOT_DIM;
-        if values.get(base + 2).copied().unwrap_or(0.0) > 1e-4
-            || values.get(base + 3).copied().unwrap_or(0.0) > 1e-4
+        if values.get(base + 2).copied().unwrap_or(0.0).abs() > 1e-4
+            || values.get(base + 3).copied().unwrap_or(0.0).abs() > 1e-4
         {
             return true;
         }
     }
     false
+}
+
+/// 掉落槽宽度符号：正=金币，负=药水（不增加 OBS 维数）。
+pub fn obs_drop_is_meso(w: f32) -> bool {
+    w > 0.0
 }
 
 pub fn obs_has_enemy(values: &[f32]) -> bool {
@@ -699,12 +703,21 @@ pub fn obs_platform_edge(values: &[f32], facing: f32) -> bool {
     obs_floor_underfoot(values) && !obs_floor_ahead(values, facing.signum())
 }
 
-/// 允许跳跃：仅平台边缘（行进方向前方无地板）。上方/backdrop 平台不算。
+/// 允许跳跃：平台边缘，或行进方向存在同层缝隙（对面台可见但不衔接）。
 pub fn obs_jump_allowed(values: &[f32], facing: f32, climbing: bool) -> bool {
     if climbing {
         return true;
     }
-    obs_platform_edge(values, facing)
+    if obs_platform_edge(values, facing) {
+        return true;
+    }
+    // 松散地板前方仍可能是断开的同层台：连通 walk 会卡住，需 hop。
+    let dir = if facing.abs() > f32::EPSILON {
+        facing.signum()
+    } else {
+        1.0
+    };
+    obs_same_level_gap_ahead(values, dir, 1368.0, 768.0)
 }
 
 /// 该方向存在 YOLO 可见、角色跳得上去的紧邻台阶（`obs_step_up_dx`，抬升 16–80px）。
@@ -722,6 +735,70 @@ pub fn obs_jump_target_ahead(values: &[f32], direction: f32, img_w: f32, img_h: 
     } else {
         dx < -8.0
     }
+}
+
+/// 同层/近同层缝隙：前方有 YOLO 地板，与脚下不衔接，但水平间隙在跳跃可达内。
+///
+/// 真实图常见「两段看起来差不多高但中间有缝」——连通 walk 会卡住，需要 hop。
+/// 返回落点相对脚点的水平 dx（像素，符号表示左右）。
+pub fn obs_same_level_gap_dx(values: &[f32], direction: f32, img_w: f32, img_h: f32) -> Option<f32> {
+    if direction.abs() <= f32::EPSILON {
+        return None;
+    }
+    let right = direction > 0.0;
+    let under = underfoot_floor_span(values)?;
+    let base_dy = underfoot_floor_dy(values).unwrap_or(0.0);
+    // 近同层：允许约 ±28px 小坎；更大抬升交给 step_up。
+    const HOP_DY_PX: f32 = 28.0;
+    const MIN_GAP_PX: f32 = 28.0;
+    const MAX_GAP_PX: f32 = 120.0;
+
+    let mut best: Option<(f32, f32)> = None;
+    for i in 0..OBS_FLOOR_SLOTS {
+        let base = OBS_FLOOR_START + i * OBS_SLOT_DIM;
+        let Some((dx, dy, w, _)) = read_slot(values, base) else {
+            continue;
+        };
+        let dy_px = (dy - base_dy).abs() * img_h;
+        if dy_px > HOP_DY_PX {
+            continue;
+        }
+        let half = (w * 0.5).max(0.0);
+        if floor_connects_underfoot(dx, half, Some(under)) {
+            continue;
+        }
+        let box_l = dx - half;
+        let box_r = dx + half;
+        let (ul, ur) = under;
+        let gap_n = if right {
+            if box_l < ur {
+                continue;
+            }
+            box_l - ur
+        } else if box_r > ul {
+            continue;
+        } else {
+            ul - box_r
+        };
+        let gap_px = gap_n * img_w;
+        if gap_px < MIN_GAP_PX || gap_px > MAX_GAP_PX {
+            continue;
+        }
+        let landing_dx = if right {
+            (box_l + 0.02) * img_w
+        } else {
+            (box_r - 0.02) * img_w
+        };
+        let score = gap_px;
+        if best.map(|(bs, _)| score < bs).unwrap_or(true) {
+            best = Some((score, landing_dx));
+        }
+    }
+    best.map(|(_, dx)| dx)
+}
+
+pub fn obs_same_level_gap_ahead(values: &[f32], direction: f32, img_w: f32, img_h: f32) -> bool {
+    obs_same_level_gap_dx(values, direction, img_w, img_h).is_some()
 }
 
 /// 绳/梯已对齐到可抓取距离（才应 jump+up，避免远处绳梯误跳）。
@@ -790,10 +867,10 @@ pub fn obs_has_drop(values: &[f32]) -> bool {
     obs_slot_active(values, OBS_DROP_START, OBS_DROP_SLOTS)
 }
 
-/// 掉落槽是否在拾取半径内（与 `sim::tick_drops` 约 40px 对齐，略放宽以容 YOLO 框心偏差）。
+/// 掉落槽是否在拾取半径内（与 `sim::tick_drops` 约 64px 对齐）。
 pub fn obs_drop_in_pickup_range(values: &[f32]) -> bool {
-    const PICKUP_GATE_DX: f32 = 56.0 / 1368.0;
-    const PICKUP_GATE_DY: f32 = 56.0 / 768.0;
+    const PICKUP_GATE_DX: f32 = 64.0 / 1368.0;
+    const PICKUP_GATE_DY: f32 = 64.0 / 768.0;
     for i in 0..OBS_DROP_SLOTS {
         let base = OBS_DROP_START + i * OBS_SLOT_DIM;
         let Some((dx, dy, _, _)) = read_slot(values, base) else {
@@ -836,6 +913,52 @@ fn fill_nearest_slots(
     for det in picked.into_iter().take(slots) {
         encode_slot(values, next, det, ax, ay, img_w, img_h, anchor);
         next += OBS_SLOT_DIM;
+    }
+    offset + slots * OBS_SLOT_DIM
+}
+
+/// 掉落优先填金币，其余物品次之；非金币槽 w 取负号以区分种类。
+fn fill_drop_slots(
+    values: &mut [f32],
+    offset: usize,
+    detections: &[Detection],
+    ax: f32,
+    ay: f32,
+    img_w: u32,
+    img_h: u32,
+    slots: usize,
+) -> usize {
+    const OTHER_DROPS: [&str; 4] = ["药水", "武器", "装备", "材料"];
+    let mut meso: Vec<&Detection> = detections.iter().filter(|d| d.label == "金币").collect();
+    let mut other: Vec<&Detection> = detections
+        .iter()
+        .filter(|d| OTHER_DROPS.contains(&d.label))
+        .collect();
+    let anchor = SlotAnchor::Center;
+    meso.sort_by(|a, b| {
+        dist2(a, ax, ay, anchor)
+            .partial_cmp(&dist2(b, ax, ay, anchor))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    other.sort_by(|a, b| {
+        dist2(a, ax, ay, anchor)
+            .partial_cmp(&dist2(b, ax, ay, anchor))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut next = offset;
+    let mut filled = 0usize;
+    for det in meso.into_iter().chain(other.into_iter()) {
+        if filled >= slots {
+            break;
+        }
+        encode_slot(values, next, det, ax, ay, img_w, img_h, anchor);
+        if det.label == "金币" {
+            values[next + 2] = values[next + 2].abs();
+        } else {
+            values[next + 2] = -values[next + 2].abs();
+        }
+        next += OBS_SLOT_DIM;
+        filled += 1;
     }
     offset + slots * OBS_SLOT_DIM
 }
@@ -1167,5 +1290,78 @@ mod tests {
         distant[OBS_ENEMY_START] = 0.10;
         assert!(!obs_enemy_touching_player(&distant));
         assert_eq!(obs_assess_enemy_contact(&distant).total, 0);
+    }
+
+    #[test]
+    fn drop_slots_prefer_meso_and_mark_potion_width_negative() {
+        let meso_id = CLASS_NAMES.iter().position(|&n| n == "金币").expect("金币");
+        let potion_id = CLASS_NAMES.iter().position(|&n| n == "药水").expect("药水");
+        // 药水更近，金币稍远 —— 槽位仍应先填金币
+        let dets = vec![
+            det(potion_id, 0.9, 700.0, 380.0, 740.0, 420.0),
+            det(meso_id, 0.9, 800.0, 390.0, 830.0, 420.0),
+        ];
+        let hit = NamedPlayerHit {
+            x: 684.0,
+            y: 400.0,
+            ocr_text: "test".into(),
+            match_score: 1.0,
+            partial: false,
+            player_conf: 0.9,
+            roi: (0, 0, 10, 10),
+        };
+        let obs = VisionObservation::from_detections(&dets, Some(&hit), 1368, 768);
+        let w0 = obs.values[OBS_DROP_START + 2];
+        let w1 = obs.values[OBS_DROP_START + OBS_SLOT_DIM + 2];
+        assert!(obs_drop_is_meso(w0), "first drop slot should be meso, w={w0}");
+        assert!(
+            !obs_drop_is_meso(w1),
+            "second slot potion should have neg w, w={w1}"
+        );
+    }
+
+    #[test]
+    fn same_level_gap_detects_disconnected_near_platform() {
+        let mut v = [0.0_f32; OBS_DIM];
+        // 脚下很窄：自身不覆盖 walk 前方走廊，避免「本台延伸」假连通。
+        v[OBS_FLOOR_START] = 0.0;
+        v[OBS_FLOOR_START + 1] = 0.01;
+        v[OBS_FLOOR_START + 2] = 12.0 / 1368.0;
+        v[OBS_FLOOR_START + 3] = 0.02;
+        // 右侧约 50px 缝后另一同层台
+        let under_half = 6.0 / 1368.0;
+        let gap = 50.0 / 1368.0;
+        let opp_half = 40.0 / 1368.0;
+        let opp_cx = under_half + gap + opp_half;
+        v[OBS_FLOOR_START + OBS_SLOT_DIM] = opp_cx;
+        v[OBS_FLOOR_START + OBS_SLOT_DIM + 1] = 0.01;
+        v[OBS_FLOOR_START + OBS_SLOT_DIM + 2] = 80.0 / 1368.0;
+        v[OBS_FLOOR_START + OBS_SLOT_DIM + 3] = 0.02;
+
+        assert!(obs_floor_underfoot(&v));
+        assert!(
+            obs_floor_ahead(&v, 1.0),
+            "loose ahead should still see opposite floor"
+        );
+        assert!(
+            !obs_floor_ahead_connected(&v, 1.0),
+            "gap must break connected walk"
+        );
+        assert!(obs_same_level_gap_ahead(&v, 1.0, 1368.0, 768.0));
+        assert!(
+            obs_jump_allowed(&v, 1.0, false),
+            "same-level gap should allow hop"
+        );
+    }
+
+    #[test]
+    fn same_level_gap_rejects_connected_floor() {
+        let mut v = [0.0_f32; OBS_DIM];
+        v[OBS_FLOOR_START] = 0.0;
+        v[OBS_FLOOR_START + 1] = 0.01;
+        v[OBS_FLOOR_START + 2] = 200.0 / 1368.0;
+        v[OBS_FLOOR_START + 3] = 0.02;
+        assert!(obs_floor_ahead_connected(&v, 1.0));
+        assert!(!obs_same_level_gap_ahead(&v, 1.0, 1368.0, 768.0));
     }
 }

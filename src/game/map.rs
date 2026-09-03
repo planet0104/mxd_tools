@@ -339,11 +339,25 @@ impl GameMap {
 
         // 同层脚点必须用 strict_stand_at：stand_at 会跳过当前高度平台，
         // 平地会永远到不了 SameLevel，落地稳定后整图无法走路。
+        // 离散邻台：下行最多约 4px（避免粘到应下落的更低台）。
+        // 斜坡 foothold：允许 SAME_LEVEL_TOL 内下行，否则每帧走坡会被判 Fall。
         if let Some(st) = self.strict_stand_at(to_x, feet_y) {
-            return WalkAhead::SameLevel(st.y);
+            let max_down = if self.platform_is_slope(st.id) {
+                SAME_LEVEL_TOL
+            } else {
+                4.0
+            };
+            if st.y <= feet_y + max_down && feet_y - st.y <= SAME_LEVEL_TOL {
+                return WalkAhead::SameLevel(st.y);
+            }
         }
         if let Some(st) = self.stand_at(to_x, feet_y, SAME_LEVEL_TOL) {
-            if (st.y - feet_y).abs() <= SAME_LEVEL_TOL {
+            let max_down = if self.platform_is_slope(st.id) {
+                SAME_LEVEL_TOL
+            } else {
+                4.0
+            };
+            if st.y <= feet_y + max_down && (feet_y - st.y) <= SAME_LEVEL_TOL {
                 return WalkAhead::SameLevel(st.y);
             }
         }
@@ -393,6 +407,13 @@ impl GameMap {
             }
         }
         best
+    }
+
+    fn platform_is_slope(&self, id: u32) -> bool {
+        // 只认「可走坡道」（足够宽）；WZ 里 10px 级微斜连段不能放宽下行，否则会粘到应下落的邻台。
+        self.platforms.iter().find(|p| p.id == id).is_some_and(|p| {
+            (p.y1 - p.y2).abs() >= 2.0 && (p.x1 - p.x2).abs() >= 40.0
+        })
     }
 
     fn surface_above_in_group(
@@ -752,14 +773,26 @@ impl GameMap {
             if xmax - xmin < 8.0 {
                 continue;
             }
-            if (p.y1 - p.y2).abs() >= 2.0 {
-                continue;
+            if (p.y1 - p.y2).abs() < 2.0 {
+                let py = (p.y1 + p.y2) * 0.5;
+                if (py - y).abs() > Y_TOL {
+                    continue;
+                }
+                spans.push((xmin, xmax));
+            } else {
+                // 可走斜坡（≥40px 宽）：脚点 y 落在坡段高度带内时并入水平 span，
+                // 否则平地右缘会把 can_exit 判死，必须跳才能走上/走下坡。
+                // 过短微斜连段不并入，避免把应下落的缝粘成平地。
+                if (p.x1 - p.x2).abs() < 40.0 {
+                    continue;
+                }
+                let ymin = p.y1.min(p.y2);
+                let ymax = p.y1.max(p.y2);
+                if y < ymin - Y_TOL || y > ymax + Y_TOL {
+                    continue;
+                }
+                spans.push((xmin, xmax));
             }
-            let py = (p.y1 + p.y2) * 0.5;
-            if (py - y).abs() > Y_TOL {
-                continue;
-            }
-            spans.push((xmin, xmax));
         }
         spans.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -1067,6 +1100,110 @@ mod tests {
     }
 
     #[test]
+    fn left_upper_small_plats_15_12_16_walkable() {
+        let map = load_default_map().expect("default map");
+        let span = map.platform_span_at(250.0, 1165.0);
+        eprintln!("span at 15: {span:?}");
+        assert!(
+            span.is_some_and(|(lo, hi)| lo <= 220.0 && hi >= 300.0),
+            "15/12/16 should merge into one span, got {span:?}"
+        );
+        for (x, tx) in [(250.0_f32, 270.0), (270.0, 300.0), (240.0, 255.0)] {
+            let ahead = map.walk_ahead(x, 1165.0, tx, Some((0, 1)));
+            eprintln!("{x}->{tx}: {ahead:?}");
+            assert!(
+                matches!(ahead, WalkAhead::SameLevel(_)),
+                "same-level walk {x}->{tx} got {ahead:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn flat_to_slope_22_span_merges_and_walkable() {
+        let map = load_default_map().expect("default map");
+        // 19/21/20 @1105 + 坡 22 → 水平 span 应连到坡上，否则右缘 clamp 卡死。
+        let span = map.platform_span_at(500.0, 1105.0);
+        eprintln!("span at 20: {span:?}");
+        assert!(
+            span.is_some_and(|(lo, hi)| lo <= 320.0 && hi >= 600.0),
+            "flat+slope should merge past 527, got {span:?}"
+        );
+        for (x, tx) in [(510.0_f32, 528.0), (528.0, 535.0), (550.0, 560.0)] {
+            let y = if x <= 527.0 {
+                1105.0
+            } else {
+                1105.0 + (x - 527.0) / 90.0 * 60.0
+            };
+            let ahead = map.walk_ahead(x, y, tx, Some((0, 1)));
+            eprintln!("{x}/{y:.1}->{tx}: {ahead:?}");
+            assert!(
+                matches!(ahead, WalkAhead::SameLevel(_)),
+                "walk on/onto slope 22 {x}->{tx} got {ahead:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sim_walks_down_slope_22_without_jump() {
+        use crate::game::input::InputFrame;
+        use crate::game::sim::GameSim;
+        let map = load_default_map().expect("default map");
+        let mut sim = GameSim::new_preview(map, 1);
+        {
+            let p = &mut sim.state.player;
+            p.x = 500.0;
+            p.y = 1105.0;
+            p.on_ground = true;
+            p.climbing = false;
+            p.fh_id = 20;
+            p.fh_layer = 0;
+            p.fh_group = 1;
+            p.vx = 0.0;
+            p.vy = 0.0;
+        }
+        let right = InputFrame {
+            right: true,
+            ..InputFrame::default()
+        };
+        for _ in 0..180 {
+            sim.tick(&right);
+        }
+        let p = &sim.state.player;
+        eprintln!("after walk slope: x={:.1} y={:.1} gnd={}", p.x, p.y, p.on_ground);
+        assert!(p.x > 560.0, "should walk onto slope past 527, x={}", p.x);
+        assert!(p.y > 1115.0, "should descend slope, y={}", p.y);
+        assert!(p.on_ground, "should stay grounded walking slope");
+    }
+
+    #[test]
+    fn upper_slope_102_merges_with_adjacent_flat() {
+        let map = load_default_map().expect("default map");
+        // 102: 527..617 y 865→805；左端应与左侧平地在 865 合并
+        let span = map.platform_span_at(540.0, 860.0);
+        eprintln!("span near slope 102: {span:?}");
+        assert!(span.is_some(), "should stand on slope 102 band");
+        let ahead = map.walk_ahead(530.0, 863.0, 540.0, Some((2, 22)));
+        eprintln!("on 102: {ahead:?}");
+        assert!(
+            matches!(ahead, WalkAhead::SameLevel(_)),
+            "walk along slope 102 got {ahead:?}"
+        );
+    }
+
+    #[test]
+    fn small_plat_15_can_fall_left_to_ground() {
+        let map = load_default_map().expect("default map");
+        // 15 左缘外：下方大台 1225，应 Fall 而非 Blocked
+        let ahead = map.walk_ahead(220.0, 1165.0, 210.0, Some((0, 1)));
+        let below = map.ground_below_at(210.0, 1167.0, 720.0);
+        eprintln!("15 left exit: {ahead:?} below={below:?}");
+        assert!(
+            matches!(ahead, WalkAhead::Fall),
+            "left off 15 should Fall onto ground, got {ahead:?}"
+        );
+    }
+
+    #[test]
     fn left_ground_edge_blocks_walk_off() {
         let map = load_default_map().expect("default map");
         let y = 1225.0;
@@ -1084,19 +1221,84 @@ mod tests {
     }
 
     #[test]
-    fn upper_platform_edge_allows_fall_when_ground_below() {
+    fn small_ledge_133_left_allows_fall_to_big_platform() {
         let map = load_default_map().expect("default map");
-        // 上层小平台右缘：下方有更低地面时应允许走出去下落
-        let y = 565.0;
-        let x = 1826.0;
-        let ahead = map.walk_ahead(x - 2.0, y, x + 6.0, Some((0, 33)));
-        assert!(
-            matches!(ahead, WalkAhead::Fall),
-            "walk off upper ledge with ground below should Fall, got {ahead:?}"
+        // 小平台 133 @ y=876；左侧无同组更高挡板，下方有大台 y=925 → 应 Fall。
+        let cases = [
+            (1648.0_f32, 876.0, 1636.0),
+            (1636.0, 879.0, 1624.0),
+            (1634.0, 882.0, 1620.0),
+            (1660.0, 876.0, 1628.0),
+        ];
+        for (x, y, tx) in cases {
+            let ahead = map.walk_ahead(x, y, tx, Some((1, 19)));
+            let below = map.ground_below_at(tx, y + 2.0, 720.0);
+            eprintln!("x={x} -> {tx}: ahead={ahead:?} below={below:?}");
+            assert!(
+                matches!(ahead, WalkAhead::Fall | WalkAhead::SameLevel(_)),
+                "left off small ledge should Fall/SameLevel, got {ahead:?} at x={x}->{tx}"
+            );
+        }
+    }
+
+    #[test]
+    fn isolated_ledge_135_left_allows_fall() {
+        let map = load_default_map().expect("default map");
+        // 135 @ 1695-1732 y=868，左侧空隙后下方是大台；不应粘到更低的 133/134。
+        for (x, tx) in [(1700.0_f32, 1688.0), (1697.0, 1680.0), (1696.0, 1690.0)] {
+            let ahead = map.walk_ahead(x, 868.0, tx, Some((1, 19)));
+            eprintln!("135 {x}->{tx}: {ahead:?}");
+            assert!(
+                matches!(ahead, WalkAhead::Fall),
+                "135 left should Fall, got {ahead:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sim_can_walk_off_133_left_onto_big_floor() {
+        use crate::game::input::InputFrame;
+        use crate::game::sim::GameSim;
+        let map = load_default_map().expect("default map");
+        let mut sim = GameSim::new_preview(map, 1);
+        {
+            let p = &mut sim.state.player;
+            p.x = 1640.0;
+            p.y = 879.0;
+            p.on_ground = true;
+            p.climbing = false;
+            p.fh_id = 132;
+            p.fh_layer = 1;
+            p.fh_group = 19;
+            p.vx = 0.0;
+            p.vy = 0.0;
+        }
+        let left = InputFrame {
+            left: true,
+            ..InputFrame::default()
+        };
+        let y0 = sim.state.player.y;
+        let x0 = sim.state.player.x;
+        for _ in 0..90 {
+            sim.tick(&left);
+        }
+        eprintln!(
+            "after walk: x={} y={} gnd={} fh={}",
+            sim.state.player.x,
+            sim.state.player.y,
+            sim.state.player.on_ground,
+            sim.state.player.fh_id
         );
         assert!(
-            map.ground_below_at(x + 6.0, y + 2.0, 720.0).is_some(),
-            "fixture expects catchable ground below"
+            sim.state.player.x < x0 - 8.0 || sim.state.player.y > y0 + 20.0,
+            "should walk left off ledge or fall down, x0={x0} x={} y0={y0} y={}",
+            sim.state.player.x,
+            sim.state.player.y
+        );
+        assert!(
+            sim.state.player.y > 900.0,
+            "should land on big platform ~925, y={}",
+            sim.state.player.y
         );
     }
 

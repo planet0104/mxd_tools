@@ -9,12 +9,18 @@ use super::observation::{
     obs_climb_grab_ready, obs_floor_ahead_connected, obs_floor_drop_ahead, obs_has_ladder_or_rope_signal,
     obs_step_up_dx,
 };
-use super::rule_bot::visit_key;
 use super::types::{WINDOW_H, WINDOW_W};
 
-/// 与 rule_bot / fitness 一致。
+/// 与 fitness 一致：80×120 访问网格。
 pub const X_CELL_PX: f32 = 80.0;
 pub const ALTITUDE_BAND_PX: f32 = 120.0;
+
+pub fn visit_key(x: f32, y: f32) -> (i32, i32) {
+    (
+        (x / X_CELL_PX).floor() as i32,
+        (y / ALTITUDE_BAND_PX).floor() as i32,
+    )
+}
 /// 连续这么多决策帧无新格 → SeekVertical（与 rule_bot NO_NEW_CELL_DECISIONS 对齐）。
 pub const NO_NEW_CELL_DECISIONS: u32 = 18;
 

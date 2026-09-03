@@ -1,9 +1,9 @@
-//! 规则 bot 自动玩预览（YOLO + OCR + 纯规则策略）。
+//! NavBot 自动玩预览（YOLO + OCR + 地图图导航）。
 //!
 //! ```powershell
 //! cargo run --release --bin game_preview
 //! cargo run --release --bin game_preview -- --detect-hz 10
-//! cargo run --release --bin game_preview -- --quiet
+//! cargo run --release --bin game_preview -- --nav-log verbose
 //! cargo run --release --bin game_preview -- --probe first_platform
 //! cargo test --release --test game_preview_first_platform
 //! ```
@@ -19,8 +19,8 @@ use mxd_tools::game::action::input_label;
 use mxd_tools::game::view;
 use mxd_tools::game::{
     self, default_yolo_model_path, evaluate_first_platform_report,
-    format_first_platform_preview_done, DeferredCaptureVision, FirstPlatformTracker, GameSim,
-    InputFrame, ProbeDriver, VisionAnchorConfig, VisionPaceConfig, VisionPipeline,
+    format_first_platform_preview_done, DeferredCaptureVision, FirstPlatformTracker,
+    GameSim, InputFrame, ProbeDriver, VisionAnchorConfig, VisionPaceConfig, VisionPipeline,
     FIRST_PLATFORM_PROBE_TICKS, LOGIC_DT, OBS_FLOOR_SLOTS, OBS_FLOOR_START, OBS_SLOT_DIM,
     VISION_CONF_THRESH, WINDOW_H, WINDOW_W,
 };
@@ -28,7 +28,7 @@ use mxd_tools::yolo::YoloDevice;
 
 fn window_conf() -> Conf {
     Conf {
-        window_title: "规则 Bot 自动玩".to_owned(),
+        window_title: "NavBot 自动玩".to_owned(),
         window_width: (WINDOW_W / 3.0).round() as i32,
         window_height: (WINDOW_H / 3.0).round() as i32,
         window_resizable: true,
@@ -51,6 +51,27 @@ impl PreviewProbe {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NavLogMode {
+    /// 仅在状态变化、失败、step_up、noop 卡住时输出
+    Event,
+    /// 每次视觉决策帧输出一行摘要
+    All,
+    /// 每次输出时附带 YOLO/obs 详情
+    Verbose,
+}
+
+impl NavLogMode {
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "event" => Some(Self::Event),
+            "all" => Some(Self::All),
+            "verbose" => Some(Self::Verbose),
+            _ => None,
+        }
+    }
+}
+
 struct Cli {
     model: PathBuf,
     episode_seed: u64,
@@ -59,6 +80,7 @@ struct Cli {
     anchor_offset: f32,
     auto_ticks: u32,
     probe: Option<PreviewProbe>,
+    nav_log: NavLogMode,
 }
 
 impl Cli {
@@ -81,6 +103,12 @@ impl Cli {
         } else {
             arg_u64(args, "--auto-ticks", 0) as u32
         };
+        let nav_log = args
+            .iter()
+            .position(|a| a == "--nav-log")
+            .and_then(|i| args.get(i + 1))
+            .and_then(|s| NavLogMode::parse(s))
+            .unwrap_or(NavLogMode::Event);
         Self {
             model: arg_path(args, "--model").unwrap_or_else(default_yolo_model_path),
             episode_seed: arg_u64(args, "--seed", 0),
@@ -89,6 +117,7 @@ impl Cli {
             anchor_offset: arg_f32(args, "--anchor-offset", 0.0),
             auto_ticks,
             probe,
+            nav_log,
         }
     }
 
@@ -101,12 +130,37 @@ impl Cli {
     }
 }
 
+struct NavLogState {
+    last_reason: String,
+    last_goal: String,
+    last_visited: usize,
+    last_nav_node: u32,
+    repeat: u32,
+}
+
+impl NavLogState {
+    fn new() -> Self {
+        Self {
+            last_reason: String::new(),
+            last_goal: String::new(),
+            last_visited: 0,
+            last_nav_node: 0,
+            repeat: 0,
+        }
+    }
+
+    fn reset(&mut self) {
+        *self = Self::new();
+    }
+}
+
 struct PreviewState {
     sim: GameSim,
     logic_tick: u32,
     episode_seed: u64,
     restart_cooldown: f32,
     last_logged_vision_tick: Option<u32>,
+    nav_log: NavLogState,
 }
 
 impl PreviewState {
@@ -118,6 +172,7 @@ impl PreviewState {
             episode_seed,
             restart_cooldown: 0.0,
             last_logged_vision_tick: None,
+            nav_log: NavLogState::new(),
         }
     }
 
@@ -126,6 +181,7 @@ impl PreviewState {
         self.sim = GameSim::new_preview(map.clone(), seed);
         self.logic_tick = 0;
         self.restart_cooldown = 0.0;
+        self.nav_log.reset();
     }
 }
 
@@ -296,7 +352,7 @@ async fn run_first_platform_probe_loop(
 
         let tick_start = Instant::now();
         // 先 pace（内含 melee 刷新），再取意图，日志与 sim 一致。
-        let input = driver.paced_input_for_sim(&state.sim, tick);
+        let input = driver.paced_input_for_sim(&mut state.sim, tick);
         let intended = driver.input();
         if let Some(vtick) = just_decided {
             let effective = state.sim.effective_bot_input(&input);
@@ -308,6 +364,8 @@ async fn run_first_platform_probe_loop(
                     &state.sim,
                     &driver,
                     vision.last_detections(),
+                    cli.nav_log,
+                    &mut state.nav_log,
                 );
             }
         }
@@ -327,78 +385,174 @@ fn log_decision(
     sim: &GameSim,
     driver: &ProbeDriver,
     detections: &[mxd_tools::yolo::Detection],
+    nav_log: NavLogMode,
+    nav_state: &mut NavLogState,
 ) {
-    use mxd_tools::game::{
-        obs_enemy_in_attack_range, obs_farm_band_enemies, obs_floor_ahead_connected,
-        obs_floor_drop_ahead, obs_has_same_level_enemy, obs_nearest_same_level_enemy_px,
-        obs_step_up_dx, RuleBotCtx,
+    log_nav_decision(
+        tick,
+        intended,
+        effective,
+        sim,
+        driver,
+        detections,
+        nav_log,
+        nav_state,
+    );
+}
+
+fn log_nav_decision(
+    tick: u32,
+    intended: &InputFrame,
+    effective: &InputFrame,
+    sim: &GameSim,
+    driver: &ProbeDriver,
+    detections: &[mxd_tools::yolo::Detection],
+    mode: NavLogMode,
+    state: &mut NavLogState,
+) {
+    use mxd_tools::game::nav::ExecutorResult;
+
+    let nav = driver.bot();
+    let d = nav.diag();
+    let _p = &sim.state.player;
+    let visited = nav.visited_nodes();
+    let total = nav.total_nodes();
+    let goal_s = d.goal.label();
+    let reason = nav.last_reason;
+    let noop = input_is_noop(intended, effective);
+    let intent_mismatch = input_label(intended) != input_label(effective);
+    let node_mismatch = false;
+
+    let event = state.last_reason != reason
+        || state.last_goal != goal_s
+        || state.last_visited != visited
+        || state.last_nav_node != d.nav_node
+        || d.exec != ExecutorResult::Running
+        || d.escape_ticks > 0
+        || intent_mismatch
+        || noop
+        || node_mismatch
+        || reason.contains("step_up")
+        || reason.contains("stalled")
+        || reason.contains("escape");
+
+    let throttle = matches!(reason, "step_up_wait" | "patrol" | "goto" | "goto_done")
+        && !event
+        && mode == NavLogMode::Event;
+
+    let should_log = match mode {
+        NavLogMode::All | NavLogMode::Verbose => true,
+        NavLogMode::Event => {
+            if throttle {
+                state.repeat = state.repeat.saturating_add(1);
+                state.repeat % 6 == 0
+            } else if event {
+                state.last_reason = reason.to_string();
+                state.last_goal = goal_s.clone();
+                state.last_visited = visited;
+                state.last_nav_node = d.nav_node;
+                state.repeat = 0;
+                true
+            } else {
+                false
+            }
+        }
     };
 
-    let p = &sim.state.player;
-    let bot = driver.bot();
-    let sense = driver.sense();
-    let obs = driver.last_obs();
-    let ctx = RuleBotCtx::from_vision(obs, sense);
-    let (mob_dx, mob_dy, mob_dir) = ctx
-        .engage
-        .map(|e| (e.dx, e.dy, e.mob_dir))
-        .unwrap_or((0.0, 0.0, 0.0));
-    let alive = sim.state.mobs.iter().filter(|m| m.alive).count();
-    let iw = WINDOW_W as f32;
-    let ih = WINDOW_H as f32;
-    let pr = Some(obs_floor_ahead_connected(obs, 1.0));
-    let pl = Some(obs_floor_ahead_connected(obs, -1.0));
-    let pdr = Some(obs_floor_drop_ahead(obs, 1.0));
-    let pdl = Some(obs_floor_drop_ahead(obs, -1.0));
-    let farm_local = obs_farm_band_enemies(obs, iw, 260.0);
-    let farm_y_any = farm_local;
-    let (visual_dx, visual_dy) = sense.visual_delta();
-    let node = sense.location_node();
-    let (net, path, span_x, span_y) = bot.progress_metrics();
-    let _ = obs_nearest_same_level_enemy_px(obs, iw, ih);
+    if !should_log {
+        return;
+    }
+
+    let edge = match (d.pending_from, d.pending_kind, d.pending_to) {
+        (Some(f), Some(k), Some(t)) => format!(" edge={f}-{}->{t}", k.label()),
+        _ => String::new(),
+    };
+
     eprintln!(
-        "BOT sense=yolo+ocr ctx=vision tick={} intent={} effective={} reason={} loop={} escape={} candidate={} failed_exits={} seek={} flips={} farm_local={} farm_y_any={} perch={} sim_kills={} alive={} sim_pos=({:.0},{:.0}) est_pos=({:.0},{:.0}) visual_delta=({:.1},{:.1}) visual_conf={} node=({},{},{}) progress=net:{:.0}/path:{:.0}/span:{:.0}x{:.0} engage_dx={:.0} dy={:.0} dir={:.0} walkR={:?} walkL={:?} dropR={:?} dropL={:?} step={:?} cliffR={} cliffL={}",
+        "NAV tick={} intent={} eff={} exec={} reason={} goal={} visited={}/{} nav_node={} est_node={} est=({:.0},{:.0}) conf={} sub={}/{} fail={} esc={}{} farm={} alive={} kills={} meso={} ground_drops={} yolo_meso={} yolo_drop={}",
         tick,
         input_label(intended),
         input_label(effective),
-        bot.last_reason,
-        bot.loop_kind_name(),
-        bot.escape_phase_name(),
-        bot.escape_candidate_name(),
-        bot.failed_exit_count(),
-        bot.explore_seeking_vertical(),
-        bot.dir_flip_streak_pub(),
-        farm_local,
-        farm_y_any,
-        bot.perching,
+        d.exec.label(),
+        reason,
+        goal_s,
+        visited,
+        total,
+        d.nav_node,
+        d.est_node,
+        d.est_x,
+        d.est_y,
+        d.visual_conf,
+        d.subgoal_ticks,
+        if matches!(d.goal, mxd_tools::game::nav::SubGoal::StepUp { .. }) {
+            nav.config.step_up_timeout_ticks
+        } else {
+            nav.config.subgoal_timeout_ticks
+        },
+        d.subgoal_failures,
+        d.escape_ticks,
+        edge,
+        d.farm_local,
+        sim.state.mobs.iter().filter(|m| m.alive).count(),
         sim.state.kills,
-        alive,
-        p.x,
-        p.y,
-        sense.est_x,
-        sense.est_y,
-        visual_dx,
-        visual_dy,
-        sense.visual_confidence(),
-        node.x,
-        node.y,
-        node.terrain,
-        net,
-        path,
-        span_x,
-        span_y,
-        mob_dx,
-        mob_dy,
-        mob_dir,
-        pr,
-        pl,
-        pdr,
-        pdl,
-        obs_step_up_dx(obs, iw, ih),
-        pr == Some(false),
-        pl == Some(false),
+        sim.state.meso,
+        sim.state.drops.iter().filter(|x| x.alive).count(),
+        detections
+            .iter()
+            .filter(|x| x.label == "金币" && x.conf >= VISION_CONF_THRESH)
+            .count(),
+        detections
+            .iter()
+            .filter(|x| {
+                matches!(x.label, "金币" | "药水" | "武器" | "装备" | "材料")
+                    && x.conf >= VISION_CONF_THRESH
+            })
+            .count(),
     );
-    let noop = !intended.left
+
+    let want_detail = mode == NavLogMode::Verbose
+        || noop
+        || d.exec == ExecutorResult::Failed
+        || reason.contains("step_up")
+        || node_mismatch
+        || intent_mismatch;
+
+    if !want_detail {
+        return;
+    }
+
+    log_nav_detail(d, detections, driver.last_obs(), nav.config.step_up_stall);
+}
+
+fn log_nav_detail(
+    d: &mxd_tools::game::nav::NavDiagSnapshot,
+    detections: &[mxd_tools::yolo::Detection],
+    obs: &[f32],
+    step_stall_max: u32,
+) {
+    eprintln!(
+        "  nav_detail: walkR={:?} walkL={:?} dropR={:?} dropL={:?} step_obs={:?} gnd_est={} jump_dir={:.0} jumped={} stall={}/{} cd={} esc_dir={:.0} blocked={} combat={}",
+        d.walk_right,
+        d.walk_left,
+        d.drop_right,
+        d.drop_left,
+        d.obs_step_up,
+        d.grounded_est,
+        d.step_jump_dir,
+        d.step_jumped,
+        d.step_stall,
+        step_stall_max,
+        d.step_jump_cd,
+        d.escape_dir,
+        d.blocked_edges,
+        d.combat_active,
+    );
+    log_yolo_floors(detections);
+    log_obs_floors(obs);
+}
+
+fn input_is_noop(intended: &InputFrame, effective: &InputFrame) -> bool {
+    !intended.left
         && !intended.right
         && !intended.jump
         && !intended.attack
@@ -409,18 +563,10 @@ fn log_decision(
         && !effective.jump
         && !effective.attack
         && !effective.up
-        && !effective.down;
-    if !noop {
-        return;
-    }
-    eprintln!(
-        "  NOOP diag: facing={} strike={} footing={} farm_y={:.0}",
-        if sense.facing >= 0.0 { "R" } else { "L" },
-        obs_enemy_in_attack_range(obs, sense.facing),
-        obs_has_same_level_enemy(obs),
-        bot.farm_y,
-    );
-    // 最近地板检测框（像素，视口坐标）+ obs 归一化槽
+        && !effective.down
+}
+
+fn log_yolo_floors(detections: &[mxd_tools::yolo::Detection]) {
     let mut floors: Vec<&mxd_tools::yolo::Detection> = detections
         .iter()
         .filter(|d| d.class_id == 0 && d.conf >= VISION_CONF_THRESH)
@@ -434,20 +580,20 @@ fn log_decision(
     });
     if let Some(f) = floors.first() {
         eprintln!(
-            "  NOOP floor_yolo: n={} nearest conf={:.2} box=({:.0},{:.0})-({:.0},{:.0}) size={:.0}x{:.0}",
+            "  yolo_floor: n={} nearest conf={:.2} box=({:.0},{:.0})-({:.0},{:.0})",
             floors.len(),
             f.conf,
             f.x1,
             f.y1,
             f.x2,
             f.y2,
-            f.x2 - f.x1,
-            f.y2 - f.y1,
         );
     } else {
-        eprintln!("  NOOP floor_yolo: n=0 (no floor det above conf)");
+        eprintln!("  yolo_floor: n=0");
     }
-    let obs = driver.last_obs();
+}
+
+fn log_obs_floors(obs: &[f32]) {
     let mut printed = 0u32;
     for i in 0..OBS_FLOOR_SLOTS {
         let base = OBS_FLOOR_START + i * OBS_SLOT_DIM;
@@ -459,7 +605,7 @@ fn log_decision(
             continue;
         }
         eprintln!(
-            "  NOOP floor_obs[{i}]: dx={dx:.3} dy={dy:.3} w={w:.3} h={h:.3} (px dx={:.0} dy={:.0} w={:.0} h={:.0})",
+            "  obs_floor[{i}]: dx={:.0} dy={:.0} w={:.0} h={:.0}",
             dx * WINDOW_W,
             dy * WINDOW_H,
             w * WINDOW_W,
@@ -471,7 +617,7 @@ fn log_decision(
         }
     }
     if printed == 0 {
-        eprintln!("  NOOP floor_obs: empty");
+        eprintln!("  obs_floor: empty");
     }
 }
 
@@ -481,11 +627,17 @@ async fn main() {
     let cli = Cli::parse(&args);
 
     eprintln!(
-        "规则 Bot 预览 detect-hz={:.1} seed={} quiet={}",
+        "NavBot 预览 detect-hz={:.1} seed={} quiet={}",
         cli.pace.detect_hz(),
         cli.episode_seed,
         cli.quiet
     );
+    if !cli.quiet {
+        eprintln!(
+            "Nav 日志: --nav-log={:?} (event=仅变化/step_up/卡住, all=每帧, verbose=含YOLO详情)",
+            cli.nav_log
+        );
+    }
     if let Some(probe) = cli.probe {
         eprintln!(
             "自动探针: --probe={probe:?} ticks={} (~{:.0}s 墙钟)",
@@ -528,10 +680,11 @@ async fn main() {
     let mut state = PreviewState::new(&map, episode_seed);
     let mut vision = DeferredCaptureVision::spawn(pipeline);
     let mut driver = if cli.probe.is_some() {
-        ProbeDriver::new(episode_seed)
+        ProbeDriver::new_nav(&map, episode_seed)
     } else {
-        ProbeDriver::new_realtime(episode_seed)
+        ProbeDriver::new_realtime_with_map(&map, episode_seed)
     };
+    driver.reset_with_sim(&state.sim, episode_seed);
     let rt = view::new_render_target();
     let interval = cli.pace.vision_interval_ticks;
     let mut auto_probe =
@@ -565,7 +718,7 @@ async fn main() {
 
         if auto_probe.is_none() && is_key_pressed(KeyCode::R) {
             state.restart_episode(&map);
-            driver.reset(state.episode_seed);
+            driver.reset_with_sim(&state.sim, state.episode_seed);
             vision.clear_pending();
             state.last_logged_vision_tick = None;
         }
@@ -578,7 +731,7 @@ async fn main() {
             state.restart_cooldown -= dt;
             if state.restart_cooldown <= 0.0 {
                 state.restart_episode(&map);
-                driver.reset(state.episode_seed);
+                driver.reset_with_sim(&state.sim, state.episode_seed);
                 vision.clear_pending();
                 state.last_logged_vision_tick = None;
                 state.restart_cooldown = 1.5;
@@ -601,7 +754,7 @@ async fn main() {
                 }
 
                 // 每逻辑帧只 pace 一次：决策日志不得再调 paced_input，否则攻击被 refractory 吃掉。
-                let input = driver.paced_input_for_sim(&state.sim, state.logic_tick);
+                let input = driver.paced_input_for_sim(&mut state.sim, state.logic_tick);
                 let intended = driver.input();
                 if let Some(vtick) = just_decided {
                     let effective = state.sim.effective_bot_input(&input);
@@ -613,6 +766,8 @@ async fn main() {
                             &state.sim,
                             &driver,
                             vision.last_detections(),
+                            cli.nav_log,
+                            &mut state.nav_log,
                         );
                     }
                     if let Some(probe) = auto_probe.as_mut() {

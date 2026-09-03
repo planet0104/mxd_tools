@@ -13,7 +13,7 @@ pub const TRAINING_NPC_NAMES: [&str; TRAINING_NPC_COUNT] =
 pub const TRAINING_NPC_SPRITES: [&str; TRAINING_NPC_COUNT] =
     ["默认女新手", "男战士", "男魔法师", "男弓箭手"];
 /// 训练模式怪物掉落红药概率（少量红药够学盲喝即可；主奖励为金币）
-pub const TRAINING_POTION_DROP_CHANCE: f32 = 0.08;
+pub const TRAINING_POTION_DROP_CHANCE: f32 = 0.04;
 /// NEAT 训练：每只怪金币堆数（含首堆）
 pub const TRAINING_MESO_PILES_MIN: u32 = 2;
 pub const TRAINING_MESO_PILES_MAX: u32 = 3;
@@ -28,8 +28,11 @@ pub const PLAYER_SPAWN_MIN_PLATFORM_W: f32 = 72.0;
 pub const PLAYER_SPAWN_EDGE_PAD: f32 = 20.0;
 /// 同高度合并容差（量化到出生候选）
 pub const PLAYER_SPAWN_Y_BAND: f32 = 24.0;
-/// 普通模式怪物掉落红药概率
-pub const NORMAL_POTION_DROP_CHANCE: f32 = 0.30;
+/// 普通/小游戏模式：红药少见，主掉落为金币
+pub const NORMAL_POTION_DROP_CHANCE: f32 = 0.05;
+/// 普通模式每只怪金币堆数
+pub const NORMAL_MESO_PILES_MIN: u32 = 1;
+pub const NORMAL_MESO_PILES_MAX: u32 = 2;
 /// 名牌：脚点下方间距、内边距、字号（凤凰点阵体 16px，对齐原版 UIImageText）
 pub const NAME_TAG_GAP_BELOW_FEET: f32 = 3.0;
 pub const NAME_TAG_PAD_X: f32 = 4.0;

@@ -132,7 +132,7 @@ pub fn draw_content(assets: &GameViewAssets, sim: &GameSim) {
             DropKind::Meso => &assets.meso,
             DropKind::RedPotion => &assets.potion,
         };
-        let s = 24.0;
+        let s = 32.0;
         draw_texture_ex(
             tex,
             sx - s * 0.5,

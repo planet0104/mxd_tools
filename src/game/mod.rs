@@ -15,10 +15,10 @@ pub mod input;
 pub mod macro_action;
 pub mod map;
 pub mod movement_gate;
+pub mod nav;
 pub mod npc;
 pub mod observation;
 pub mod odometry;
-pub mod rule_bot;
 pub mod self_anchor;
 pub mod sim;
 pub mod sim_observation;
@@ -26,6 +26,7 @@ pub mod types;
 pub mod view;
 pub mod vision;
 pub mod vision_worker;
+pub mod vision_sense;
 pub mod visual_progress;
 
 use std::path::{Path, PathBuf};
@@ -39,14 +40,14 @@ pub use bot_harness::{
     build_parallel_probe_jobs, default_parallel_episode_seeds, default_probe_seeds,
     evaluate_first_platform_report, format_first_platform_preview_done, probe_duration_secs,
     run_all_yolo_probes, run_episode, run_parallel_probe_pool, run_parallel_probe_subprocess,
-    run_probe_seeds, run_yolo_probes, BotProbeConfig, EpisodeReport, FirstPlatformReport,
-    FirstPlatformTracker, ParallelProbeReport, ProbeDriver, SpawnJumpReport, YoloProbeSet,
-    YoloProbeSummary, DEFAULT_PARALLEL_JOBS, FIRST_PLATFORM_PROBE_TICKS,
+    run_probe_seeds, run_yolo_probes, BotProbeConfig, EpisodeReport,
+    FirstPlatformReport, FirstPlatformTracker, ParallelProbeReport, ProbeDriver, SpawnJumpReport,
+    YoloProbeSet, YoloProbeSummary, DEFAULT_PARALLEL_JOBS, FIRST_PLATFORM_PROBE_TICKS,
 };
 pub use camera::WorldCamera;
 pub use combat_fsm::CombatFsm;
 pub use config::{GameSimConfig, VisionAnchorConfig, VisionPaceConfig};
-pub use explore_memory::{ExploreHints, ExploreMemory};
+pub use explore_memory::{visit_key, ExploreHints, ExploreMemory};
 pub use fitness::{
     FitnessPreviewDiag, FitnessShapingConfig, TrainingFitness, CURRICULUM_VERTICAL_GEN,
     EXPLORE_STALL_TICKS,
@@ -57,18 +58,19 @@ pub use input::InputFrame;
 pub use macro_action::{MacroAction, MacroRunner, MACRO_ACTION_COUNT};
 pub use map::{ClimbDir, ClimbHint, GameMap, Portal};
 pub use movement_gate::{MovementGate, MovementGateCtx};
+pub use nav::{MapGraph, NavBot, NavBotConfig, NavCtx, SubGoal};
 pub use npc::NpcPlayerState;
 pub use observation::{
     inject_proprioception, obs_climb_grab_ready, obs_climb_hint, obs_enemy_in_attack_range,
     obs_farm_band_enemies, obs_floor_ahead, obs_floor_ahead_connected, obs_floor_drop_ahead,
     obs_floor_underfoot, obs_has_drop, obs_has_ladder_or_rope_signal, obs_has_nearby_platform_enemy,
     obs_has_platform_enemy, obs_has_same_level_enemy, obs_jump_allowed, obs_jump_target_ahead,
-    obs_nearest_same_level_enemy_px, obs_step_up_dx, VisionObservation,
+    obs_nearest_same_level_enemy_px, obs_same_level_gap_ahead, obs_step_up_dx, VisionObservation,
     OBS_DIM, OBS_DROP_SLOTS, OBS_DROP_START, OBS_ENEMY_SLOTS, OBS_ENEMY_START, OBS_FLOOR_SLOTS,
     OBS_FLOOR_START, OBS_LADDER_SLOTS, OBS_LADDER_START, OBS_PROPRIO, OBS_PROPRIO_START,
     OBS_ROPE_SLOTS, OBS_ROPE_START, OBS_SLOT_DIM, VISION_CONF_THRESH,
 };
-pub use rule_bot::{visit_key, RuleBot, RuleBotCtx, VisionSenseState};
+pub use vision_sense::VisionSenseState;
 pub use self_anchor::{apply_anchor_jitter, episode_anchor_offset};
 pub use sim::{EngageHint, GameModal, GameSim, GameState, GroundTruth, MobState, PlayerState};
 pub use sim_observation::observation_from_sim;
@@ -133,7 +135,8 @@ pub fn portal_sprite_dir() -> PathBuf {
 pub fn drop_texture_path(kind: types::DropKind) -> PathBuf {
     let root = assets_root().join("drops");
     match kind {
-        types::DropKind::Meso => root.join("金币/meso_00.png"),
+        // Special/0900：meso_00~04 是钱袋，07/08 才是金币硬币（YOLO「金币」类也按硬币训）
+        types::DropKind::Meso => root.join("金币/meso_07.png"),
         types::DropKind::RedPotion => find_potion_icon(&root),
     }
 }

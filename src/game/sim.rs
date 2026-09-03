@@ -157,6 +157,12 @@ pub struct GameSim {
     pub npc_players: Vec<NpcPlayerState>,
     pub movement_gate: MovementGate,
     pub fitness: TrainingFitness,
+    /// NavBot 执行 StepUp 时强制允许跳上台阶（不依赖物理 nearest_step 探针）。
+    pub force_allow_step_up: bool,
+    /// NavBot GoTo/Patrol：物理可走时放行左右（不被 YOLO 碎地板挡）。
+    pub force_allow_nav_walk: bool,
+    /// 上一帧 jump，用于攀爬 jump_off 上升沿（按住 jump+up 抓梯不会立刻弹开）。
+    jump_prev: bool,
     spawn_x: f32,
     spawn_y: f32,
     rng: StdRng,
@@ -238,6 +244,9 @@ impl GameSim {
             npc_players: Vec::new(),
             movement_gate: MovementGate::default(),
             fitness: TrainingFitness::default(),
+            force_allow_step_up: false,
+            force_allow_nav_walk: false,
+            jump_prev: false,
             spawn_x,
             spawn_y,
             rng,
@@ -276,6 +285,28 @@ impl GameSim {
         } else {
             p.on_ground = false;
         }
+    }
+
+    /// 全局卡住硬重置：强制脱离绳索并尽量落到近旁平台。
+    pub fn force_dismount_climb(&mut self) {
+        if !self.state.player.climbing {
+            return;
+        }
+        let (x, y) = (self.state.player.x, self.state.player.y);
+        let stand = self.map.stand_at(x, y, 64.0).or_else(|| {
+            self.map.rope_at(x, y).and_then(|r| {
+                let top = r.y1.min(r.y2);
+                self.map.stand_at_climb_exit(r.x, top)
+            })
+        });
+        {
+            let p = &mut self.state.player;
+            p.climbing = false;
+            p.climb_kind.clear();
+            p.vx = 0.0;
+            p.vy = 0.0;
+        }
+        Self::apply_stand(&mut self.state.player, stand);
     }
 
     fn check_void_fall(&mut self) {
@@ -428,7 +459,8 @@ impl GameSim {
                 .map(|h| h.player_behind())
                 .unwrap_or(false),
             adjacent_climb: self.nearest_adjacent_climb().is_some(),
-            allow_step_up: self.nearest_step_up_dx().is_some(),
+            allow_step_up: self.nearest_step_up_dx().is_some() || self.force_allow_step_up,
+            allow_nav_walk: self.force_allow_nav_walk,
         }
     }
 
@@ -528,6 +560,7 @@ impl GameSim {
             self.use_potion();
         }
         self.tick_player(&effective, dt);
+        self.jump_prev = effective.jump;
         if self.config.training {
             let (px, py) = (self.state.player.x, self.state.player.y);
             let grounded = self.state.player.on_ground;
@@ -648,7 +681,11 @@ impl GameSim {
                     p.vy = 0.0;
                     p.x = rx;
                 }
-                self.tick_player_climb(input, dt);
+                // 抓绳当帧忽略 jump：bot 用 jump+up 蹭悬空梯时，同帧 jump_off 会立刻弹开
+                //（日志 1477 梯：y 在 1158↔1201 空转，climb_up_active 几乎不出现）。
+                let mut climb_input = *input;
+                climb_input.jump = false;
+                self.tick_player_climb(&climb_input, dt);
             } else {
                 self.tick_player_move(input, dt);
             }
@@ -904,6 +941,7 @@ impl GameSim {
         let rx = rope.x;
         let ymin = rope.y1.min(rope.y2);
         let ymax = rope.y1.max(rope.y2);
+        let jump_prev = self.jump_prev;
 
         let p = &mut self.state.player;
         p.x = rx;
@@ -919,10 +957,11 @@ impl GameSim {
 
         let at_bottom = p.y >= ymax - 4.0;
         let at_top = p.y <= ymin + 4.0;
-        let jump_off = input.jump;
+        // 仅 jump 上升沿脱离；按住 jump+up 蹭梯时不能每帧弹开。
+        let jump_edge = input.jump && !jump_prev;
         let leave_bottom = at_bottom && input.down && !input.up;
 
-        if jump_off {
+        if jump_edge {
             p.climbing = false;
             p.vy = JUMP_VY * 0.85;
             p.on_ground = false;
@@ -933,8 +972,8 @@ impl GameSim {
             } else {
                 p.on_ground = false;
             }
-        } else if at_top {
-            // 到顶自动站上顶端平台（不再要求松手↑；stand_at 只向下找会漏掉略高的顶板）。
+        } else if at_top && !(input.down && !input.up) {
+            // 到顶自动站上顶端平台；按↓下爬时保持挂绳。
             if let Some(st) = self.map.stand_at_climb_exit(p.x, ymin) {
                 p.climbing = false;
                 Self::apply_stand(p, Some(st));
@@ -1101,7 +1140,8 @@ impl GameSim {
             self.rng
                 .gen_range(TRAINING_MESO_PILES_MIN..=TRAINING_MESO_PILES_MAX)
         } else {
-            1
+            self.rng
+                .gen_range(NORMAL_MESO_PILES_MIN..=NORMAL_MESO_PILES_MAX)
         };
         for i in 0..meso_piles {
             let offset = if meso_piles > 1 {
@@ -1117,7 +1157,8 @@ impl GameSim {
                 bob_t: i as f32 * 0.15,
             });
         }
-        let potion_chance = if self.config.bot_play {
+        // bot_play / training 与小游戏统一：药水稀有，主掉落是金币
+        let potion_chance = if training || self.config.bot_play {
             TRAINING_POTION_DROP_CHANCE
         } else {
             NORMAL_POTION_DROP_CHANCE
@@ -1269,17 +1310,19 @@ impl GameSim {
             }
             return;
         }
+        // 与 obs_drop_in_pickup_range（约 56px）对齐，并略放宽容 YOLO 框心偏差。
+        const PICKUP_RADIUS: f32 = 64.0;
         for drop in &mut self.state.drops {
             if !drop.alive {
                 continue;
             }
             drop.bob_t += dt;
-            let dy = (drop.y - 8.0) - py;
+            // 掉落锚点即 drop.y（生成时已相对怪脚上移）；勿再减 8，否则竖直方向偏严。
+            let dy = drop.y - py;
             let dx = drop.x - px;
-            if (dx * dx + dy * dy).sqrt() > 40.0 {
+            if dx * dx + dy * dy > PICKUP_RADIUS * PICKUP_RADIUS {
                 continue;
             }
-            let (_drop_sx, _drop_sy) = (drop.x - self.state.cam_x, drop.y - self.state.cam_y);
             match drop.kind {
                 DropKind::Meso => {
                     let amount = if self.config.training {
@@ -1470,6 +1513,47 @@ mod control_tests {
     }
 
     #[test]
+    fn rope_top_down_grabs_and_descends() {
+        let mut s = sim(3);
+        // map_50001 绳 x=1286, y1=687..1065；顶板约 y=685
+        s.state.player.x = 1286.0;
+        s.state.player.y = 685.0;
+        s.state.player.on_ground = true;
+        s.state.player.climbing = false;
+        let y0 = s.state.player.y;
+        tick_n(
+            &mut s,
+            &InputFrame {
+                down: true,
+                ..Default::default()
+            },
+            8,
+        );
+        assert!(
+            s.state.player.climbing,
+            "down at rope top should grab rope, y={}",
+            s.state.player.y
+        );
+        tick_n(
+            &mut s,
+            &InputFrame {
+                down: true,
+                ..Default::default()
+            },
+            30,
+        );
+        assert!(
+            s.state.player.y > y0 + 8.0,
+            "should descend rope, y0={y0} y1={}",
+            s.state.player.y
+        );
+        assert!(
+            s.state.player.climbing,
+            "should still be climbing while descending"
+        );
+    }
+
+    #[test]
     fn rope_climb_moves_up() {
         let mut s = sim(3);
         // map_50001 绳 x=1770, y1=567..679
@@ -1515,6 +1599,44 @@ mod control_tests {
         assert!(s.state.player.climbing, "should grab ladder");
         assert!(s.state.player.y < y0 - 5.0);
         assert_eq!(s.state.player.climb_kind, "ladder");
+    }
+
+    #[test]
+    fn ladder_jump_up_from_floor_grabs_not_bounce() {
+        // 复现 preview：站在 y=1225 底台，梯子底在 1191，必须 jump+up；
+        // 旧逻辑抓绳同帧 jump_off，永远 climb_up_regrab。
+        let mut s = sim(4);
+        s.state.player.x = 1477.0;
+        s.state.player.y = 1225.0;
+        s.state.player.on_ground = true;
+        s.state.player.climbing = false;
+        s.state.player.vy = 0.0;
+        let hold = InputFrame {
+            up: true,
+            jump: true,
+            ..Default::default()
+        };
+        let mut grabbed = false;
+        for _ in 0..45 {
+            s.tick(&hold);
+            if s.state.player.climbing {
+                grabbed = true;
+                break;
+            }
+        }
+        assert!(
+            grabbed,
+            "jump+up from floor must grab suspended ladder, y={}",
+            s.state.player.y
+        );
+        // 继续按住 jump+up 也不应立刻弹开。
+        tick_n(&mut s, &hold, 10);
+        assert!(
+            s.state.player.climbing || s.state.player.y < 1100.0,
+            "should stay climbing or have ascended, climbing={} y={}",
+            s.state.player.climbing,
+            s.state.player.y
+        );
     }
 
     #[test]
@@ -1637,6 +1759,29 @@ mod control_tests {
         });
         assert!(s.state.meso > meso0, "pick_up should collect meso");
         assert!(s.state.drops.is_empty());
+    }
+
+    #[test]
+    fn spawn_loot_mostly_meso_few_potions() {
+        let mut s = sim(42);
+        let mut meso = 0u32;
+        let mut potion = 0u32;
+        for i in 0..200 {
+            s.state.drops.clear();
+            s.spawn_loot(100.0 + i as f32, 200.0);
+            for d in &s.state.drops {
+                match d.kind {
+                    DropKind::Meso => meso += 1,
+                    DropKind::RedPotion => potion += 1,
+                }
+            }
+        }
+        assert!(meso >= 200, "each kill drops >=1 meso pile, got {meso}");
+        assert!(
+            potion <= 30,
+            "potion chance ~5%, 200 kills should rarely exceed 30, got {potion}"
+        );
+        assert!(meso > potion * 4, "meso piles should dominate potions");
     }
 
     #[test]

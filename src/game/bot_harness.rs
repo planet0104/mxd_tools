@@ -1,4 +1,4 @@
-//! Headless 规则 bot 多局探针：离屏渲染 + 真实 YOLO/OCR 观测（与 game_preview 一致）。
+//! Headless NavBot 多局探针：离屏渲染 + 真实 YOLO/OCR 观测（与 game_preview 一致）。
 
 use std::collections::HashSet;
 
@@ -8,11 +8,14 @@ use super::config::VisionPaceConfig;
 use super::headless_vision::HeadlessVisionEnv;
 use super::human_pace::HumanPace;
 use super::input::InputFrame;
+use super::map::GameMap;
+use super::explore_memory::visit_key;
+use super::nav::{GlobalStuckWatchdog, NavBot, NavBotConfig};
 use super::observation::{
-    obs_assess_enemy_contact, obs_enemy_in_attack_range, obs_enemy_in_attack_range_platform,
-    obs_has_enemy, obs_platform_edge, OBS_DIM, OBS_ENEMY_SLOTS, OBS_ENEMY_START, OBS_SLOT_DIM,
+    obs_assess_enemy_contact, obs_enemy_in_attack_range, obs_has_enemy, obs_platform_edge, OBS_DIM,
+    OBS_ENEMY_SLOTS, OBS_ENEMY_START, OBS_SLOT_DIM,
 };
-use super::rule_bot::{visit_key, RuleBot, RuleBotCtx, VisionSenseState};
+use super::vision_sense::VisionSenseState;
 use super::sim::GameSim;
 use super::types::{LOGIC_DT, LOGIC_HZ};
 use std::time::{Duration, Instant};
@@ -23,52 +26,224 @@ pub const FIRST_PLATFORM_PROBE_TICKS: u32 = 5_400;
 const STUCK_WINDOW: u32 = 120;
 const STUCK_MOVE_EPS: f32 = 18.0;
 const SINGLE_MOB_ATTACK_WINDOW: u32 = 240;
-/// 默认地图出生区：前 30s 不应疯狂跳跃（seed 0 与 game_preview 默认一致）。
 const SPAWN_PROBE_TICKS: u32 = 1_800;
 const SPAWN_MAX_JUMP_DECISION_RATIO: f32 = 0.15;
 const SPAWN_MAX_EFFECTIVE_JUMP_RATIO: f32 = 0.02;
 
 /// 探针 / 预览主循环：YOLO 异步提交/轮询，sim 每 tick 继续。
 pub struct ProbeDriver {
-    bot: RuleBot,
+    bot: NavBot,
     pace: HumanPace,
     input: InputFrame,
     last_obs: [f32; OBS_DIM],
     sense: VisionSenseState,
     wall_clock_pacing: bool,
+    stuck: GlobalStuckWatchdog,
+    episode_seed: u64,
 }
 
 impl ProbeDriver {
     pub fn new(seed: u64) -> Self {
-        Self::with_pacing(seed, true)
+        Self::with_map(None, seed, true)
+    }
+
+    pub fn new_nav(map: &GameMap, seed: u64) -> Self {
+        Self::with_map(Some(map), seed, true)
     }
 
     /// 窗口预览：逻辑 60Hz 由 macroquad 帧率驱动，不做 thread sleep。
     pub fn new_realtime(seed: u64) -> Self {
-        Self::with_pacing(seed, false)
+        Self::with_map(None, seed, false)
     }
 
-    fn with_pacing(seed: u64, wall_clock_pacing: bool) -> Self {
+    pub fn new_realtime_with_map(map: &GameMap, seed: u64) -> Self {
+        Self::with_map(Some(map), seed, false)
+    }
+
+    fn with_map(map: Option<&GameMap>, seed: u64, wall_clock_pacing: bool) -> Self {
+        let m = map.cloned().unwrap_or_else(|| {
+            super::load_default_map().expect("default map for NavBot")
+        });
+        let bot = NavBot::new(&m, NavBotConfig::default());
         Self {
-            bot: RuleBot::default(),
+            bot,
             pace: HumanPace::new(seed),
             input: InputFrame::default(),
             last_obs: [0.0_f32; OBS_DIM],
             sense: VisionSenseState::default(),
             wall_clock_pacing,
+            stuck: GlobalStuckWatchdog::default(),
+            episode_seed: seed,
         }
     }
 
     pub fn reset(&mut self, seed: u64) {
-        self.bot.reset();
+        let map = super::load_default_map().expect("map");
+        let (x, y) = map.default_spawn();
+        self.episode_seed = seed;
+        self.bot.reset(&map, x, y);
         self.pace.reset(seed);
         self.input = InputFrame::default();
         self.last_obs = [0.0_f32; OBS_DIM];
         self.sense = VisionSenseState::default();
+        self.stuck.reset_tracking(x, y);
     }
 
-    pub fn bot(&self) -> &RuleBot {
+    pub fn reset_with_sim(&mut self, sim: &GameSim, seed: u64) {
+        let p = &sim.state.player;
+        self.episode_seed = seed;
+        self.bot.reset(&sim.map, p.x, p.y);
+        self.pace.reset(seed);
+        self.input = InputFrame::default();
+        self.last_obs = [0.0_f32; OBS_DIM];
+        self.sense = VisionSenseState::default();
+        self.sense.est_x = p.x;
+        self.sense.est_y = p.y;
+        self.sense.anchor_at(p.x, p.y);
+        self.stuck.reset_tracking(p.x, p.y);
+    }
+
+    /// 卡住硬重置：绳顶卡住才计 yoyo/弃绳；绳中卡住只恢复攀爬，禁止第二次就封绳。
+    fn hard_reset_from_stuck(&mut self, sim: &mut GameSim, why: &'static str) {
+        let px = sim.state.player.x;
+        let py = sim.state.player.y;
+        let rope_x = sim
+            .map
+            .rope_at(px, py)
+            .map(|r| r.x)
+            .or_else(|| self.bot.at_climb_top_platform(px, py))
+            .unwrap_or(px);
+
+        let on_rope = sim.state.player.climbing
+            || self.sense.climbing
+            || self.bot.last_reason.contains("climb")
+            || why.contains("climb");
+        let at_rope_top = sim.state.player.climbing
+            && sim.map.rope_at(px, py).is_some_and(|r| {
+                let top = r.y1.min(r.y2);
+                (py - top).abs() <= 10.0
+            });
+        // 注意：图上 ClimbUp 终点可能只是中段台（57→123 y=985），不能当「绳顶」弃绳，
+        // 否则刚爬到中段就被 abandon，永远上不了 StepUp 链。
+        let yoyo = if at_rope_top {
+            self.stuck.note_rope_resume(rope_x) || self.stuck.should_abandon_rope(rope_x)
+        } else {
+            self.stuck.should_abandon_rope(rope_x)
+        };
+
+        if on_rope && (at_rope_top || yoyo) {
+            // 物理绳顶卡住或 yo-yo：封绳离开。
+            sim.force_dismount_climb();
+            self.pace.reset(self.episode_seed.wrapping_add(5));
+            self.bot.abandon_rope(&sim.map, sim.state.player.x, sim.state.player.y, rope_x);
+            self.sense = VisionSenseState::default();
+            self.sense.est_x = sim.state.player.x;
+            self.sense.est_y = sim.state.player.y;
+            self.sense.anchor_at(sim.state.player.x, sim.state.player.y);
+            self.sense.climbing = false;
+            self.stuck.clear_rope_yoyo();
+            self.stuck.note_fired(sim.state.player.x, sim.state.player.y);
+            self.stuck.last_fire = Some("global_stuck_abandon_rope");
+            self.input = InputFrame {
+                left: sim.state.player.x >= rope_x,
+                right: sim.state.player.x < rope_x,
+                ..InputFrame::default()
+            };
+            return;
+        }
+
+        if on_rope && !at_rope_top {
+            self.pace.reset(self.episode_seed.wrapping_add(3));
+            self.input = InputFrame::default();
+            let resumed = self.bot.force_resume_climb(&sim.map, px, py);
+            let mid = self.bot.last_reason == "global_stuck_mid_ascent";
+            if resumed || mid {
+                self.sense = VisionSenseState::default();
+                self.sense.est_x = px;
+                self.sense.est_y = py;
+                self.sense.anchor_at(px, py);
+                self.sense.climbing = if mid {
+                    false
+                } else {
+                    sim.state.player.climbing
+                };
+                if mid {
+                    sim.force_dismount_climb();
+                }
+                self.stuck.note_fired(px, py);
+                self.stuck.last_fire = Some(if mid {
+                    "global_stuck_mid_ascent"
+                } else {
+                    "global_stuck_resume_climb"
+                });
+                self.input = if mid {
+                    let dir = self.bot.patrol_dir();
+                    InputFrame {
+                        right: dir >= 0.0,
+                        left: dir < 0.0,
+                        ..InputFrame::default()
+                    }
+                } else {
+                    InputFrame {
+                        up: true,
+                        ..InputFrame::default()
+                    }
+                };
+                return;
+            }
+            // 已在 ClimbUp 图终点中段台：下绳后记 ascent，继续向上 StepUp，禁止弃绳。
+            if self.bot.at_climb_top_platform(px, py).is_some() && py < 1100.0 {
+                sim.force_dismount_climb();
+                self.bot.soft_reset_keep_progress(&sim.map, px, py);
+                let node = self.bot.localizer_node();
+                self.bot.note_mid_climb_landing(node);
+                self.sense = VisionSenseState::default();
+                self.sense.est_x = px;
+                self.sense.est_y = py;
+                self.sense.anchor_at(px, py);
+                self.sense.climbing = false;
+                self.stuck.note_fired(px, py);
+                self.stuck.last_fire = Some("global_stuck_mid_ascent");
+                self.input = InputFrame::default();
+                return;
+            }
+        }
+
+        sim.force_dismount_climb();
+        let (sx, sy) = (sim.state.player.x, sim.state.player.y);
+        // 硬重置保留探索进度，否则会反复清零 visited，永远在底层兜圈。
+        let (kept_visited, kept_farm, kept_dir) = self.bot.snapshot_explore_progress();
+        self.episode_seed = self.episode_seed.wrapping_add(17);
+        self.reset_with_sim(sim, self.episode_seed);
+        // 防止偶发定位到 (0,0)：强制锚到重置前坐标。
+        if sx.abs() > 1.0 || sy.abs() > 1.0 {
+            self.sense.anchor_at(sx, sy);
+            self.sense.est_x = sx;
+            self.sense.est_y = sy;
+            self.bot.soft_reset_keep_progress(&sim.map, sx, sy);
+        }
+        self.bot
+            .restore_explore_progress(kept_visited, kept_farm, kept_dir);
+        self.bot.last_reason = why;
+        self.stuck.note_fired(self.sense.est_x, self.sense.est_y);
+        self.stuck.last_fire = Some(why);
+    }
+
+    pub fn bot(&self) -> &NavBot {
         &self.bot
+    }
+
+    pub fn bot_mut(&mut self) -> &mut NavBot {
+        &mut self.bot
+    }
+
+    /// 兼容旧名。
+    pub fn nav_bot(&self) -> &NavBot {
+        &self.bot
+    }
+
+    pub fn nav_bot_mut(&mut self) -> &mut NavBot {
+        &mut self.bot
     }
 
     pub fn input(&self) -> InputFrame {
@@ -87,9 +262,23 @@ impl ProbeDriver {
         self.last_obs = obs;
         sim.movement_gate.set_last_observation(&obs);
         self.sense.prepare(&obs);
-        let ctx = RuleBotCtx::from_vision(&obs, &self.sense);
-        self.input = self.bot.decide(ctx);
+        self.input = self.bot.decide(&sim.map, &obs, &self.sense);
         self.sense.after_decide(&self.input, &obs);
+
+        // 全局卡住：位置 ~10s 不动或决策输出循环 → 硬重置全部 bot 状态。
+        if let Some(why) = self.stuck.observe(
+            self.sense.est_x,
+            self.sense.est_y,
+            self.bot.last_reason,
+            &self.input,
+        ) {
+            self.hard_reset_from_stuck(sim, why);
+            let r = self.bot.last_reason;
+            if r != "global_stuck_resume_climb" && r != "global_stuck_abandon_rope" {
+                self.input = InputFrame::default();
+            }
+        }
+
         self.pace.on_intent(self.input, vtick);
     }
 
@@ -142,10 +331,38 @@ impl ProbeDriver {
     }
 
     /// 经 HumanPace 后按 sim 门控核对；若攻击被剥掉则退回 refractory。
-    pub fn paced_input_for_sim(&mut self, sim: &GameSim, tick: u32) -> InputFrame {
+    pub fn paced_input_for_sim(&mut self, sim: &mut GameSim, tick: u32) -> InputFrame {
         // 视觉帧间隙（5–10Hz）内按最近观测刷新站砍，避免怪走进可砍带仍冻在 noop。
         self.refresh_melee_hold();
-        let paced = self.pace.apply(self.input, tick);
+        let intent = self.input;
+        let climbing = sim.state.player.climbing;
+        let mut paced = self.pace.apply(intent, tick);
+        let climb_goal = matches!(
+            self.bot.active_goal(),
+            crate::game::nav::SubGoal::ClimbUp { .. }
+                | crate::game::nav::SubGoal::ClimbDown { .. }
+        );
+        // 爬绳对齐/抓绳：禁止左右 latch 与地面 up 节流，否则冲过绳子且 jump+up 被掐掉。
+        if !climb_goal {
+            paced = self
+                .pace
+                .apply_locomotion_hold(paced, tick, climbing, intent);
+        } else if climbing {
+            // 已挂绳：只保垂直，清左右与 jump（jump 会脱绳）。
+            paced.left = false;
+            paced.right = false;
+            paced.jump = false;
+        }
+        // 输出硬闸：整帧按键组合切换 ≤约 4Hz，杜绝每秒 5～10+ 次换键。
+        paced = self.pace.finalize_output(paced, tick);
+        sim.force_allow_step_up =
+            matches!(self.bot.active_goal(), crate::game::nav::SubGoal::StepUp { .. });
+        sim.force_allow_nav_walk = matches!(
+            self.bot.active_goal(),
+            crate::game::nav::SubGoal::GoTo { .. }
+                | crate::game::nav::SubGoal::Patrol { .. }
+                | crate::game::nav::SubGoal::WalkOff { .. }
+        );
         let effective = sim.effective_bot_input(&paced);
         if paced.attack && !effective.attack {
             self.pace.refund_attack();
@@ -156,14 +373,13 @@ impl ProbeDriver {
     }
 
     /// 可砍带内强制站砍（不走路），覆盖过期的视觉意图。
+    /// 换层过程中只补 attack，不剥左右/跳跃。
     fn refresh_melee_hold(&mut self) {
-        if !obs_enemy_in_attack_range_platform(&self.last_obs, self.sense.facing) {
-            return;
-        }
-        self.input.attack = true;
-        self.input.left = false;
-        self.input.right = false;
-        self.input.jump = false;
+        self.input = self.bot.refresh_melee_hold(
+            &self.last_obs,
+            self.sense.facing,
+        );
+        // bot.refresh_melee_hold 已按 goal 处理；同步回 driver.input
     }
 
     pub fn tick_sim(&mut self, sim: &mut GameSim, tick: u32) -> InputFrame {
@@ -340,13 +556,9 @@ pub async fn run_spawn_jump_probe(
             .await?
         {
             vision_frames += 1;
-            let seeking = driver.bot().explore_seeking_vertical();
             let input = driver.input();
             if input.jump {
                 raw_jump_decisions += 1;
-                if seeking {
-                    seek_vertical_jump_decisions += 1;
-                }
                 if obs_platform_edge(&obs, 1.0) || obs_platform_edge(&obs, -1.0) {
                     edge_jump_decisions += 1;
                 }
@@ -696,7 +908,7 @@ pub async fn run_episode(
     }
 
     let kills = sim.state.kills.saturating_sub(kills_start);
-    let visited_cells = driver.bot().visited_cell_count();
+    let visited_cells = driver.bot().visited_nodes();
     let x_range = max_x - min_x;
 
     let mut failures = Vec::new();

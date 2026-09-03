@@ -1,4 +1,4 @@
-//! 游戏主线程与 YOLO+OCR 视觉线程解耦；规则 bot 在主线程用最新物理状态决策。
+//! 游戏主线程与 YOLO+OCR 视觉线程解耦；NavBot 在主线程用最新观测决策。
 
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -6,9 +6,11 @@ use std::time::{Duration, Instant};
 use image::RgbImage;
 
 use super::input::InputFrame;
+use super::load_default_map;
+use super::nav::{NavBot, NavBotConfig};
 use super::observation::OBS_DIM;
-use super::rule_bot::{RuleBot, RuleBotCtx, VisionSenseState};
-use super::{GameSim, SimVisionSnapshot, VisionPipeline, VisionStep};
+use super::vision_sense::VisionSenseState;
+use super::{GameMap, GameSim, SimVisionSnapshot, VisionPipeline, VisionStep};
 
 const FRAME_QUEUE: usize = 2;
 
@@ -44,12 +46,13 @@ fn now_ns() -> u64 {
         .unwrap_or(0)
 }
 
-/// 视觉 + 规则 bot 控制器。
+/// 视觉 + NavBot 控制器。
 pub struct AgentController {
     frame_tx: std::sync::mpsc::SyncSender<FrameMsg>,
     result_rx: std::sync::mpsc::Receiver<VisionAgentResult>,
     join: Option<JoinHandle<()>>,
-    bot: RuleBot,
+    bot: NavBot,
+    map: GameMap,
     sense: VisionSenseState,
     last_input: InputFrame,
     last_vision: Option<VisionStep>,
@@ -60,6 +63,8 @@ pub struct AgentController {
 
 impl AgentController {
     pub fn spawn(pipeline: VisionPipeline) -> Self {
+        let map = load_default_map().expect("default map");
+        let bot = NavBot::new(&map, NavBotConfig::default());
         let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel(FRAME_QUEUE);
         let (result_tx, result_rx) = std::sync::mpsc::channel();
         let join = thread::Builder::new()
@@ -71,7 +76,8 @@ impl AgentController {
             frame_tx,
             result_rx,
             join: Some(join),
-            bot: RuleBot::default(),
+            bot,
+            map,
             sense: VisionSenseState::default(),
             last_input: InputFrame::default(),
             last_vision: None,
@@ -190,8 +196,7 @@ impl AgentController {
         sim.movement_gate.set_last_observation(&obs);
 
         self.sense.prepare(&obs);
-        let ctx = RuleBotCtx::from_vision(&obs, &self.sense);
-        self.last_input = self.bot.decide(ctx);
+        self.last_input = self.bot.decide(&self.map, &obs, &self.sense);
         self.sense.after_decide(&self.last_input, &obs);
         result.timing.policy_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
@@ -200,9 +205,11 @@ impl AgentController {
         self.last_poll_timings.push(result.timing);
     }
 
-    pub fn reset_vision_state(&mut self) {
-        self.bot.reset();
+    pub fn reset_vision_state(&mut self, sim: &GameSim) {
+        let p = &sim.state.player;
+        self.bot.reset(&self.map, p.x, p.y);
         self.sense = VisionSenseState::default();
+        self.sense.anchor_at(p.x, p.y);
         self.last_input = InputFrame::default();
         self.last_vision = None;
         self.last_applied_tick = None;
@@ -217,12 +224,6 @@ impl AgentController {
     }
 }
 
-impl Drop for AgentController {
-    fn drop(&mut self) {
-        self.shutdown();
-    }
-}
-
 fn vision_agent_loop(
     frame_rx: std::sync::mpsc::Receiver<FrameMsg>,
     result_tx: std::sync::mpsc::Sender<VisionAgentResult>,
@@ -230,39 +231,38 @@ fn vision_agent_loop(
 ) {
     while let Ok(msg) = frame_rx.recv() {
         match msg {
-            FrameMsg::Shutdown => break,
             FrameMsg::Job {
                 tick,
                 rgb,
                 submitted_ns,
                 sim_snapshot,
             } => {
-                let worker_start = Instant::now();
-                let queue_wait_ms = now_ns().saturating_sub(submitted_ns) as f64 / 1_000_000.0;
+                let queue_wait_ms = now_ns()
+                    .saturating_sub(submitted_ns) as f64
+                    / 1_000_000.0;
                 let t0 = Instant::now();
-                let step = match pipeline.perceive_with_snapshot(&rgb, sim_snapshot) {
+                let step = match pipeline.perceive(&rgb) {
                     Ok(s) => s,
                     Err(e) => {
-                        eprintln!("视觉线程推理失败 tick={tick}: {e}");
-                        break;
+                        eprintln!("vision perceive failed tick={tick}: {e}");
+                        continue;
                     }
                 };
                 let perceive_ms = t0.elapsed().as_secs_f64() * 1000.0;
-
                 let timing = VisionWorkerTiming {
                     tick,
                     queue_wait_ms,
                     perceive_ms,
                     policy_ms: 0.0,
-                    worker_total_ms: worker_start.elapsed().as_secs_f64() * 1000.0,
+                    worker_total_ms: queue_wait_ms + perceive_ms,
                 };
-                if result_tx
-                    .send(VisionAgentResult { tick, step, timing })
-                    .is_err()
-                {
-                    break;
-                }
+                let _ = result_tx.send(VisionAgentResult {
+                    tick,
+                    step,
+                    timing,
+                });
             }
+            FrameMsg::Shutdown => break,
         }
     }
 }
