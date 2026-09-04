@@ -16,6 +16,8 @@ const OPEN_BANNER_WAIT: Duration = Duration::from_millis(200);
 pub struct UsbHidClient {
     port: Box<dyn SerialPort>,
     read_buf: Vec<u8>,
+    /// 当前已下发的修饰键位图（`km`），供修饰键按位增减后整字节回写。
+    mod_mask: u8,
 }
 
 impl UsbHidClient {
@@ -48,6 +50,7 @@ impl UsbHidClient {
         let mut client = Self {
             port,
             read_buf: Vec::with_capacity(256),
+            mod_mask: 0,
         };
         let _ = client.drain_pending(OPEN_BANNER_WAIT);
         Ok(client)
@@ -75,11 +78,27 @@ impl UsbHidClient {
     }
 
     pub fn set_modifier_mask(&mut self, mask: u8) -> Result<(), String> {
-        self.expect_ok(&format!("km 0x{mask:02X}"))
+        self.expect_ok(&format!("km 0x{mask:02X}"))?;
+        self.mod_mask = mask;
+        Ok(())
+    }
+
+    /// 按下修饰键位（bit0=LCtrl …，对应 HID Usage 0xE0+bit）。
+    pub fn modifier_down(&mut self, bit: u8) -> Result<(), String> {
+        let mask = self.mod_mask | bit;
+        self.set_modifier_mask(mask)
+    }
+
+    /// 抬起修饰键位。
+    pub fn modifier_up(&mut self, bit: u8) -> Result<(), String> {
+        let mask = self.mod_mask & !bit;
+        self.set_modifier_mask(mask)
     }
 
     pub fn clear_keys(&mut self) -> Result<(), String> {
-        self.expect_ok("kc")
+        self.expect_ok("kc")?;
+        self.mod_mask = 0;
+        Ok(())
     }
 
     /// 保活：固件按住看门狗依赖定期收包（不必 OK）。

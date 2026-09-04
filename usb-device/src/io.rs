@@ -50,12 +50,31 @@ async fn delay_ms(ms: u32) {
     Timer::after_millis(ms as u64).await;
 }
 
+/// HID 修饰键 Usage（0xE0~0xE7）转 modifier 位图位；普通键返回 `None`。
+/// 按 HID 规范修饰键必须出现在报告的 modifier 字节，放进 keycodes 数组主机会忽略。
+fn modifier_bit(code: u8) -> Option<u8> {
+    if (0xE0..=0xE7).contains(&code) {
+        Some(1 << (code - 0xE0))
+    } else {
+        None
+    }
+}
+
 async fn key_tap<'a, T: Instance>(
     keyboard: &mut HidWriter<'a, Driver<'a, T>, 8>,
     cdc: &mut CdcAcmClass<'a, Driver<'a, T>>,
     kb: &mut KeyboardState,
     code: u8,
 ) {
+    if let Some(bit) = modifier_bit(code) {
+        kb.modifier |= bit;
+        push_keyboard(keyboard, kb).await;
+        delay_ms(20).await;
+        kb.modifier &= !bit;
+        push_keyboard(keyboard, kb).await;
+        delay_ms(10).await;
+        return;
+    }
     if !kb.press(code) {
         write_cdc(cdc, "ERR key slots full\r\n").await;
         return;
@@ -174,7 +193,9 @@ pub async fn handle_line<'a, T: Instance>(
             write_cdc(cdc, "ERR bad code\r\n").await;
             return;
         };
-        if !kb.press(code) {
+        if let Some(bit) = modifier_bit(code) {
+            kb.modifier |= bit;
+        } else if !kb.press(code) {
             write_cdc(cdc, "ERR key slots full\r\n").await;
             return;
         }
@@ -189,7 +210,11 @@ pub async fn handle_line<'a, T: Instance>(
             write_cdc(cdc, "ERR bad code\r\n").await;
             return;
         };
-        kb.release(code);
+        if let Some(bit) = modifier_bit(code) {
+            kb.modifier &= !bit;
+        } else {
+            kb.release(code);
+        }
         push_keyboard(keyboard, kb).await;
         write_cdc(cdc, "OK\r\n").await;
     } else if cmd.eq_ignore_ascii_case("kp") {

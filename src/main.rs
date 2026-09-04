@@ -106,6 +106,10 @@ struct App {
     kb_session: Option<keyboard_input::KeyboardSession>,
     #[cfg(windows)]
     kb_status: String,
+    #[cfg(windows)]
+    always_on_top: bool,
+    #[cfg(windows)]
+    win_opacity: f32,
 }
 
 impl App {
@@ -140,6 +144,10 @@ impl App {
             kb_session: None,
             #[cfg(windows)]
             kb_status: "未连接".into(),
+            #[cfg(windows)]
+            always_on_top: true,
+            #[cfg(windows)]
+            win_opacity: 1.0,
         }
     }
 
@@ -441,6 +449,33 @@ impl eframe::App for App {
                     no_activate::set_enabled(no_steal);
                     no_activate::sync_from_handle(frame);
                 }
+                let mut on_top = self.always_on_top;
+                if ui
+                    .checkbox(&mut on_top, "窗口置顶")
+                    .on_hover_text("本窗口始终位于其他窗口之上；配合不夺取焦点可悬浮在游戏旁操作")
+                    .changed()
+                {
+                    self.always_on_top = on_top;
+                    let level = if on_top {
+                        egui::WindowLevel::AlwaysOnTop
+                    } else {
+                        egui::WindowLevel::Normal
+                    };
+                    ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(level));
+                }
+                let mut opacity = self.win_opacity;
+                if ui
+                    .add(
+                        egui::Slider::new(&mut opacity, 0.2..=1.0)
+                            .text("窗口透明度")
+                            .fixed_decimals(2),
+                    )
+                    .on_hover_text("调低后主窗口半透明，可透出被遮挡的游戏画面（仅视觉，不影响点击）")
+                    .changed()
+                {
+                    self.win_opacity = opacity;
+                    apply_window_opacity(frame, opacity);
+                }
             }
 
             ui.separator();
@@ -657,8 +692,11 @@ impl eframe::App for App {
                     if ui.button("W+A 同按").clicked() {
                         self.send_combo("W+A", &[], &[Key::W, Key::A]);
                     }
-                    if ui.button("J 攻击").clicked() {
-                        self.send_key(&[], Key::J);
+                    if ui.button("Ctrl 攻击").clicked() {
+                        self.send_key(&[], Key::LeftCtrl);
+                    }
+                    if ui.button("Alt 跳跃").clicked() {
+                        self.send_key(&[], Key::LeftAlt);
                     }
                     if ui.button("Z 拾取").clicked() {
                         self.send_key(&[], Key::Z);
@@ -769,6 +807,33 @@ impl eframe::App for App {
         }
         // 先松开 USB/SendInput 按键，再关串口（固件侧仍有断开清键兜底）
         self.drop_kb_session();
+    }
+}
+
+/// 设置主窗口不透明度（1.0=不透明）。WS_EX_LAYERED + SetLayeredWindowAttributes。
+/// 仅视觉透明，不影响点击命中，也不影响「不夺取焦点」。
+#[cfg(windows)]
+fn apply_window_opacity(frame: &eframe::Frame, opacity: f32) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows::Win32::Foundation::{COLORREF, HWND};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetLayeredWindowAttributes, SetWindowLongPtrW, GWL_EXSTYLE, LWA_ALPHA,
+        WS_EX_LAYERED,
+    };
+    let Ok(wh) = frame.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::Win32(win) = wh.as_raw() else {
+        return;
+    };
+    let hwnd = HWND(win.hwnd.get() as *mut _);
+    let alpha = (opacity.clamp(0.05, 1.0) * 255.0).round() as u8;
+    unsafe {
+        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+        if ex & WS_EX_LAYERED.0 == 0 {
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, (ex | WS_EX_LAYERED.0) as isize);
+        }
+        let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), alpha, LWA_ALPHA);
     }
 }
 

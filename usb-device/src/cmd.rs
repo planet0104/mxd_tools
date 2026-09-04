@@ -12,8 +12,8 @@ USB HID+CDC commands (line-based, \\n terminated):\r\n\
 Keyboard:\r\n\
   kb <mod> <k0..k5>   full report (hex/dec)\r\n\
   km <mod>            set modifiers only\r\n\
-  kd <code>           key down\r\n\
-  ku <code>           key up\r\n\
+  kd <code>           key down (0xE0-0xE7 = modifiers)\r\n\
+  ku <code>           key up (0xE0-0xE7 = modifiers)\r\n\
   kp <code>           key press (down+up)\r\n\
   kc                  clear keys+mods\r\n\
   type <text>         type ASCII text\r\n\

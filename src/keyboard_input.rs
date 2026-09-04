@@ -9,8 +9,8 @@ use mxd_tools::game::InputFrame;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     MapVirtualKeyW, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
     KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, MAPVK_VK_TO_VSC, VIRTUAL_KEY, VK_A, VK_C, VK_CONTROL,
-    VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT, VK_S, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
-    VK_W,
+    VK_DOWN, VK_ESCAPE, VK_LEFT, VK_MENU, VK_RETURN, VK_RIGHT, VK_S, VK_SHIFT, VK_SPACE, VK_TAB,
+    VK_UP, VK_W,
 };
 
 use crate::usb_hid::UsbHidClient;
@@ -34,6 +34,7 @@ pub enum Key {
     Up,
     Down,
     LeftCtrl,
+    LeftAlt,
 }
 
 impl Key {
@@ -56,6 +57,7 @@ impl Key {
             Key::Up => "↑上",
             Key::Down => "↓下",
             Key::LeftCtrl => "Ctrl",
+            Key::LeftAlt => "Alt",
         }
     }
 
@@ -78,6 +80,7 @@ impl Key {
             Key::Up => VK_UP,
             Key::Down => VK_DOWN,
             Key::LeftCtrl => VK_CONTROL,
+            Key::LeftAlt => VK_MENU,
         }
     }
 
@@ -105,7 +108,13 @@ impl Key {
             Key::Up => 0x52,
             Key::Down => 0x51,
             Key::LeftCtrl => 0xE0,
+            Key::LeftAlt => 0xE2,
         }
+    }
+
+    /// 是否为 HID 修饰键（Usage 0xE0~0xE7）：USB 通道必须走 modifier 字节而非 keycodes。
+    pub fn is_modifier(self) -> bool {
+        matches!(self, Key::LeftCtrl | Key::LeftAlt)
     }
 }
 
@@ -241,14 +250,29 @@ impl Sink {
     fn key_down(&mut self, key: Key) -> Result<(), String> {
         match self {
             Self::SendInput => send_inputs(&[key_input(key.vk(), false, key.is_extended())]),
-            Self::Usb(c) => c.key_down(key.hid_usage()),
+            Self::Usb(c) => {
+                let usage = key.hid_usage();
+                // 修饰键（0xE0~0xE7）在 keycodes 数组中无效，必须置 modifier 字节。
+                if key.is_modifier() {
+                    c.modifier_down(1 << (usage - 0xE0))
+                } else {
+                    c.key_down(usage)
+                }
+            }
         }
     }
 
     fn key_up(&mut self, key: Key) -> Result<(), String> {
         match self {
             Self::SendInput => send_inputs(&[key_input(key.vk(), true, key.is_extended())]),
-            Self::Usb(c) => c.key_up(key.hid_usage()),
+            Self::Usb(c) => {
+                let usage = key.hid_usage();
+                if key.is_modifier() {
+                    c.modifier_up(1 << (usage - 0xE0))
+                } else {
+                    c.key_up(usage)
+                }
+            }
         }
     }
 
@@ -337,13 +361,14 @@ pub fn tap_keys(cfg: &KeyboardConfig, modifiers: &[Modifier], keys: &[Key]) -> R
 }
 
 /// 与 `mini_game::poll_input` 对齐的键位映射。
+/// 冒险岛正式版键位：Alt=跳跃，Ctrl=攻击。
 const NAV_KEYS: &[(Key, fn(&InputFrame) -> bool)] = &[
     (Key::Left, |f| f.left),
     (Key::Right, |f| f.right),
     (Key::Up, |f| f.up),
     (Key::Down, |f| f.down),
-    (Key::Space, |f| f.jump),
-    (Key::J, |f| f.attack),
+    (Key::LeftAlt, |f| f.jump),
+    (Key::LeftCtrl, |f| f.attack),
     (Key::Z, |f| f.pick_up),
     (Key::Digit1, |f| f.use_potion),
 ];
@@ -373,17 +398,24 @@ impl HeldKeys {
     }
 
     pub fn sync_frame(&mut self, frame: &InputFrame) -> Result<(), String> {
+        // 防误触 Nvidia 录制弹窗（快捷键 Alt+Z）：跳跃(Alt) 与拾取(Z) 不允许同时按住。
+        // 同帧两者同求时跳跃优先、拾取让位——落地后 bot 会持续再发拾取，不丢功能。
+        let mut frame = *frame;
+        if frame.jump && frame.pick_up {
+            frame.pick_up = false;
+        }
+        // 先全部松开、再按下：避免 LZ→LJ 这类转换帧中 Alt 按下时 Z 尚未松开，形成 Alt+Z 瞬间重叠。
         for (i, (key, getter)) in NAV_KEYS.iter().enumerate() {
-            let want = getter(frame);
-            if want == self.down[i] {
-                continue;
-            }
-            if want {
-                self.sink.key_down(*key)?;
-            } else {
+            if self.down[i] && !getter(&frame) {
                 self.sink.key_up(*key)?;
+                self.down[i] = false;
             }
-            self.down[i] = want;
+        }
+        for (i, (key, getter)) in NAV_KEYS.iter().enumerate() {
+            if getter(&frame) && !self.down[i] {
+                self.sink.key_down(*key)?;
+                self.down[i] = true;
+            }
         }
         // 按住期间定期 ping，喂固件 HOLD_WATCHDOG（边沿同步本身不会持续发包）
         if self.down.iter().any(|&d| d)

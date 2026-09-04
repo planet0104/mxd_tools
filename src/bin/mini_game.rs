@@ -113,7 +113,8 @@ async fn main() {
     let mut potion_buf = false;
 
     loop {
-        if is_key_pressed(KeyCode::LeftControl) || is_key_pressed(KeyCode::J) {
+        // 与正式版一致：Ctrl=攻击。
+        if is_key_pressed(KeyCode::LeftControl) {
             attack_buf = true;
         }
         if is_key_pressed(KeyCode::Key1) {
@@ -175,7 +176,8 @@ fn poll_input() -> InputFrame {
     InputFrame {
         left: is_key_down(KeyCode::Left) || is_key_down(KeyCode::A),
         right: is_key_down(KeyCode::Right) || is_key_down(KeyCode::D),
-        jump: is_key_down(KeyCode::Space) || is_key_down(KeyCode::LeftAlt),
+        // 与正式版一致：Alt=跳跃。
+        jump: is_key_down(KeyCode::LeftAlt),
         // 攻击由主循环缓冲/按住写入，这里保持 false 以免丢边沿。
         attack: false,
         up: is_key_down(KeyCode::Up) || is_key_down(KeyCode::W),
