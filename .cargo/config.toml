@@ -1,0 +1,8 @@
+# 切勿在此启用：
+#   rustflags = ["-C", "target-feature=+crt-static"]
+#
+# pyke 预编译的静态 onnxruntime.lib 按 MSVC /MD（动态 CRT）构建，
+# 与 +crt-static（/MT）混链会报 __imp_* / CRT 冲突。
+# 若要「用户免装 VC++ Redistributable」，请运行：
+#   powershell -File scripts/pack_release.ps1
+# 它会把 VCRUNTIME / MSVCP / DirectML 拷到发布目录，与 exe 同目录即可加载。

@@ -56,6 +56,8 @@ windows = { version = "0.61", features = [
 winresource = "0.1"
 
 # 速度优先的 release（体积靠 lto/strip/abort 再抠一点）
+# 注意：不要加 rustflags=+crt-static。静态 ORT 为 /MD，混用会链接失败。
+# 免装 VC++：powershell -File scripts/pack_release.ps1（旁路携带运行库 DLL）
 [profile.release]
 opt-level = 3
 lto = true
