@@ -1,4 +1,4 @@
-//! 外挂式 Live Nav：截取 mini_game 窗口 → YOLO + SelfTracker → NavBot → 键盘注入。
+//! 外挂式 Live Nav：截取游戏窗口（复刻版或正式客户端）→ YOLO + SelfTracker → NavBot → 键盘注入。
 //! 键盘默认走 RP2040 USB HID；也可选 SendInput。
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,7 +18,7 @@ use mxd_tools::yolo::YoloDevice;
 use crate::keyboard_input::{HeldKeys, KeyboardConfig};
 use crate::live_nav_diag::NavDiagLogger;
 use crate::win_capture::{
-    capture_client_rgb, find_mini_game_window, focus_window, window_alive, GameWindow,
+    capture_client_rgb, find_game_window, focus_window, window_alive, CaptureTarget, GameWindow,
 };
 
 pub enum LiveNavEvent {
@@ -440,13 +440,19 @@ YOLO完成={yolo_n} 均感知={avg_yolo:.1}ms 峰={:.1}ms 排队={avg_queue:.1}m
     }
 }
 
+/// 后台寻路参数。
+pub struct LiveNavConfig {
+    pub kb: KeyboardConfig,
+    pub capture: CaptureTarget,
+}
+
 /// 后台寻路线程入口。
-pub fn run_live_nav(stop: Arc<AtomicBool>, tx: Sender<LiveNavEvent>, kb: KeyboardConfig) {
+pub fn run_live_nav(stop: Arc<AtomicBool>, tx: Sender<LiveNavEvent>, cfg: LiveNavConfig) {
     let send = |ev: LiveNavEvent| {
         let _ = tx.send(ev);
     };
 
-    if let Err(e) = run_live_nav_inner(stop, &send, kb) {
+    if let Err(e) = run_live_nav_inner(stop, &send, cfg) {
         send(LiveNavEvent::Stopped {
             reason: format!("异常退出：{e:#}"),
         });
@@ -456,8 +462,9 @@ pub fn run_live_nav(stop: Arc<AtomicBool>, tx: Sender<LiveNavEvent>, kb: Keyboar
 fn run_live_nav_inner(
     stop: Arc<AtomicBool>,
     send: &dyn Fn(LiveNavEvent),
-    kb: KeyboardConfig,
+    cfg: LiveNavConfig,
 ) -> Result<()> {
+    let LiveNavConfig { kb, capture } = cfg;
     send(LiveNavEvent::Log(
         "正在加载地图与 YOLO 模型…".into(),
     ));
@@ -468,6 +475,11 @@ fn run_live_nav_inner(
     let mut driver = LiveNavDriver::new(map, 42);
     let mut keys = HeldKeys::open(&kb).map_err(|e| anyhow::anyhow!("打开键盘后端失败：{e}"))?;
     send(LiveNavEvent::Log(format!("键盘后端：{}", keys.describe())));
+    send(LiveNavEvent::Log(format!(
+        "截图目标：{}（标题含「{}」）",
+        capture.label(),
+        capture.title_hint()
+    )));
     let mut tracker = SelfTracker::new();
     let mut last_commanded_dx = 0.0_f32;
     let mut pending_commanded_dx: Option<f32> = None;
@@ -481,7 +493,7 @@ fn run_live_nav_inner(
         mxd_tools::yolo::EMBEDDED_YOLO_ONNX_NAME,
         vision.max_hz,
         LOGIC_HZ,
-        crate::win_capture::MINI_GAME_TITLE,
+        capture.title_hint(),
     )));
     send(LiveNavEvent::Log(
         "性能日志：每 2s 输出分段耗时与实际/理论帧率（理论=1000/运算均耗时）".into(),
@@ -540,7 +552,7 @@ fn run_live_nav_inner(
         let poll_ms = ms(t0.elapsed());
 
         if vision.should_capture(tick, worker.in_flight_frames()) {
-            let win = match resolve_window(&mut hwnd_cache) {
+            let win = match resolve_window(&mut hwnd_cache, capture) {
                 Ok(w) => w,
                 Err(e) => {
                     consecutive_capture_fail = consecutive_capture_fail.saturating_add(1);
@@ -685,17 +697,25 @@ fn maybe_emit_perf(
     *last_status = Instant::now();
 }
 
-fn resolve_window(cache: &mut Option<GameWindow>) -> Result<GameWindow, String> {
+fn resolve_window(
+    cache: &mut Option<GameWindow>,
+    target: CaptureTarget,
+) -> Result<GameWindow, String> {
     if let Some(w) = cache.as_ref() {
         if window_alive(w.as_hwnd()) {
             return Ok(w.clone());
         }
     }
-    let w = find_mini_game_window().ok_or_else(|| {
-        format!(
+    let w = find_game_window(target).ok_or_else(|| match target {
+        CaptureTarget::MiniGame => format!(
             "未找到「{}」窗口，请先单独运行：cargo run --bin mini_game",
-            crate::win_capture::MINI_GAME_TITLE
-        )
+            target.title_hint()
+        ),
+        CaptureTarget::ClassicClient => format!(
+            "未找到「{}」窗口（进程 Maplestory_Classic）。请先启动正式客户端。安装目录示例：{}",
+            target.title_hint(),
+            crate::win_capture::CLASSIC_INSTALL_DIR
+        ),
     })?;
     let _ = focus_window(w.as_hwnd());
     *cache = Some(w.clone());

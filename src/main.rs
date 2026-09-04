@@ -95,6 +95,10 @@ struct App {
     #[cfg(windows)]
     nav_status: String,
     #[cfg(windows)]
+    capture_target: win_capture::CaptureTarget,
+    #[cfg(windows)]
+    capture_detect: String,
+    #[cfg(windows)]
     kb_backend: keyboard_input::KeyboardBackend,
     #[cfg(windows)]
     usb_port: String,
@@ -112,7 +116,7 @@ impl App {
             map_name: "彩虹岛-南港西郊平原".into(),
             log: "就绪。地图名可填中文或数字 ID。\n\
 · 提取小地图与完整图：从网络下载资源\n\
-· 寻路：请先另开终端运行 cargo run --bin mini_game，再点「开始寻路」\n\
+· 寻路：可选复刻版 mini_game 或正式「冒险岛怀旧服」窗口，再点「开始寻路」\n\
 · 键盘默认走 RP2040 USB 虚拟键盘（可在下方切换为 SendInput）\n"
                 .into(),
             busy: false,
@@ -124,6 +128,10 @@ impl App {
             nav_stop: None,
             #[cfg(windows)]
             nav_status: "寻路未运行".into(),
+            #[cfg(windows)]
+            capture_target: win_capture::CaptureTarget::MiniGame,
+            #[cfg(windows)]
+            capture_detect: "尚未检测窗口".into(),
             #[cfg(windows)]
             kb_backend: keyboard_input::KeyboardBackend::UsbHid,
             #[cfg(windows)]
@@ -256,6 +264,44 @@ impl App {
     }
 
     #[cfg(windows)]
+    fn detect_capture_window(&mut self) {
+        let target = self.capture_target;
+        match win_capture::find_game_window(target) {
+            Some(w) => {
+                let msg = format!("已找到：{}", w.short_desc());
+                self.capture_detect = msg.clone();
+                self.append_log(format!("[窗口] {msg}"));
+            }
+            None => {
+                let candidates = win_capture::list_candidate_windows(target);
+                let msg = if candidates.is_empty() {
+                    match target {
+                        win_capture::CaptureTarget::MiniGame => {
+                            format!("未找到「{}」；请先 cargo run --bin mini_game", target.title_hint())
+                        }
+                        win_capture::CaptureTarget::ClassicClient => format!(
+                            "未找到「{}」/Maplestory_Classic；请确认已启动正式客户端",
+                            target.title_hint()
+                        ),
+                    }
+                } else {
+                    format!(
+                        "候选 {} 个但未选中最佳匹配：{}",
+                        candidates.len(),
+                        candidates
+                            .iter()
+                            .map(|w| w.short_desc())
+                            .collect::<Vec<_>>()
+                            .join(" | ")
+                    )
+                };
+                self.capture_detect = msg.clone();
+                self.append_log(format!("[窗口] {msg}"));
+            }
+        }
+    }
+
+    #[cfg(windows)]
     fn start_nav(&mut self) {
         if self.nav_running {
             self.append_log("寻路已在运行");
@@ -267,13 +313,15 @@ impl App {
         // USB 串口同一时间只能被一方占用
         self.drop_kb_session();
         let kb = self.kb_config();
+        let capture = self.capture_target;
         let tx = tx0;
         let stop = Arc::new(AtomicBool::new(false));
         self.nav_stop = Some(stop.clone());
         self.nav_running = true;
         self.nav_status = "启动中…".into();
         self.append_log(format!(
-            "[寻路] 启动后台线程…（键盘：{}）",
+            "[寻路] 启动后台线程…（目标：{}；键盘：{}）",
+            capture.label(),
             kb.backend.label()
         ));
         thread::Builder::new()
@@ -290,7 +338,11 @@ impl App {
                         }
                     }
                 });
-                live_nav::run_live_nav(stop, nav_tx, kb);
+                live_nav::run_live_nav(
+                    stop,
+                    nav_tx,
+                    live_nav::LiveNavConfig { kb, capture },
+                );
                 let _ = bridge_thread.join();
             })
             .expect("spawn live-nav");
@@ -423,14 +475,41 @@ impl eframe::App for App {
                 ui.separator();
                 ui.heading("NavBot 实时寻路");
                 ui.label(
-                    "附着独立进程 mini_game 窗口：实时截图 → YOLO+SelfTracker → NavBot → 键盘注入。",
+                    "附着游戏窗口：实时截图 → YOLO+SelfTracker → NavBot → 键盘注入。可切换复刻版 / 正式客户端。",
                 );
+                ui.add_enabled_ui(!self.nav_running, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("截图目标");
+                        let mut changed = false;
+                        changed |= ui
+                            .radio_value(
+                                &mut self.capture_target,
+                                win_capture::CaptureTarget::MiniGame,
+                                win_capture::CaptureTarget::MiniGame.label(),
+                            )
+                            .changed();
+                        changed |= ui
+                            .radio_value(
+                                &mut self.capture_target,
+                                win_capture::CaptureTarget::ClassicClient,
+                                win_capture::CaptureTarget::ClassicClient.label(),
+                            )
+                            .changed();
+                        if changed {
+                            self.capture_detect = "目标已切换，请点「检测窗口」".into();
+                        }
+                        if ui.button("检测窗口").clicked() {
+                            self.detect_capture_window();
+                        }
+                    });
+                });
+                ui.label(format!("窗口：{}", self.capture_detect));
                 ui.label(format!("状态：{}", self.nav_status));
                 ui.horizontal(|ui| {
                     ui.add_enabled_ui(!self.nav_running, |ui| {
                         if ui
                             .button("开始寻路")
-                            .on_hover_text("先运行 cargo run --bin mini_game")
+                            .on_hover_text("先选择截图目标并确保对应窗口已打开")
                             .clicked()
                         {
                             self.start_nav();
