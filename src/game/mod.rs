@@ -65,6 +65,7 @@ pub use types::{
 pub use vision::{
     assert_training_frame, filter_detections, SimVisionSnapshot, VisionPipeline, VisionStep,
 };
+pub use vision_worker::VisionWorker;
 pub use visual_progress::{LocationNode, VisualMotionEstimator};
 
 pub fn assets_root() -> PathBuf {

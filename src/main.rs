@@ -1,10 +1,18 @@
 #[cfg(windows)]
 mod keyboard_input;
 #[cfg(windows)]
+mod live_nav;
+#[cfg(windows)]
+mod live_nav_diag;
+#[cfg(windows)]
 mod no_activate;
+#[cfg(windows)]
+mod win_capture;
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::Arc;
 use std::thread;
 
 use eframe::egui;
@@ -65,6 +73,8 @@ fn setup_cjk_fonts(ctx: &egui::Context) {
 enum JobResult {
     Log(String),
     Done,
+    #[cfg(windows)]
+    Nav(live_nav::LiveNavEvent),
 }
 
 struct App {
@@ -74,6 +84,12 @@ struct App {
     busy: bool,
     tx: Option<Sender<JobResult>>,
     rx: Receiver<JobResult>,
+    #[cfg(windows)]
+    nav_running: bool,
+    #[cfg(windows)]
+    nav_stop: Option<Arc<AtomicBool>>,
+    #[cfg(windows)]
+    nav_status: String,
 }
 
 impl App {
@@ -82,10 +98,19 @@ impl App {
         Self {
             root: workspace_root(),
             map_name: "彩虹岛-南港西郊平原".into(),
-            log: "就绪。地图名可填中文或数字 ID。\n· 提取小地图与完整图：从网络下载资源\n".into(),
+            log: "就绪。地图名可填中文或数字 ID。\n\
+· 提取小地图与完整图：从网络下载资源\n\
+· 寻路：请先另开终端运行 cargo run --bin mini_game，再点「开始寻路」\n"
+                .into(),
             busy: false,
             tx: Some(tx),
             rx,
+            #[cfg(windows)]
+            nav_running: false,
+            #[cfg(windows)]
+            nav_stop: None,
+            #[cfg(windows)]
+            nav_status: "寻路未运行".into(),
         }
     }
 
@@ -138,7 +163,73 @@ impl App {
                     self.busy = false;
                     self.append_log("任务结束");
                 }
+                #[cfg(windows)]
+                JobResult::Nav(ev) => match ev {
+                    live_nav::LiveNavEvent::Log(s) => {
+                        let line = format!("[寻路] {s}");
+                        eprintln!("{line}");
+                        self.append_log(line);
+                    }
+                    live_nav::LiveNavEvent::Status(s) => {
+                        eprintln!("[寻路状态] {s}");
+                        self.nav_status = s;
+                    }
+                    live_nav::LiveNavEvent::Stopped { reason } => {
+                        self.nav_running = false;
+                        self.nav_stop = None;
+                        self.nav_status = reason.clone();
+                        let line = format!("[寻路] {reason}");
+                        eprintln!("{line}");
+                        self.append_log(line);
+                    }
+                },
             }
+        }
+    }
+
+    #[cfg(windows)]
+    fn start_nav(&mut self) {
+        if self.nav_running {
+            self.append_log("寻路已在运行");
+            return;
+        }
+        let Some(tx0) = &self.tx else {
+            return;
+        };
+        let tx = tx0.clone();
+        let stop = Arc::new(AtomicBool::new(false));
+        self.nav_stop = Some(stop.clone());
+        self.nav_running = true;
+        self.nav_status = "启动中…".into();
+        self.append_log("[寻路] 启动后台线程…");
+        thread::Builder::new()
+            .name("live-nav".into())
+            .spawn(move || {
+                let (nav_tx, nav_rx) = mpsc::channel();
+                let bridge = tx.clone();
+                let bridge_thread = thread::spawn(move || {
+                    while let Ok(ev) = nav_rx.recv() {
+                        let stop_msg = matches!(ev, live_nav::LiveNavEvent::Stopped { .. });
+                        let _ = bridge.send(JobResult::Nav(ev));
+                        if stop_msg {
+                            break;
+                        }
+                    }
+                });
+                live_nav::run_live_nav(stop, nav_tx);
+                let _ = bridge_thread.join();
+            })
+            .expect("spawn live-nav");
+    }
+
+    #[cfg(windows)]
+    fn stop_nav(&mut self) {
+        if let Some(stop) = &self.nav_stop {
+            stop.store(true, Ordering::SeqCst);
+            self.append_log("[寻路] 正在停止…");
+            self.nav_status = "正在停止…".into();
+        } else {
+            self.append_log("寻路未在运行");
         }
     }
 
@@ -170,6 +261,10 @@ impl eframe::App for App {
         if self.busy {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
+        #[cfg(windows)]
+        if self.nav_running {
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        }
 
         #[cfg(windows)]
         no_activate::sync_from_handle(frame);
@@ -183,7 +278,7 @@ impl eframe::App for App {
                 let mut no_steal = no_activate::enabled();
                 if ui
                     .checkbox(&mut no_steal, "点击不夺取焦点（类似屏幕键盘）")
-                    .on_hover_text("开启后点本窗口按钮不会抢走其他程序焦点")
+                    .on_hover_text("开启后点本窗口按钮不会抢走其他程序焦点；寻路时请保持小游戏在前台")
                     .changed()
                 {
                     no_activate::set_enabled(no_steal);
@@ -216,6 +311,32 @@ impl eframe::App for App {
 
             if self.busy {
                 ui.label("执行中…");
+            }
+
+            #[cfg(windows)]
+            {
+                ui.separator();
+                ui.heading("NavBot 实时寻路");
+                ui.label(
+                    "附着独立进程 mini_game 窗口：实时截图 → YOLO+OCR → NavBot → SendInput。",
+                );
+                ui.label(format!("状态：{}", self.nav_status));
+                ui.horizontal(|ui| {
+                    ui.add_enabled_ui(!self.nav_running, |ui| {
+                        if ui
+                            .button("开始寻路")
+                            .on_hover_text("先运行 cargo run --bin mini_game")
+                            .clicked()
+                        {
+                            self.start_nav();
+                        }
+                    });
+                    ui.add_enabled_ui(self.nav_running, |ui| {
+                        if ui.button("结束寻路").clicked() {
+                            self.stop_nav();
+                        }
+                    });
+                });
             }
 
             #[cfg(windows)]
@@ -278,12 +399,19 @@ impl eframe::App for App {
                 });
         });
     }
+
+    #[cfg(windows)]
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if let Some(stop) = &self.nav_stop {
+            stop.store(true, Ordering::SeqCst);
+        }
+    }
 }
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([820.0, 760.0])
+            .with_inner_size([820.0, 820.0])
             .with_title("冒险岛经典版工具"),
         ..Default::default()
     };

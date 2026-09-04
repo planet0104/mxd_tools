@@ -12,7 +12,9 @@ use super::map_graph::MapGraph;
 use super::navigator::Navigator;
 use super::pickup::PickupController;
 use super::progress::ProgressMonitor;
-use super::types::{EdgeKind, ExecutorResult, NavBotConfig, NavDiagSnapshot, Side, SubGoal};
+use super::types::{
+    EdgeKind, ExecutorResult, NavBotConfig, NavDiagSnapshot, PlatformNodeId, Side, SubGoal,
+};
 
 fn holds_subgoal(goal: SubGoal) -> bool {
     !matches!(goal, SubGoal::Patrol { .. } | SubGoal::Idle)
@@ -368,6 +370,43 @@ impl NavBot {
 
     pub fn diag(&self) -> &NavDiagSnapshot {
         &self.last_diag
+    }
+
+    /// 当前节点可出边摘要（诊断：是否有 Climb / StepUp）。
+    pub fn exit_summary(&self, node: PlatformNodeId) -> String {
+        let mut parts = Vec::new();
+        for e in &self.graph.edges {
+            if e.from != node {
+                continue;
+            }
+            let blocked = self
+                .navigator
+                .explore
+                .blocked_edges
+                .contains_key(&(e.from, e.kind, e.to));
+            parts.push(format!(
+                "{}->{}@{}{}{}",
+                e.kind.label(),
+                e.to,
+                e.target_x as i32,
+                e.rope_x
+                    .map(|x| format!(" rope={x:.0}"))
+                    .unwrap_or_default(),
+                if blocked { "!" } else { "" }
+            ));
+        }
+        if parts.is_empty() {
+            "none".into()
+        } else {
+            parts.join(", ")
+        }
+    }
+
+    /// 是否贴近图节点左右缘（约 28px，对齐 step_up at_ledge）。
+    pub fn at_node_ledge(&self, node: PlatformNodeId, x: f32) -> bool {
+        self.graph.get(node).is_some_and(|n| {
+            x >= n.x_max - 28.0 || x <= n.x_min + 28.0
+        })
     }
 
     pub fn visited_nodes(&self) -> usize {

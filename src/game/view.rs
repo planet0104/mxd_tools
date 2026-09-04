@@ -113,7 +113,7 @@ pub fn draw_content(assets: &GameViewAssets, sim: &GameSim) {
         0.0,
         0.0,
         WINDOW_W,
-        WORLD_VIEW_H,
+        WINDOW_H,
         Color::new(0.05, 0.05, 0.08, 1.0),
     );
     draw_map(&assets.map_bg, cam_x, cam_y);
@@ -501,7 +501,15 @@ fn draw_portal(assets: &GameViewAssets, portal: &Portal, cam_x: f32, cam_y: f32,
 }
 
 fn draw_map(tex: &Texture2D, cam_x: f32, cam_y: f32) {
-    let src = Rect::new(cam_x, cam_y, WINDOW_W, WORLD_VIEW_H);
+    // 画满整窗高度，底部半透明 HUD 才能透出地图（勿裁到 WORLD_VIEW_H）。
+    let map_w = tex.width();
+    let map_h = tex.height();
+    let src_w = WINDOW_W.min(map_w - cam_x).max(0.0);
+    let src_h = WINDOW_H.min(map_h - cam_y).max(0.0);
+    if src_w <= 0.0 || src_h <= 0.0 {
+        return;
+    }
+    let src = Rect::new(cam_x, cam_y, src_w, src_h);
     draw_texture_ex(
         tex,
         0.0,
@@ -509,7 +517,7 @@ fn draw_map(tex: &Texture2D, cam_x: f32, cam_y: f32) {
         WHITE,
         DrawTextureParams {
             source: Some(src),
-            dest_size: Some(vec2(WINDOW_W, WORLD_VIEW_H)),
+            dest_size: Some(vec2(src_w, src_h)),
             ..Default::default()
         },
     );

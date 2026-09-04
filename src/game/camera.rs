@@ -1,4 +1,4 @@
-use crate::game::types::{WINDOW_W, WORLD_VIEW_H};
+use crate::game::types::{WINDOW_H, WINDOW_W, WORLD_VIEW_H};
 
 /// 世界相机：玩家尽量位于游戏区中央；贴地图边缘时相机停住、玩家可继续走向窗口边。
 #[derive(Debug, Clone, Copy)]
@@ -17,9 +17,10 @@ impl WorldCamera {
 
     pub fn follow(&mut self, map_w: f32, map_h: f32, player_x: f32, player_y: f32) {
         let ideal_x = player_x - WINDOW_W * 0.5;
+        // 竖直仍按玩法区高度居中；相机上限按整窗高度，保证面板下仍有地图可透。
         let ideal_y = player_y - WORLD_VIEW_H * 0.5;
         let max_x = (map_w - WINDOW_W).max(0.0);
-        let max_y = (map_h - WORLD_VIEW_H).max(0.0);
+        let max_y = (map_h - WINDOW_H).max(0.0);
         self.cam_x = ideal_x.clamp(0.0, max_x);
         self.cam_y = ideal_y.clamp(0.0, max_y);
     }
