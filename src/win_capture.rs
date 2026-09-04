@@ -22,7 +22,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 /// mini_game 默认窗口标题（见 `src/bin/mini_game.rs`）。
-pub const MINI_GAME_TITLE: &str = "冒险岛小游戏";
+pub const MINI_GAME_TITLE: &str = "mxd小游戏";
 const PROCESS_HINT: &str = "mini_game";
 
 #[derive(Debug, Clone)]

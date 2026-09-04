@@ -1,4 +1,4 @@
-//! 冒险岛怀旧风小游戏（窗口模式）。
+//! mxd怀旧风小游戏（窗口模式）。
 //!
 //! 截图（离屏，供 YOLO / SelfTracker）：
 //!   cargo run --release --bin mini_game_headless -- --screenshot screen_caps/.../out.png
@@ -23,7 +23,7 @@ use mxd_tools::yolo::YoloDevice;
 
 fn window_conf() -> Conf {
     Conf {
-        window_title: "冒险岛小游戏".to_owned(),
+        window_title: "mxd小游戏".to_owned(),
         window_width: (WINDOW_W / 3.0).round() as i32,
         window_height: (WINDOW_H / 3.0).round() as i32,
         window_resizable: true,

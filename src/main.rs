@@ -375,7 +375,7 @@ impl eframe::App for App {
         no_activate::sync_from_handle(frame);
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("冒险岛经典版工具");
+            ui.heading("mxd经典版工具");
             ui.label(format!("工作目录：{}", self.root.display()));
 
             #[cfg(windows)]
@@ -710,7 +710,7 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([820.0, 820.0])
-            .with_title("冒险岛经典版工具")
+            .with_title("mxd经典版工具")
             .with_icon(load_app_icon()),
         ..Default::default()
     };
