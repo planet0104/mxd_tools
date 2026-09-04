@@ -50,6 +50,31 @@ impl VisionPipeline {
         })
     }
 
+    /// 使用编译期嵌入的默认 YOLO（单 exe 发布无需旁路 `.onnx`）。
+    pub fn load_embedded(device: YoloDevice, conf_thresh: f32) -> Result<Self> {
+        let mut detector = YoloDetector::load_from_bytes_with_thresholds(
+            crate::yolo::EMBEDDED_YOLO_ONNX,
+            device,
+            conf_thresh,
+            0.7,
+            640,
+        )?;
+        detector.set_thresholds(conf_thresh, 0.7);
+        Ok(Self {
+            detector,
+            conf_thresh,
+            anchor: VisionAnchorConfig::default(),
+        })
+    }
+
+    /// `Some(path)` 读文件；`None` 用嵌入模型。
+    pub fn load_optional(model: Option<&Path>, device: YoloDevice, conf_thresh: f32) -> Result<Self> {
+        match model {
+            Some(path) => Self::load(path, device, conf_thresh),
+            None => Self::load_embedded(device, conf_thresh),
+        }
+    }
+
     pub fn with_anchor(mut self, anchor: VisionAnchorConfig) -> Self {
         self.anchor = anchor;
         self

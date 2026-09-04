@@ -12,9 +12,8 @@ use std::path::PathBuf;
 use macroquad::prelude::*;
 use mxd_tools::game::{
     assert_yolo_probes_with, build_parallel_episode_jobs, default_parallel_episode_seeds,
-    default_probe_seeds, default_yolo_model_path, run_parallel_probe_pool,
-    run_parallel_probe_subprocess, run_yolo_probes, BotProbeConfig, HeadlessVisionEnv,
-    YoloProbeSet, DEFAULT_PARALLEL_JOBS,
+    default_probe_seeds, run_parallel_probe_pool, run_parallel_probe_subprocess, run_yolo_probes,
+    BotProbeConfig, HeadlessVisionEnv, YoloProbeSet, DEFAULT_PARALLEL_JOBS,
 };
 use mxd_tools::headless_gl;
 
@@ -118,7 +117,7 @@ async fn main() {
         Ok(v) => v,
         Err(e) => {
             eprintln!("初始化 YOLO 探针失败: {e}");
-            eprintln!("模型默认路径: {}", default_yolo_model_path().display());
+            eprintln!("未传 --model 时使用嵌入默认 ONNX");
             std::process::exit(2);
         }
     };

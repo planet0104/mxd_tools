@@ -3,8 +3,9 @@
 //! 截图（离屏，供 YOLO / SelfTracker）：
 //!   cargo run --release --bin mini_game_headless -- --screenshot screen_caps/.../out.png
 //!
-//! 实时 YOLO+SelfTracker 预览（手动操作）：
-//!   cargo run --release --bin mini_game -- --vision-preview --model onnx/yolo_nangang_e3000_best.onnx
+//! 实时 YOLO+SelfTracker 预览（手动操作，默认嵌入模型）：
+//!   cargo run --release --bin mini_game -- --vision-preview
+//!   cargo run --release --bin mini_game -- --vision-preview --model path/to.onnx
 //!
 //! 规则 Bot 自动玩（另开终端）：
 //!   cargo run --release --bin game_preview
@@ -15,8 +16,8 @@ use std::path::PathBuf;
 use macroquad::prelude::*;
 use mxd_tools::game::view;
 use mxd_tools::game::{
-    self, default_yolo_model_path, GameSim, InputFrame, VisionPipeline, VisionStep, LOGIC_DT,
-    VISION_CONF_THRESH, WINDOW_H, WINDOW_W,
+    self, GameSim, InputFrame, VisionPipeline, VisionStep, LOGIC_DT, VISION_CONF_THRESH, WINDOW_H,
+    WINDOW_W,
 };
 use mxd_tools::yolo::YoloDevice;
 
@@ -79,16 +80,18 @@ async fn main() {
     let rt = view::new_render_target();
 
     if vision_preview {
-        let model = arg_value(&args, "--model")
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| default_yolo_model_path().display().to_string());
-        match VisionPipeline::load(
-            PathBuf::from(&model).as_path(),
+        let model_path = arg_value(&args, "--model").map(PathBuf::from);
+        match VisionPipeline::load_optional(
+            model_path.as_deref(),
             YoloDevice::Cpu,
             VISION_CONF_THRESH,
         ) {
             Ok(p) => {
-                eprintln!("视觉预览: YOLO conf>={VISION_CONF_THRESH} model={model}");
+                let label = model_path
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| mxd_tools::yolo::EMBEDDED_YOLO_ONNX_NAME.to_string());
+                eprintln!("视觉预览: YOLO conf>={VISION_CONF_THRESH} model={label}");
                 vision = Some(p);
             }
             Err(e) => eprintln!("加载 YOLO 失败，预览关闭: {e}"),

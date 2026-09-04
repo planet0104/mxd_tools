@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use mxd_tools::game::nav::{GlobalStuckWatchdog, NavBot, NavBotConfig, SubGoal};
 use mxd_tools::game::{
-    default_yolo_model_path, HumanPace, InputFrame, SelfTracker, VisionObservation, VisionPipeline,
-    VisionSenseState, VisionWorker, WINDOW_H, WINDOW_W, LOGIC_HZ, OBS_DIM, VISION_CONF_THRESH,
+    HumanPace, InputFrame, SelfTracker, VisionObservation, VisionPipeline, VisionSenseState,
+    VisionWorker, WINDOW_H, WINDOW_W, LOGIC_HZ, OBS_DIM, VISION_CONF_THRESH,
 };
 use mxd_tools::game::{load_default_map, GameMap};
 use mxd_tools::yolo::YoloDevice;
@@ -461,9 +461,8 @@ fn run_live_nav_inner(
         "正在加载地图与 YOLO 模型…".into(),
     ));
     let map = load_default_map().context("加载默认地图 50001")?;
-    let model = default_yolo_model_path();
-    let pipeline = VisionPipeline::load(&model, YoloDevice::Cpu, VISION_CONF_THRESH)
-        .with_context(|| format!("加载 YOLO：{}", model.display()))?;
+    let pipeline = VisionPipeline::load_embedded(YoloDevice::Cpu, VISION_CONF_THRESH)
+        .context("加载嵌入 YOLO")?;
     let mut worker = VisionWorker::spawn(pipeline);
     let mut driver = LiveNavDriver::new(map, 42);
     let mut keys = HeldKeys::new();
@@ -477,7 +476,7 @@ fn run_live_nav_inner(
 
     send(LiveNavEvent::Log(format!(
         "模型 {}；感知动态上限 {:.0} Hz（空闲才截图+推理，不堆叠）；逻辑目标 {} Hz；请保持「{}」在前台",
-        model.display(),
+        mxd_tools::yolo::EMBEDDED_YOLO_ONNX_NAME,
         vision.max_hz,
         LOGIC_HZ,
         crate::win_capture::MINI_GAME_TITLE,

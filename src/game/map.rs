@@ -133,11 +133,24 @@ pub struct GameMap {
 impl GameMap {
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path).with_context(|| format!("读取 {path:?}"))?;
-        let file: MapPlatformsFile = serde_json::from_str(&text)?;
         let base = path.parent().context("地图目录")?;
+        Self::from_platforms_json(&text, &base.to_string_lossy())
+    }
+
+    /// 从 platforms JSON 文本构建。`image_base` 为图片相对路径基准目录；空则仅保留 JSON 内相对名。
+    pub fn from_platforms_json(text: &str, image_base: &str) -> Result<Self> {
+        let file: MapPlatformsFile = serde_json::from_str(text).context("解析地图 platforms JSON")?;
+        let image_path = if image_base.is_empty() {
+            file.image.clone()
+        } else {
+            Path::new(image_base)
+                .join(&file.image)
+                .to_string_lossy()
+                .into()
+        };
         Ok(Self {
             map_id: file.map_id,
-            image_path: base.join(&file.image).to_string_lossy().into(),
+            image_path,
             width: file.image_size[0] as f32,
             height: file.image_size[1] as f32,
             platforms: file.platforms,

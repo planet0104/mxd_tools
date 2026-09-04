@@ -272,19 +272,10 @@ pub struct HeadlessVisionEnv {
 
 impl HeadlessVisionEnv {
     pub async fn load(model: Option<&Path>) -> Result<Self> {
-        let path = model
-            .map(Path::to_path_buf)
-            .unwrap_or_else(default_yolo_model_path);
-        if !path.exists() {
-            anyhow::bail!(
-                "YOLO 模型不存在: {}（请放置模型或传入 --model）",
-                path.display()
-            );
-        }
         let assets = view::load_view_assets()
             .await
             .map_err(|e| anyhow::anyhow!("加载游戏渲染资源: {e}"))?;
-        let pipeline = VisionPipeline::load(&path, YoloDevice::Cpu, VISION_CONF_THRESH)
+        let pipeline = VisionPipeline::load_optional(model, YoloDevice::Cpu, VISION_CONF_THRESH)
             .context("加载 YOLO")?
             .with_anchor(VisionAnchorConfig::jitter());
         let conf_thresh = pipeline.conf_thresh();

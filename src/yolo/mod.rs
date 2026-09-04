@@ -8,7 +8,7 @@ mod preprocess;
 mod session;
 
 pub use labels::CLASS_NAMES;
-pub use session::YoloDetector;
+pub use session::{YoloDetector, EMBEDDED_YOLO_ONNX, EMBEDDED_YOLO_ONNX_NAME};
 
 #[derive(Debug, Clone, Copy)]
 pub enum YoloDevice {

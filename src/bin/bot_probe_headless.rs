@@ -13,7 +13,7 @@ use macroquad::prelude::*;
 use mxd_tools::game::bot_harness::{
     default_probe_seeds, probe_duration_secs, run_probe_seeds, BotProbeConfig,
 };
-use mxd_tools::game::{default_yolo_model_path, HeadlessVisionEnv, VisionPaceConfig};
+use mxd_tools::game::{HeadlessVisionEnv, VisionPaceConfig};
 use mxd_tools::headless_gl;
 
 fn window_conf() -> Conf {
@@ -65,7 +65,7 @@ async fn main() {
         Ok(v) => v,
         Err(e) => {
             eprintln!("初始化 YOLO 探针失败: {e}");
-            eprintln!("模型默认路径: {}", default_yolo_model_path().display());
+            eprintln!("未传 --model 时使用嵌入默认 ONNX");
             std::process::exit(2);
         }
     };

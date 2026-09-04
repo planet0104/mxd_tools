@@ -180,4 +180,3 @@ usb-device/
 - Pico 请用 **USB 口**（GPIO 复用 USB），不要用 3-pin UART 口当 HID 设备。
 - 首次枚举若串口驱动异常，可尝试重新插拔。
 - `type` / `kp` / `mc` 等命令执行期间 Embassy 异步栈持续运行，避免 USB 超时。
-- 本工程与上级 `mxd_tools` 的 OpenCV / LLVM 等主机环境变量已在本目录 `.cargo/config.toml` 中显式 `unset`，避免互相干扰。

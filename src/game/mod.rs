@@ -78,8 +78,19 @@ pub fn default_map_path() -> PathBuf {
     assets_root().join("maps/50001/map_50001_platforms.json")
 }
 
+/// 默认地图 50001 的 platforms JSON（编译期嵌入，单 exe 无需旁路地图文件）。
+const EMBEDDED_MAP_50001_PLATFORMS: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/maps/50001/map_50001_platforms.json"
+));
+
 pub fn load_default_map() -> Result<GameMap> {
-    GameMap::load(&default_map_path())
+    let path = default_map_path();
+    if path.is_file() {
+        return GameMap::load(&path);
+    }
+    GameMap::from_platforms_json(EMBEDDED_MAP_50001_PLATFORMS, "")
+        .context("加载嵌入的默认地图 50001")
 }
 
 pub fn ui_layout_path() -> PathBuf {

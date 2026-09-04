@@ -4,10 +4,18 @@ use anyhow::{bail, Context, Result};
 use ort::session::Session;
 use ort::value::TensorRef;
 
-use crate::ort_util::{build_session, OrtDevice};
+use crate::ort_util::{build_session, build_session_from_memory, OrtDevice};
 use crate::yolo::postprocess::{decode_yolo_batch_output, decode_yolo_output_flat};
 use crate::yolo::preprocess::{letterbox_rgb_into, LetterboxBuffers};
 use crate::yolo::{Detection, LetterboxMeta, YoloDevice};
+
+/// 默认 YOLO 权重（编译期嵌入，发布 exe 无需旁路 `.onnx`）。
+pub const EMBEDDED_YOLO_ONNX: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/onnx/yolo_nangang_e3000_best.onnx"
+));
+
+pub const EMBEDDED_YOLO_ONNX_NAME: &str = "yolo_nangang_e3000_best.onnx (embedded)";
 
 fn yolo_to_ort(device: YoloDevice) -> OrtDevice {
     match device {
@@ -33,6 +41,15 @@ impl YoloDetector {
         Self::load_with_thresholds(onnx, device, 0.25, 0.7, 640)
     }
 
+    /// 使用编译期嵌入的默认 ONNX。
+    pub fn load_embedded(device: YoloDevice) -> Result<Self> {
+        Self::load_from_bytes_with_thresholds(EMBEDDED_YOLO_ONNX, device, 0.25, 0.7, 640)
+    }
+
+    pub fn load_from_bytes(onnx: &[u8], device: YoloDevice) -> Result<Self> {
+        Self::load_from_bytes_with_thresholds(onnx, device, 0.25, 0.7, 640)
+    }
+
     pub fn load_with_thresholds(
         onnx: &Path,
         device: YoloDevice,
@@ -41,6 +58,27 @@ impl YoloDetector {
         imgsz: u32,
     ) -> Result<Self> {
         let (session, device_label) = build_session(onnx, yolo_to_ort(device), 4)?;
+        Self::from_session(session, device_label, conf, iou, imgsz)
+    }
+
+    pub fn load_from_bytes_with_thresholds(
+        onnx: &[u8],
+        device: YoloDevice,
+        conf: f32,
+        iou: f32,
+        imgsz: u32,
+    ) -> Result<Self> {
+        let (session, device_label) = build_session_from_memory(onnx, yolo_to_ort(device), 4)?;
+        Self::from_session(session, device_label, conf, iou, imgsz)
+    }
+
+    fn from_session(
+        session: Session,
+        device_label: String,
+        conf: f32,
+        iou: f32,
+        imgsz: u32,
+    ) -> Result<Self> {
         eprintln!("YOLO: {device_label}");
         let plane = (imgsz as usize) * (imgsz as usize) * 3;
         Ok(Self {
@@ -50,7 +88,7 @@ impl YoloDetector {
             iou,
             device_label,
             input_buf: Vec::with_capacity(plane),
-            letterbox_bufs: LetterboxBuffers::new().context("初始化 letterbox 缓冲失败")?,
+            letterbox_bufs: LetterboxBuffers::new(),
             batch_tensor_ok: None,
         })
     }

@@ -18,7 +18,7 @@ use macroquad::prelude::*;
 use mxd_tools::game::action::input_label;
 use mxd_tools::game::view;
 use mxd_tools::game::{
-    self, default_yolo_model_path, evaluate_first_platform_report,
+    self, evaluate_first_platform_report,
     format_first_platform_preview_done, DeferredCaptureVision, FirstPlatformTracker,
     GameSim, InputFrame, ProbeDriver, VisionAnchorConfig, VisionPaceConfig, VisionPipeline,
     FIRST_PLATFORM_PROBE_TICKS, LOGIC_DT, OBS_FLOOR_SLOTS, OBS_FLOOR_START, OBS_SLOT_DIM,
@@ -73,7 +73,8 @@ impl NavLogMode {
 }
 
 struct Cli {
-    model: PathBuf,
+    /// `None` = 使用编译期嵌入的默认 ONNX。
+    model: Option<PathBuf>,
     episode_seed: u64,
     pace: VisionPaceConfig,
     quiet: bool,
@@ -110,7 +111,7 @@ impl Cli {
             .and_then(|s| NavLogMode::parse(s))
             .unwrap_or(NavLogMode::Event);
         Self {
-            model: arg_path(args, "--model").unwrap_or_else(default_yolo_model_path),
+            model: arg_path(args, "--model"),
             episode_seed: arg_u64(args, "--seed", 0),
             pace: VisionPaceConfig::from_detect_hz(detect_hz),
             quiet: probe.is_some() || args.iter().any(|a| a == "--quiet"),
@@ -671,8 +672,12 @@ async fn main() {
         }
     };
 
-    let pipeline = match VisionPipeline::load(&cli.model, YoloDevice::Cpu, VISION_CONF_THRESH)
-        .map(|p| p.with_anchor(cli.vision_anchor()))
+    let pipeline = match VisionPipeline::load_optional(
+        cli.model.as_deref(),
+        YoloDevice::Cpu,
+        VISION_CONF_THRESH,
+    )
+    .map(|p| p.with_anchor(cli.vision_anchor()))
     {
         Ok(p) => p,
         Err(e) => {
