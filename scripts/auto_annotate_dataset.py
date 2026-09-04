@@ -10,10 +10,10 @@
 
 用法:
   python scripts/auto_annotate_dataset.py \\
-    --dataset dataset/彩虹岛-南港西郊平原
+    --dataset dataset/nangang_50001
 
   python scripts/auto_annotate_dataset.py \\
-    --dataset dataset/彩虹岛-南港西郊平原 \\
+    --dataset dataset/nangang_50001 \\
     --full-maps 80 --crops-per-map 15 --ui-ratio 0.65 --seed 42
 """
 
@@ -1507,7 +1507,7 @@ def main() -> None:
         "--dataset",
         type=Path,
         required=True,
-        help="dataset 子目录，如 dataset/彩虹岛-南港西郊平原",
+        help="dataset 子目录，如 dataset/nangang_50001",
     )
     ap.add_argument("--assets", type=Path, default=None, help="精灵根目录（默认 assets）")
     ap.add_argument(

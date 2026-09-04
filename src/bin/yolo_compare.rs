@@ -2,7 +2,7 @@
 //!
 //! 用法：
 //!   cargo run --release --bin yolo_compare -- \
-//!     --source screen_caps/彩虹岛-南港西郊平原 \
+//!     --source screen_caps/nangang_50001 \
 //!     --onnx models/yolo_nangang_e1000.onnx \
 //!     --pt models/yolo_nangang_e1000_best.pt
 

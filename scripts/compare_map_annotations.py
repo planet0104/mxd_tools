@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-ANN = ROOT / "dataset/彩虹岛-南港西郊平原/map_50001_render_cn.json"
+ANN = ROOT / "dataset/nangang_50001/map_50001_render_cn.json"
 PLAT = ROOT / "assets/maps/50001/map_50001_platforms.json"
 
 

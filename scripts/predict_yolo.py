@@ -4,12 +4,12 @@
 用法:
   python scripts/predict_yolo.py \\
     --model models/yolo_nangang_e1500_best.pt \\
-    --source screen_caps/彩虹岛-南港西郊平原/ScreenShot_2026-08-20_095130_246.png
+    --source screen_caps/nangang_50001/ScreenShot_2026-08-20_095130_246.png
 
   # 整目录批量
   python scripts/predict_yolo.py \\
     --model models/yolo_nangang_e1500_best.pt \\
-    --source screen_caps/彩虹岛-南港西郊平原 \\
+    --source screen_caps/nangang_50001 \\
     --out runs/detect/yolo_nangang_e1500_labelme
 """
 
@@ -267,7 +267,7 @@ def main() -> int:
         "--source",
         type=Path,
         default=Path(
-            "screen_caps/彩虹岛-南港西郊平原/ScreenShot_2026-08-20_095130_246.png"
+            "screen_caps/nangang_50001/ScreenShot_2026-08-20_095130_246.png"
         ),
         help="单张图片或目录",
     )

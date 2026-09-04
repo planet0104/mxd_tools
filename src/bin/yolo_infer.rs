@@ -3,7 +3,7 @@
 //! 用法：
 //!   cargo run --release --bin yolo_infer -- \
 //!     --model models/yolo_nangang_e2000_best.onnx \
-//!     --source "screen_caps/彩虹岛-南港西郊平原" \
+//!     --source "screen_caps/nangang_50001" \
 //!     --out tmp/yolo_output/20260824_140530 \
 //!     --device cpu
 

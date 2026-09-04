@@ -13,7 +13,7 @@ from pathlib import Path
 from ultralytics import YOLO
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "screen_caps/彩虹岛-南港西郊平原"
+SOURCE = ROOT / "screen_caps/nangang_50001"
 ONNX = ROOT / "onnx/yolo_nangang_e3000_best.onnx"
 PT = ROOT / "onnx/yolo_nangang_e3000_best.pt"
 RUST_CPU = ROOT / "target/release/yolo_infer.exe"

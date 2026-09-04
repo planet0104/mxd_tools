@@ -6,16 +6,17 @@
 
 用法:
   python scripts/train_yolo.py \\
-    --data dataset/彩虹岛-南港西郊平原/generated/yolo/data.yaml
+    --data dataset/nangang_50001/generated/yolo/data.yaml
 
   python scripts/train_yolo.py \\
-    --data dataset/彩虹岛-南港西郊平原/generated/yolo/data.yaml \\
+    --data dataset/nangang_50001/generated/yolo/data.yaml \\
     --model yolo11n.pt --epochs 100 --imgsz 640 --batch 8
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -85,7 +86,7 @@ def main() -> int:
     ap.add_argument(
         "--data",
         type=Path,
-        default=Path("dataset/彩虹岛-南港西郊平原/generated/yolo/data.yaml"),
+        default=Path("dataset/nangang_50001/generated/yolo/data.yaml"),
         help="data.yaml 路径",
     )
     ap.add_argument(
@@ -115,14 +116,19 @@ def main() -> int:
         default="yolo_nangang",
         help="本次 run 名称",
     )
-    ap.add_argument("--workers", type=int, default=8)
+    # Windows：workers>0（多进程并行增强，速度快）+ cache='ram' 会把 0.7GB 缓存 pickle
+    # 给子进程导致 OSError 22。故 Windows 默认 cache='disk' 以保留多 worker；
+    # 其余平台默认 cache='ram'（更快）。workers 上限取 CPU 核数、最多 8。
+    default_workers = min(8, (os.cpu_count() or 8))
+    default_cache = "disk" if sys.platform == "win32" else "ram"
+    ap.add_argument("--workers", type=int, default=default_workers)
     ap.add_argument("--patience", type=int, default=100, help="早停耐心")
     ap.add_argument(
         "--cache",
         type=str,
-        default="ram",
+        default=default_cache,
         choices=["", "ram", "disk"],
-        help="缓存图片加速读盘：ram / disk / 空=关闭（默认 ram）",
+        help="缓存图片加速读盘：ram / disk / 空=关闭（Windows 默认 disk，其余默认 ram）",
     )
     ap.add_argument(
         "--resume",

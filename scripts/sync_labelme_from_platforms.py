@@ -9,7 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PLAT = ROOT / "assets/maps/50001/map_50001_platforms.json"
-ANN = ROOT / "dataset/彩虹岛-南港西郊平原/map_50001_render_cn.json"
+ANN = ROOT / "dataset/nangang_50001/map_50001_render_cn.json"
 BACKUP = ANN.with_suffix(".json.bak_before_platforms_sync")
 
 # LabelMe 矩形高度（顶边=站立线，向下延伸便于在标注工具里看见）
