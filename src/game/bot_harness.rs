@@ -1,4 +1,4 @@
-//! Headless NavBot 多局探针：离屏渲染 + 真实 YOLO/OCR 观测（与 game_preview 一致）。
+//! Headless NavBot 多局探针：离屏渲染 + 真实 YOLO/SelfTracker 观测（与 game_preview 一致）。
 
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
@@ -389,9 +389,18 @@ impl ProbeDriver {
         // bot.refresh_melee_hold 已按 goal 处理；同步回 driver.input
     }
 
-    pub fn tick_sim(&mut self, sim: &mut GameSim, tick: u32) -> InputFrame {
+    pub fn tick_sim(
+        &mut self,
+        vision: &mut HeadlessVisionEnv,
+        sim: &mut GameSim,
+        tick: u32,
+    ) -> InputFrame {
         let tick_start = Instant::now();
-        let paced = self.paced_input_for_sim(sim, tick);
+        let mut paced = self.paced_input_for_sim(sim, tick);
+        if vision.needs_probe() {
+            paced = vision.probe_input();
+        }
+        vision.note_commanded(&paced);
         sim.tick(&paced);
         if self.wall_clock_pacing {
             Self::sleep_to_logic_hz(tick_start);
@@ -574,7 +583,7 @@ pub async fn run_spawn_jump_probe(
                 climb_jump_decisions += 1;
             }
         }
-        let paced = driver.tick_sim(&mut sim, tick);
+        let paced = driver.tick_sim(vision, &mut sim, tick);
         let effective = sim.effective_bot_input(&paced);
         if effective.jump {
             effective_jump_ticks += 1;
@@ -789,7 +798,7 @@ pub async fn run_first_platform_progress_probe(
         let _ = driver
             .logic_tick(vision, &mut sim, tick, vision_interval)
             .await?;
-        driver.tick_sim(&mut sim, tick);
+        driver.tick_sim(vision, &mut sim, tick);
         tracker.on_tick(&sim);
     }
 
@@ -837,7 +846,7 @@ pub async fn run_episode(
             .logic_tick(vision, &mut sim, tick, cfg.vision_interval)
             .await?;
 
-        let paced = driver.tick_sim(&mut sim, tick);
+        let paced = driver.tick_sim(vision, &mut sim, tick);
 
         if let Some((_vtick, ref obs)) = new_vision {
             let input = driver.input();

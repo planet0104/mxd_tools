@@ -293,7 +293,7 @@ fn hypothesize(
     jumping: bool,
 ) -> &'static str {
     if !has_self {
-        return "ocr_miss_player";
+        return "self_miss_player";
     }
     if conf < 3 {
         return "low_visual_conf_loc_drift";
@@ -401,7 +401,7 @@ fn summarize_yolo(step: &VisionStep) -> String {
         }
     }
     let self_s = match &step.self_player {
-        Some(h) => format!("self=OCR@({:.0},{:.0})c={:.2}", h.x, h.y, h.match_score),
+        Some(h) => format!("self=track@({:.0},{:.0})c={:.2}", h.x, h.y, h.conf),
         None => "self=MISS".into(),
     };
     let floor_s = best_floor

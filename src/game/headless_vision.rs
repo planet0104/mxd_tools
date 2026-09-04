@@ -1,7 +1,8 @@
-//! Headless 离屏渲染 + YOLO/OCR 观测（与 `game_preview` 对齐）。
+//! Headless 离屏渲染 + YOLO 观测（与 `game_preview` 对齐）。
 //!
 //! - GL 渲染：主线程
-//! - YOLO+OCR：独立线程，按真实 ONNX 耗时推理
+//! - YOLO：独立线程，按真实 ONNX 耗时推理
+//! - 自身定位：主线程 `SelfTracker`（运动确认 + 跟踪）
 //! - `schedule_capture_if_ready` + `poll_observation`：非阻塞，YOLO 慢时不刷队列
 
 use std::path::{Path, PathBuf};
@@ -14,12 +15,14 @@ use macroquad::prelude::*;
 use crate::yolo::YoloDevice;
 
 use super::config::VisionAnchorConfig;
-use super::observation::OBS_DIM;
+use super::input::InputFrame;
+use super::observation::{VisionObservation, OBS_DIM};
+use super::self_track::{SelfPlayerHit, SelfTracker, TrackMode};
 use super::sim::GameSim;
 use super::view::{self, GameViewAssets};
 use super::vision::{SimVisionSnapshot, VisionPipeline, VisionStep};
 use super::vision_worker::VisionWorker;
-use super::VISION_CONF_THRESH;
+use super::{WINDOW_H, WINDOW_W, VISION_CONF_THRESH};
 
 const INFER_TIMEOUT: Duration = Duration::from_secs(120);
 /// 等待在途帧超过此逻辑 tick 数则允许再次 submit（防永久饿死）。
@@ -30,23 +33,31 @@ pub struct DeferredCaptureVision {
     worker: VisionWorker,
     pending_submit_tick: Option<u32>,
     pending_snapshot: Option<SimVisionSnapshot>,
+    pending_commanded_dx: Option<f32>,
     drawn: bool,
-    /// 最近一次 YOLO 结果（供预览叠框）。
     last_detections: Vec<crate::yolo::Detection>,
-    last_self_player: Option<crate::player_name::NamedPlayerHit>,
+    last_self_player: Option<SelfPlayerHit>,
     last_step: Option<VisionStep>,
+    tracker: SelfTracker,
+    last_commanded_dx: f32,
+    conf_thresh: f32,
 }
 
 impl DeferredCaptureVision {
     pub fn spawn(pipeline: VisionPipeline) -> Self {
+        let conf_thresh = pipeline.conf_thresh();
         Self {
             worker: VisionWorker::spawn(pipeline),
             pending_submit_tick: None,
             pending_snapshot: None,
+            pending_commanded_dx: None,
             drawn: false,
             last_detections: Vec::new(),
             last_self_player: None,
             last_step: None,
+            tracker: SelfTracker::new(),
+            last_commanded_dx: 0.0,
+            conf_thresh,
         }
     }
 
@@ -57,6 +68,7 @@ impl DeferredCaptureVision {
     pub fn clear_pending(&mut self) {
         self.pending_submit_tick = None;
         self.pending_snapshot = None;
+        self.pending_commanded_dx = None;
         self.drawn = false;
         self.last_detections.clear();
         self.last_self_player = None;
@@ -67,8 +79,29 @@ impl DeferredCaptureVision {
         &self.last_detections
     }
 
-    pub fn last_self_player(&self) -> Option<&crate::player_name::NamedPlayerHit> {
+    pub fn last_self_player(&self) -> Option<&SelfPlayerHit> {
         self.last_self_player.as_ref()
+    }
+
+    pub fn tracker(&self) -> &SelfTracker {
+        &self.tracker
+    }
+
+    pub fn tracker_mode(&self) -> TrackMode {
+        self.tracker.mode()
+    }
+
+    pub fn needs_probe(&self) -> bool {
+        self.tracker.needs_probe()
+    }
+
+    pub fn probe_input(&self) -> InputFrame {
+        self.tracker.probe_input()
+    }
+
+    /// 记录本逻辑帧实际下发的输入（供下一帧视觉关联）。
+    pub fn note_commanded(&mut self, input: &InputFrame) {
+        self.last_commanded_dx = input.horizontal();
     }
 
     pub fn capture_pending(&self) -> bool {
@@ -79,13 +112,42 @@ impl DeferredCaptureVision {
         self.last_step.as_ref()
     }
 
+    fn finalize_step(
+        &mut self,
+        mut step: VisionStep,
+        commanded_dx: f32,
+        snapshot: Option<SimVisionSnapshot>,
+    ) -> VisionStep {
+        let hit = self
+            .tracker
+            .update(&step.detections, commanded_dx, self.conf_thresh);
+        let mut hit = hit;
+        if let (Some(h), Some(snap)) = (&mut hit, snapshot) {
+            // jitter 仅在 pipeline.anchor 开启时由 finalize 侧处理；此处 snapshot 留给调用方
+            let _ = (h, snap);
+        }
+        step.self_player = hit.clone();
+        step.observation = VisionObservation::from_detections(
+            &step.detections,
+            hit.as_ref(),
+            WINDOW_W as u32,
+            WINDOW_H as u32,
+        );
+        self.last_detections = step.detections.clone();
+        self.last_self_player = hit;
+        self.last_step = Some(step.clone());
+        step
+    }
+
     pub fn poll_observation(&mut self, sim: &GameSim) -> Option<(u32, [f32; OBS_DIM])> {
         let result = self.worker.poll_result()?;
-        self.last_detections = result.step.detections.clone();
-        self.last_self_player = result.step.self_player.clone();
-        self.last_step = Some(result.step.clone());
+        let cmd = self
+            .pending_commanded_dx
+            .take()
+            .unwrap_or(self.last_commanded_dx);
+        let step = self.finalize_step(result.step, cmd, None);
         self.pending_submit_tick = None;
-        Some((result.tick, obs_from_step(sim, &result.step)))
+        Some((result.tick, obs_from_step(sim, &step)))
     }
 
     pub fn schedule_draw_if_ready(
@@ -109,6 +171,7 @@ impl DeferredCaptureVision {
         }
         view::draw_to_render_target(assets, sim, rt);
         self.pending_snapshot = Some(sim.vision_snapshot());
+        self.pending_commanded_dx = Some(self.last_commanded_dx);
         self.pending_submit_tick = Some(tick);
         self.drawn = true;
         true
@@ -161,6 +224,7 @@ impl DeferredCaptureVision {
             .try_submit(logic_tick, rgb, Some(sim.vision_snapshot()))
         {
             self.pending_submit_tick = Some(logic_tick);
+            self.pending_commanded_dx = Some(self.last_commanded_dx);
             self.drawn = false;
             self.pending_snapshot = None;
             Ok(true)
@@ -183,9 +247,7 @@ impl DeferredCaptureVision {
             .worker
             .infer_blocking(sim.state.tick as u32, rgb, Some(snap), INFER_TIMEOUT)
             .context("YOLO 感知")?;
-        self.last_detections = step.detections.clone();
-        self.last_self_player = step.self_player.clone();
-        self.last_step = Some(step.clone());
+        let step = self.finalize_step(step, self.last_commanded_dx, Some(snap));
         self.clear_pending();
         Ok(obs_from_step(sim, &step))
     }
@@ -202,6 +264,10 @@ pub struct HeadlessVisionEnv {
     worker: VisionWorker,
     warmup_frames: usize,
     pending_submit_tick: Option<u32>,
+    pending_commanded_dx: Option<f32>,
+    tracker: SelfTracker,
+    last_commanded_dx: f32,
+    conf_thresh: f32,
 }
 
 impl HeadlessVisionEnv {
@@ -220,7 +286,8 @@ impl HeadlessVisionEnv {
             .map_err(|e| anyhow::anyhow!("加载游戏渲染资源: {e}"))?;
         let pipeline = VisionPipeline::load(&path, YoloDevice::Cpu, VISION_CONF_THRESH)
             .context("加载 YOLO")?
-            .with_anchor(VisionAnchorConfig::ocr());
+            .with_anchor(VisionAnchorConfig::jitter());
+        let conf_thresh = pipeline.conf_thresh();
         let worker = VisionWorker::spawn(pipeline);
         Ok(Self {
             assets,
@@ -228,11 +295,27 @@ impl HeadlessVisionEnv {
             worker,
             warmup_frames: 1,
             pending_submit_tick: None,
+            pending_commanded_dx: None,
+            tracker: SelfTracker::new(),
+            last_commanded_dx: 0.0,
+            conf_thresh,
         })
     }
 
     pub fn worker_dead(&self) -> bool {
         self.worker.is_dead()
+    }
+
+    pub fn note_commanded(&mut self, input: &InputFrame) {
+        self.last_commanded_dx = input.horizontal();
+    }
+
+    pub fn needs_probe(&self) -> bool {
+        self.tracker.needs_probe()
+    }
+
+    pub fn probe_input(&self) -> InputFrame {
+        self.tracker.probe_input()
     }
 
     /// 上一帧仍在 YOLO 队列中则跳过渲染/submit，避免高并发下观测全丢。
@@ -256,6 +339,7 @@ impl HeadlessVisionEnv {
             .try_submit(logic_tick, rgb, Some(sim.vision_snapshot()))
         {
             self.pending_submit_tick = Some(logic_tick);
+            self.pending_commanded_dx = Some(self.last_commanded_dx);
             Ok(true)
         } else {
             Ok(false)
@@ -265,12 +349,23 @@ impl HeadlessVisionEnv {
     /// 非阻塞取回最新推理观测（无新结果则 `None`）。
     pub fn poll_vision(&mut self, sim: &GameSim) -> Option<(u32, [f32; OBS_DIM], VisionStep)> {
         let result = self.worker.poll_result()?;
+        let cmd = self
+            .pending_commanded_dx
+            .take()
+            .unwrap_or(self.last_commanded_dx);
+        let hit = self
+            .tracker
+            .update(&result.step.detections, cmd, self.conf_thresh);
+        let mut step = result.step;
+        step.self_player = hit.clone();
+        step.observation = VisionObservation::from_detections(
+            &step.detections,
+            hit.as_ref(),
+            WINDOW_W as u32,
+            WINDOW_H as u32,
+        );
         self.pending_submit_tick = None;
-        Some((
-            result.tick,
-            obs_from_step(sim, &result.step),
-            result.step,
-        ))
+        Some((result.tick, obs_from_step(sim, &step), step))
     }
 
     pub fn poll_observation(&mut self, sim: &GameSim) -> Option<(u32, [f32; OBS_DIM])> {
@@ -293,6 +388,17 @@ impl HeadlessVisionEnv {
             .worker
             .infer_blocking(sim.state.tick as u32, rgb, Some(snap), INFER_TIMEOUT)
             .context("YOLO 感知")?;
+        let hit = self
+            .tracker
+            .update(&step.detections, self.last_commanded_dx, self.conf_thresh);
+        let mut step = step;
+        step.self_player = hit.clone();
+        step.observation = VisionObservation::from_detections(
+            &step.detections,
+            hit.as_ref(),
+            WINDOW_W as u32,
+            WINDOW_H as u32,
+        );
         self.pending_submit_tick = None;
         Ok((obs_from_step(sim, &step), step))
     }

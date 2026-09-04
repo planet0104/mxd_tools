@@ -1,4 +1,4 @@
-//! NavBot 自动玩预览（YOLO + OCR + 地图图导航）。
+//! NavBot 自动玩预览（YOLO + SelfTracker + 地图图导航）。
 //!
 //! ```powershell
 //! cargo run --release --bin game_preview
@@ -123,9 +123,9 @@ impl Cli {
 
     fn vision_anchor(&self) -> VisionAnchorConfig {
         if self.anchor_offset > 0.0 {
-            VisionAnchorConfig::ocr_with_jitter(self.anchor_offset)
+            VisionAnchorConfig::with_jitter(self.anchor_offset)
         } else {
-            VisionAnchorConfig::ocr()
+            VisionAnchorConfig::jitter()
         }
     }
 }
@@ -353,6 +353,11 @@ async fn run_first_platform_probe_loop(
         let tick_start = Instant::now();
         // 先 pace（内含 melee 刷新），再取意图，日志与 sim 一致。
         let input = driver.paced_input_for_sim(&mut state.sim, tick);
+        let mut input = input;
+        if vision.needs_probe() {
+            input = vision.probe_input();
+        }
+        vision.note_commanded(&input);
         let intended = driver.input();
         if let Some(vtick) = just_decided {
             let effective = state.sim.effective_bot_input(&input);
@@ -754,7 +759,11 @@ async fn main() {
                 }
 
                 // 每逻辑帧只 pace 一次：决策日志不得再调 paced_input，否则攻击被 refractory 吃掉。
-                let input = driver.paced_input_for_sim(&mut state.sim, state.logic_tick);
+                let mut input = driver.paced_input_for_sim(&mut state.sim, state.logic_tick);
+                if vision.needs_probe() {
+                    input = vision.probe_input();
+                }
+                vision.note_commanded(&input);
                 let intended = driver.input();
                 if let Some(vtick) = just_decided {
                     let effective = state.sim.effective_bot_input(&input);
@@ -805,8 +814,13 @@ async fn main() {
         view::begin_logical_viewport();
         view::draw_content(&assets, &state.sim);
         view::draw_yolo_floor_overlay(vision.last_detections(), VISION_CONF_THRESH);
+        view::draw_yolo_player_overlay(vision.last_detections(), VISION_CONF_THRESH);
+        view::draw_self_track_hud(
+            vision.tracker_mode().label(),
+            vision.tracker().regime().label(),
+        );
         if let Some(hit) = vision.last_self_player() {
-            view::draw_self_player_marker(hit);
+            view::draw_self_player_box(hit, vision.tracker_mode().label());
         }
         set_default_camera();
 

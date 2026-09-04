@@ -1,19 +1,19 @@
-//! 视觉单步：YOLO+OCR → 观测向量。
+//! 视觉单步：YOLO → 观测向量（自身由 SelfTracker 在主线程解析）。
 
 use std::path::Path;
 
 use anyhow::Result;
 use image::RgbImage;
 
-use crate::player_name::{self, NamedPlayerHit};
 use crate::yolo::{Detection, YoloDetector, YoloDevice};
 
 use super::config::VisionAnchorConfig;
 use super::observation::VisionObservation;
 use super::self_anchor::apply_anchor_jitter;
-use super::{DEFAULT_PLAYER_NAME, WINDOW_H, WINDOW_W};
+use super::self_track::SelfPlayerHit;
+use super::{WINDOW_H, WINDOW_W};
 
-/// 训练 YOLO 模式：主线程随帧传入的 sim 快照（OCR 脚点抖动用 episode_seed）。
+/// 训练 YOLO 模式：主线程随帧传入的 sim 快照（脚点抖动用 episode_seed）。
 #[derive(Debug, Clone, Copy)]
 pub struct SimVisionSnapshot {
     pub player_x: f32,
@@ -31,10 +31,9 @@ pub fn filter_detections(detections: Vec<Detection>, min_conf: f32) -> Vec<Detec
         .collect()
 }
 
-/// 视觉推理管线（YOLO + OCR + 观测编码）。
+/// 视觉推理管线（YOLO + 观测编码；自身定位见 `SelfTracker`）。
 pub struct VisionPipeline {
     detector: YoloDetector,
-    target_name: String,
     conf_thresh: f32,
     anchor: VisionAnchorConfig,
 }
@@ -46,7 +45,6 @@ impl VisionPipeline {
         detector.set_thresholds(conf_thresh, 0.7);
         Ok(Self {
             detector,
-            target_name: DEFAULT_PLAYER_NAME.to_string(),
             conf_thresh,
             anchor: VisionAnchorConfig::default(),
         })
@@ -61,16 +59,11 @@ impl VisionPipeline {
         self.anchor
     }
 
-    pub fn with_target_name(mut self, name: impl Into<String>) -> Self {
-        self.target_name = name.into();
-        self
-    }
-
     pub fn conf_thresh(&self) -> f32 {
         self.conf_thresh
     }
 
-    /// 对一帧 RGB 做 YOLO+OCR 感知。
+    /// 对一帧 RGB 做 YOLO 感知（自身脚点留空，由主线程 SelfTracker 填充）。
     pub fn perceive(&mut self, frame: &RgbImage) -> Result<VisionStep> {
         self.perceive_with_snapshot(frame, None)
     }
@@ -81,7 +74,7 @@ impl VisionPipeline {
         sim_snapshot: Option<SimVisionSnapshot>,
     ) -> Result<VisionStep> {
         let detections = self.detect_frame(frame)?;
-        self.build_agent_step(frame, &detections, &self.target_name, sim_snapshot)
+        self.build_agent_step(&detections, None, sim_snapshot)
     }
 
     pub fn detect_frame(&mut self, frame: &RgbImage) -> Result<Vec<Detection>> {
@@ -93,14 +86,18 @@ impl VisionPipeline {
 
     pub fn build_agent_step(
         &self,
-        frame: &RgbImage,
         detections: &[Detection],
-        target_name: &str,
+        self_player: Option<SelfPlayerHit>,
         sim_snapshot: Option<SimVisionSnapshot>,
     ) -> Result<VisionStep> {
-        let w = frame.width();
-        let h = frame.height();
-        let self_player = self.resolve_self_player(frame, detections, target_name, sim_snapshot)?;
+        let w = WINDOW_W as u32;
+        let h = WINDOW_H as u32;
+        let mut self_player = self_player;
+        if self.anchor.uses_anchor_jitter() {
+            if let (Some(hit), Some(snap)) = (&mut self_player, sim_snapshot) {
+                apply_anchor_jitter(hit, snap.episode_seed, self.anchor.anchor_jitter_px);
+            }
+        }
         let observation =
             VisionObservation::from_detections(detections, self_player.as_ref(), w, h);
         Ok(VisionStep {
@@ -110,33 +107,21 @@ impl VisionPipeline {
         })
     }
 
-    fn resolve_self_player(
+    /// 在已有 detections 上套上 SelfTracker 结果并重建观测。
+    pub fn finalize_with_self(
         &self,
-        frame: &RgbImage,
         detections: &[Detection],
-        target_name: &str,
+        self_player: Option<SelfPlayerHit>,
         sim_snapshot: Option<SimVisionSnapshot>,
-    ) -> Result<Option<NamedPlayerHit>> {
-        let (mut self_player, _) = player_name::find_named_player_verbose(
-            frame,
-            detections,
-            target_name,
-            self.conf_thresh,
-            false,
-        )?;
-        if self.anchor.uses_anchor_jitter() {
-            if let (Some(hit), Some(snap)) = (&mut self_player, sim_snapshot) {
-                apply_anchor_jitter(hit, snap.episode_seed, self.anchor.anchor_jitter_px);
-            }
-        }
-        Ok(self_player)
+    ) -> Result<VisionStep> {
+        self.build_agent_step(detections, self_player, sim_snapshot)
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct VisionStep {
     pub detections: Vec<Detection>,
-    pub self_player: Option<NamedPlayerHit>,
+    pub self_player: Option<SelfPlayerHit>,
     pub observation: VisionObservation,
 }
 

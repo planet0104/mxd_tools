@@ -318,7 +318,7 @@ impl eframe::App for App {
                 ui.separator();
                 ui.heading("NavBot 实时寻路");
                 ui.label(
-                    "附着独立进程 mini_game 窗口：实时截图 → YOLO+OCR → NavBot → SendInput。",
+                    "附着独立进程 mini_game 窗口：实时截图 → YOLO+SelfTracker → NavBot → SendInput。",
                 );
                 ui.label(format!("状态：{}", self.nav_status));
                 ui.horizontal(|ui| {

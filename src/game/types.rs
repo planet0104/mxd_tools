@@ -2,12 +2,12 @@ pub const WINDOW_W: f32 = 1368.0;
 pub const WINDOW_H: f32 = 768.0;
 pub const WORLD_VIEW_H: f32 = 697.0;
 
-/// 玩家头顶/脚下名牌（与 find_player / 规则 bot 一致）
+/// 玩家头顶/脚下名牌（仿真渲染用）
 pub const DEFAULT_PLAYER_NAME: &str = "光头强加强版";
 
 /// 自动玩模式：装饰玩家数量与资源（`assets/player/` 下目录名）
 pub const TRAINING_NPC_COUNT: usize = 4;
-/// 训练装饰玩家名牌（与 `DEFAULT_PLAYER_NAME` 无共用长子串，避免 OCR 误匹配）
+/// 训练装饰玩家名牌
 pub const TRAINING_NPC_NAMES: [&str; TRAINING_NPC_COUNT] =
     ["南港商人", "冒险萌新", "路过的骑士", "摆摊小贩"];
 pub const TRAINING_NPC_SPRITES: [&str; TRAINING_NPC_COUNT] =

@@ -1,12 +1,12 @@
 //! 从 sim 真值合成 YOLO 观测（headless bot 探针，无需渲染/YOLO）。
 
-use crate::player_name::NamedPlayerHit;
 use crate::yolo::Detection;
 use crate::yolo::CLASS_NAMES;
 
 use super::camera::WorldCamera;
 use super::map::GameMap;
 use super::observation::{VisionObservation, OBS_DIM};
+use super::self_track::SelfPlayerHit;
 use super::sim::GameSim;
 use super::types::{WINDOW_H, WINDOW_W, WORLD_VIEW_H};
 
@@ -30,14 +30,14 @@ pub fn observation_from_sim(sim: &GameSim) -> [f32; OBS_DIM] {
     collect_drops(sim, &cam, &mut dets);
     collect_ropes(&sim.map, &cam, &mut dets);
 
-    let self_hit = NamedPlayerHit {
+    let self_hit = SelfPlayerHit {
         x: ax,
         y: ay,
-        ocr_text: String::new(),
-        match_score: 1.0,
-        partial: false,
-        player_conf: SYNTH_CONF,
-        roi: (0, 0, 0, 0),
+        conf: SYNTH_CONF,
+        x1: ax - 20.0,
+        y1: ay - 80.0,
+        x2: ax + 20.0,
+        y2: ay,
     };
 
     let obs = VisionObservation::from_detections(

@@ -845,14 +845,64 @@ pub fn draw_yolo_floor_overlay(detections: &[crate::yolo::Detection], min_conf: 
     draw_text(&format!("YOLO 地板框: {n}"), 12.0, 22.0, 18.0, floor_color);
 }
 
-/// 标记 OCR 匹配到的自身玩家脚点。
-pub fn draw_self_player_marker(hit: &crate::player_name::NamedPlayerHit) {
+/// 标记运动跟踪锁定的自身玩家脚点。
+pub fn draw_self_player_marker(hit: &crate::game::SelfPlayerHit) {
     let s = 6.0;
     draw_rectangle(
         hit.x - s,
         hit.y - s,
         s * 2.0,
         s * 2.0,
-        Color::new(1.0, 0.2, 0.2, 0.85),
+        Color::new(1.0, 0.2, 0.85, 0.9),
+    );
+}
+
+/// 绘制全部 YOLO「玩家」检测框。
+pub fn draw_yolo_player_overlay(detections: &[crate::yolo::Detection], min_conf: f32) {
+    let color = Color::new(1.0, 0.85, 0.15, 0.9);
+    let mut n = 0u32;
+    for d in detections {
+        if d.label != "玩家" || d.conf < min_conf {
+            continue;
+        }
+        n += 1;
+        let w = (d.x2 - d.x1).max(1.0);
+        let h = (d.y2 - d.y1).max(1.0);
+        draw_rectangle_lines(d.x1, d.y1, w, h, 2.0, color);
+        draw_text(
+            &format!("玩家 {:.0}%", d.conf * 100.0),
+            d.x1,
+            (d.y1 - 4.0).max(12.0),
+            14.0,
+            color,
+        );
+    }
+    draw_text(&format!("YOLO 玩家框: {n}"), 12.0, 44.0, 18.0, color);
+}
+
+/// 绘制 bot 锁定的自身框（粗描边 + SELF 标签 + 脚点）。
+pub fn draw_self_player_box(hit: &crate::game::SelfPlayerHit, mode_label: &str) {
+    let color = Color::new(1.0, 0.15, 0.55, 1.0);
+    let w = (hit.x2 - hit.x1).max(1.0);
+    let h = (hit.y2 - hit.y1).max(1.0);
+    draw_rectangle_lines(hit.x1, hit.y1, w, h, 3.5, color);
+    draw_text(
+        &format!("SELF {mode_label}"),
+        hit.x1,
+        (hit.y1 - 6.0).max(14.0),
+        16.0,
+        color,
+    );
+    draw_self_player_marker(hit);
+}
+
+/// HUD：SelfTracker 模式。
+pub fn draw_self_track_hud(mode_label: &str, regime_label: &str) {
+    draw_text(
+        &format!("SelfTrack: {mode_label} cam={regime_label}"),
+        12.0,
+        66.0,
+        18.0,
+        Color::new(1.0, 0.6, 0.9, 1.0),
     );
 }

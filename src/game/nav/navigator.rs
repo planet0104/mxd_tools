@@ -1108,7 +1108,7 @@ impl Navigator {
                 }
             }
             if Self::walk_hop_satisfied(graph, &edge, world_x, goto_tol) {
-                // x 钀藉叆閭诲彴浣?OCR 鑺傜偣瀵逛笉涓婃椂锛屼笉瑕佽櫄鎷熻烦杩囷紝鍚﹀垯浼氱洿鎺?commit 涓嬩竴璺?StepUp銆?
+                // x 已落入邻台，但视觉节点尚未跟上时，不要虚推进，否则会直接 commit 下一段 StepUp。
                 if node_id != edge.to && node_id != edge.from {
                     return Some(self.commit_edge(graph, &edge));
                 }
@@ -1117,7 +1117,7 @@ impl Navigator {
                 cur = edge.to;
                 continue;
             }
-            // 鎹㈠眰杈瑰繀椤讳汉宸插湪 from锛涜櫄鎷?walk 鎺ㄨ繘鍚?OCR 鏈埌鍒欐竻璺緞閲嶈鍒掋€?
+            // 换层边必须人已在 from；虚 walk 推进后视觉未到则清路径重规划。
             if edge.kind != EdgeKind::Walk && edge.from != node_id {
                 self.explore.explore_path.clear();
                 return None;

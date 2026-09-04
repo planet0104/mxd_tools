@@ -1,4 +1,4 @@
-//! 纯视觉闭环：YOLO+OCR 里程计、朝向与攀爬粘性（bot 决策唯一位置来源）。
+//! 纯视觉闭环：YOLO + SelfTracker 里程计、朝向与攀爬粘性（bot 决策唯一位置来源）。
 
 use super::input::InputFrame;
 use super::observation::{obs_floor_underfoot, obs_vertical_nav_allowed, OBS_DIM};

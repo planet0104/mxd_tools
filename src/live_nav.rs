@@ -1,4 +1,4 @@
-//! 外挂式 Live Nav：截取 mini_game 窗口 → YOLO+OCR → NavBot → SendInput。
+//! 外挂式 Live Nav：截取 mini_game 窗口 → YOLO + SelfTracker → NavBot → SendInput。
 //! 与 GameSim / mini_game 源码无编译期耦合，仅按窗口标题/进程附着。
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use mxd_tools::game::nav::{GlobalStuckWatchdog, NavBot, NavBotConfig, SubGoal};
 use mxd_tools::game::{
-    default_yolo_model_path, HumanPace, InputFrame, VisionPipeline, VisionSenseState, VisionWorker,
-    WINDOW_H, WINDOW_W, LOGIC_HZ, OBS_DIM, VISION_CONF_THRESH,
+    default_yolo_model_path, HumanPace, InputFrame, SelfTracker, VisionObservation, VisionPipeline,
+    VisionSenseState, VisionWorker, WINDOW_H, WINDOW_W, LOGIC_HZ, OBS_DIM, VISION_CONF_THRESH,
 };
 use mxd_tools::game::{load_default_map, GameMap};
 use mxd_tools::yolo::YoloDevice;
@@ -467,8 +467,11 @@ fn run_live_nav_inner(
     let mut worker = VisionWorker::spawn(pipeline);
     let mut driver = LiveNavDriver::new(map, 42);
     let mut keys = HeldKeys::new();
-    // 动态感知：上限 5Hz；仅在 YOLO 空闲时提交，避免排队堆叠。
-    let mut vision = AdaptiveVisionPace::new(5.0);
+    let mut tracker = SelfTracker::new();
+    let mut last_commanded_dx = 0.0_f32;
+    let mut pending_commanded_dx: Option<f32> = None;
+    // 与 game_preview 默认 --detect-hz 10 对齐，便于预览日志对照真机。
+    let mut vision = AdaptiveVisionPace::new(10.0);
     let target_w = WINDOW_W as u32;
     let target_h = WINDOW_H as u32;
 
@@ -508,11 +511,23 @@ fn run_live_nav_inner(
         while let Some(result) = worker.poll_result() {
             vision.on_result(result.perceive_ms, result.queue_wait_ms);
             perf.note_yolo(result.perceive_ms, result.queue_wait_ms);
-            let obs = obs_from_step(&result.step);
+            let cmd = pending_commanded_dx
+                .take()
+                .unwrap_or(last_commanded_dx);
+            let hit = tracker.update(&result.step.detections, cmd, VISION_CONF_THRESH);
+            let mut step = result.step;
+            step.self_player = hit.clone();
+            step.observation = VisionObservation::from_detections(
+                &step.detections,
+                hit.as_ref(),
+                WINDOW_W as u32,
+                WINDOW_H as u32,
+            );
+            let obs = obs_from_step(&step);
             driver.apply_observation(result.tick, obs);
             for line in diag_log.on_vision(
                 result.tick,
-                &result.step,
+                &step,
                 &driver.last_obs,
                 &driver.bot,
                 &driver.sense,
@@ -563,6 +578,7 @@ fn run_live_nav_inner(
                     captured = true;
                     if worker.try_submit(tick, rgb, None) {
                         vision.note_submit(tick);
+                        pending_commanded_dx = Some(last_commanded_dx);
                     }
                 }
                 Err(e) => {
@@ -577,7 +593,12 @@ fn run_live_nav_inner(
         }
 
         let td = Instant::now();
-        let paced = driver.paced_input(tick);
+        let paced = if tracker.needs_probe() {
+            tracker.probe_input()
+        } else {
+            driver.paced_input(tick)
+        };
+        last_commanded_dx = paced.horizontal();
         let decide_ms = ms(td.elapsed());
 
         let ti = Instant::now();

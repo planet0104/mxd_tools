@@ -1,10 +1,12 @@
+use std::time::{Duration, Instant};
+
 use super::super::input::InputFrame;
 use super::super::map::ClimbHint;
 use super::super::observation::{
     obs_climb_hint, obs_floor_ahead, obs_floor_ahead_connected, obs_floor_drop_ahead,
     obs_has_floor_signal, obs_same_level_gap_ahead, obs_step_up_dx,
 };
-use super::super::types::{WINDOW_H, WINDOW_W};
+use super::super::types::{LOGIC_HZ, WINDOW_H, WINDOW_W};
 use super::map_graph::MapGraph;
 use super::types::{EdgeKind, ExecutorResult, NavBotConfig, Side, SubGoal};
 
@@ -14,6 +16,10 @@ const STEP_UP_JUMP_DX: f32 = 48.0;
 const STEP_UP_ALIGN_DX: f32 = 14.0;
 /// 抓绳横向容差：未对准只走不跳。
 const CLIMB_GRAB_TOL_PX: f32 = 8.0;
+/// 脱绳落地后再抓：累计地面帧超过该值则失败（勿在空中清零，否则永远达不到）。
+const CLIMB_REGRAB_FAIL_TICKS: u32 = 28;
+/// 贴近绳心起跳蹭绳的地面帧上限。
+const CLIMB_NUDGE_FAIL_TICKS: u32 = 40;
 
 pub struct NavCtx<'a> {
     pub obs: &'a [f32],
@@ -104,7 +110,9 @@ pub struct MotionExecutor {
     step_origin_y: f32,
     step_jumped: bool,
     step_jump_dir: f32,
+    /// 诊断用剩余逻辑帧估算；真正冷却看 `step_jump_cd_until`（墙钟）。
     step_jump_cd: u32,
+    step_jump_cd_until: Option<Instant>,
     step_stall: u32,
     step_approach_stall: u32,
     step_approach_x: f32,
@@ -138,15 +146,43 @@ impl MotionExecutor {
             self.step_stall,
             self.step_jump_dir,
             self.step_jumped,
-            self.step_jump_cd,
+            self.step_jump_cd_remaining(),
         )
+    }
+
+    fn step_jump_cd_remaining(&self) -> u32 {
+        let Some(until) = self.step_jump_cd_until else {
+            return 0;
+        };
+        let now = Instant::now();
+        if now >= until {
+            return 0;
+        }
+        let rem = (until - now).as_secs_f32() * LOGIC_HZ;
+        rem.ceil().max(1.0) as u32
+    }
+
+    fn step_jump_on_cooldown(&self) -> bool {
+        self.step_jump_cd_until
+            .is_some_and(|until| Instant::now() < until)
+    }
+
+    fn arm_step_jump_cd(&mut self, logic_ticks: u32) {
+        let secs = (logic_ticks as f32 / LOGIC_HZ).max(0.05);
+        self.step_jump_cd_until = Some(Instant::now() + Duration::from_secs_f32(secs));
+        self.step_jump_cd = logic_ticks.max(1);
+    }
+
+    fn clear_step_jump_cd(&mut self) {
+        self.step_jump_cd_until = None;
+        self.step_jump_cd = 0;
     }
 
     /// 起跳后粘滞：空中/冷却中/已升高时禁止改挂反向台阶或清目标（日志里跳起立刻往回）。
     pub fn step_up_committed(&self, grounded: bool, physics_y: f32) -> bool {
         matches!(self.active, SubGoal::StepUp { .. })
             && (self.step_jumped
-                || self.step_jump_cd > 0
+                || self.step_jump_on_cooldown()
                 || !grounded
                 || (self.step_origin_y - physics_y) > 8.0)
     }
@@ -201,9 +237,9 @@ impl MotionExecutor {
                     self.step_origin_y = ctx.physics_y();
                     self.step_jumped = false;
                     self.step_stall = 0;
-                    self.step_jump_cd = 0;
                     self.step_approach_stall = 0;
                     self.step_approach_x = ctx.physics_x();
+                    self.clear_step_jump_cd();
                     let dx = target_x - ctx.physics_x();
                     self.step_jump_dir = dx.signum();
                     if self.step_jump_dir == 0.0 {
@@ -419,7 +455,7 @@ impl MotionExecutor {
             }
         }
 
-        // 用「朝目标的最大进展」判停滞，避免 OCR x 抖动反复清零 stall。
+        // 用「朝目标的最大进展」判停滞，避免视觉 x 抖动反复清零 stall。
         let progress = dx.abs();
         if self.goto_best_dx <= 0.0 || progress < self.goto_best_dx - 4.0 {
             self.goto_best_dx = progress;
@@ -512,6 +548,7 @@ impl MotionExecutor {
     ) -> (ExecutorResult, &'static str) {
         if ctx.effective_climbing() {
             self.was_climbing = true;
+            self.climb_stall = 0;
             // 已开始收尾则坚持倒计时：nav_node 同高抖到旁台时 near_dest 会短暂变 false，
             // 若此处要求 near_dest，会停表并永远卡在 climb_up_active（日志 105→101）。
             if Self::climb_near_dest(ctx, graph, true, self.climb_origin_y)
@@ -555,6 +592,14 @@ impl MotionExecutor {
             return self.climb_finish_tick(ctx, graph, true, out);
         }
 
+        // 脱绳落地后累计地面帧；空中不得清零，否则 climb_up_regrab 永不到阈值。
+        if self.was_climbing && ctx.grounded() {
+            self.climb_stall = self.climb_stall.saturating_add(1);
+            if self.climb_stall > CLIMB_REGRAB_FAIL_TICKS {
+                return (ExecutorResult::Failed, "climb_up_regrab_fail");
+            }
+        }
+
         let dx = rope_x - ctx.physics_x();
         let align_tol = config.climb_align_px;
         let toward_blocked = if dx > 0.0 {
@@ -573,7 +618,7 @@ impl MotionExecutor {
                 false
             }
         });
-        // 卡住时允许进入微调区，但绝不在 >grab_tol 时起跳。
+        // 卡住时允许进入微调区；远距只走不跳（避免对着过高平台空跳）。
         let in_approach = dx.abs() <= align_tol.max(40.0)
             && (dx.abs() <= align_tol || toward_blocked || at_node_edge || self.climb_align_ticks > 18);
 
@@ -589,15 +634,6 @@ impl MotionExecutor {
                 return (ExecutorResult::Failed, "climb_align_timeout");
             }
             set_move(out, dx.signum());
-            // 横移被门控吃掉或靠近绳子时起跳。
-            if ctx.grounded()
-                && (toward_blocked
-                    || self.climb_align_ticks > 6
-                    || dx.abs() <= align_tol.max(40.0))
-            {
-                out.jump = true;
-                out.up = true;
-            }
             return (ExecutorResult::Running, "climb_align");
         }
         if dx.abs() <= align_tol {
@@ -610,28 +646,32 @@ impl MotionExecutor {
         if dx.abs() > CLIMB_GRAB_TOL_PX {
             set_move(out, dx.signum());
             if ctx.grounded() {
-                self.climb_stall = self.climb_stall.saturating_add(1);
+                if !self.was_climbing {
+                    self.climb_stall = self.climb_stall.saturating_add(1);
+                }
                 out.jump = true;
-                if self.climb_stall > 48 {
+                if !self.was_climbing && self.climb_stall > CLIMB_NUDGE_FAIL_TICKS {
                     return (ExecutorResult::Failed, "climb_up_stalled");
                 }
                 return (ExecutorResult::Running, "climb_up_nudge");
             }
             // 空中未对准：只保留 up+横移，不要 jump（悬空梯抓到后会被 jump_off）。
+            self.was_climbing = true;
             return (ExecutorResult::Running, "climb_up_air");
         }
 
         // 已对准绳心：空中只按 up；地面才 jump（梯子底高于站立面）。
         if !ctx.grounded() {
             self.was_climbing = true;
-            self.climb_stall = 0;
             return (ExecutorResult::Running, "climb_up_air");
         }
 
         out.jump = true;
-        self.climb_stall = self.climb_stall.saturating_add(1);
-        if self.climb_stall > 36 {
-            return (ExecutorResult::Failed, "climb_up_stalled");
+        if !self.was_climbing {
+            self.climb_stall = self.climb_stall.saturating_add(1);
+            if self.climb_stall > CLIMB_NUDGE_FAIL_TICKS {
+                return (ExecutorResult::Failed, "climb_up_stalled");
+            }
         }
         if self.was_climbing {
             return (ExecutorResult::Running, "climb_up_regrab");
@@ -666,6 +706,13 @@ impl MotionExecutor {
         let near_bot = Self::climb_near_dest(ctx, graph, false, self.climb_origin_y);
         if near_bot || self.climb_finish_hold > 0 {
             return self.climb_finish_tick(ctx, graph, false, out);
+        }
+
+        if self.was_climbing && ctx.grounded() {
+            self.climb_stall = self.climb_stall.saturating_add(1);
+            if self.climb_stall > CLIMB_REGRAB_FAIL_TICKS {
+                return (ExecutorResult::Failed, "climb_down_regrab_fail");
+            }
         }
 
         let dx = rope_x - ctx.physics_x();
@@ -712,12 +759,15 @@ impl MotionExecutor {
         if dx.abs() > CLIMB_GRAB_TOL_PX {
             set_move(out, dx.signum());
             if ctx.grounded() {
-                self.climb_stall = self.climb_stall.saturating_add(1);
-                if self.climb_stall > 48 {
+                if !self.was_climbing {
+                    self.climb_stall = self.climb_stall.saturating_add(1);
+                }
+                if !self.was_climbing && self.climb_stall > CLIMB_NUDGE_FAIL_TICKS {
                     return (ExecutorResult::Failed, "climb_down_stalled");
                 }
                 return (ExecutorResult::Running, "climb_down_nudge");
             }
+            self.was_climbing = true;
             return (ExecutorResult::Running, "climb_down_air");
         }
 
@@ -725,9 +775,11 @@ impl MotionExecutor {
             self.was_climbing = true;
             return (ExecutorResult::Running, "climb_down_air");
         }
-        self.climb_stall = self.climb_stall.saturating_add(1);
-        if self.climb_stall > 36 {
-            return (ExecutorResult::Failed, "climb_down_stalled");
+        if !self.was_climbing {
+            self.climb_stall = self.climb_stall.saturating_add(1);
+            if self.climb_stall > CLIMB_NUDGE_FAIL_TICKS {
+                return (ExecutorResult::Failed, "climb_down_stalled");
+            }
         }
         if self.was_climbing {
             return (ExecutorResult::Running, "climb_down_regrab");
@@ -812,7 +864,7 @@ impl MotionExecutor {
         )
     }
 
-    /// 是否已到/接近爬绳目的台（允许一定 OCR y 偏差；须有足够垂直位移）。
+    /// 是否已到/接近爬绳目的台（允许一定视觉 y 偏差；须有足够垂直位移）。
     fn climb_near_dest(
         ctx: &NavCtx<'_>,
         graph: &MapGraph,
@@ -825,7 +877,7 @@ impl MotionExecutor {
         let Some(dest) = graph.get(to) else {
             return false;
         };
-        // 放宽 y 容差：OCR 常比台面高/低几十像素。
+        // 放宽 y 容差：视觉脚点常比台面高/低几十像素。
         if (ctx.physics_y() - dest.y).abs() > 80.0 {
             return false;
         }
@@ -866,6 +918,7 @@ impl MotionExecutor {
             self.step_jumped = false;
             self.step_jump_dir = 0.0;
             self.step_stall = 0;
+            self.clear_step_jump_cd();
             return (ExecutorResult::Failed, "step_up_fell");
         }
         // 人已在底层，目标却是中高台：不必等起跳记录，直接失败改爬绳。
@@ -875,22 +928,27 @@ impl MotionExecutor {
                     self.step_jumped = false;
                     self.step_jump_dir = 0.0;
                     self.step_stall = 0;
+                    self.clear_step_jump_cd();
                     return (ExecutorResult::Failed, "step_up_fell");
                 }
             }
         }
 
-        // 已在落点节点，或坐标已落入落点台面：完成。
+        // 已在落点台面：完成（要 y 贴近落点，避免节点误判；不必强求 dy_up，
+        // 否则短暂上台后 goal 重挂会把 origin 设成台面高度导致永远 Done 不了）。
         if let Some(t) = ctx.pending_target {
             if let Some(dest) = graph.get(t) {
-                let on_dest_node = ctx.nav_node_id() == t;
-                let on_dest_xy = px >= dest.x_min - 24.0
-                    && px <= dest.x_max + 24.0
+                let on_dest_surface = px >= dest.x_min - 32.0
+                    && px <= dest.x_max + 32.0
                     && (py - dest.y).abs() <= 48.0;
-                if ctx.grounded() && (on_dest_node || on_dest_xy) && dy_up > 8.0 {
+                let on_dest_node = ctx.nav_node_id() == t && on_dest_surface;
+                let climbed = dy_up > 4.0
+                    || (self.step_origin_y > 0.0 && dest.y + 20.0 < self.step_origin_y);
+                if ctx.grounded() && on_dest_surface && (climbed || on_dest_node) {
                     self.step_jumped = false;
                     self.step_jump_dir = 0.0;
                     self.step_stall = 0;
+                    self.clear_step_jump_cd();
                     return (ExecutorResult::Done, "step_up_done");
                 }
             }
@@ -911,7 +969,7 @@ impl MotionExecutor {
 
         // 起跳后 / 冷却中 / 空中：锁定起跳方向。过冲 target_x 时 graph_dx 会变号，
         // 若跟着变向就会「跳起来往回走」永远上不了台。
-        let in_flight = self.step_jumped || self.step_jump_cd > 0 || !ctx.grounded();
+        let in_flight = self.step_jumped || self.step_jump_on_cooldown() || !ctx.grounded();
         if !in_flight {
             if dx.abs() > 1.0 {
                 self.step_jump_dir = dx.signum();
@@ -934,10 +992,11 @@ impl MotionExecutor {
                 .pending_target
                 .map(|t| ctx.nav_node_id() == t)
                 .unwrap_or(false);
-            if at_node && dy_up > 8.0 {
+            if at_node && dy_up > 4.0 {
                 self.step_jumped = false;
                 self.step_jump_dir = 0.0;
                 self.step_stall = 0;
+                self.clear_step_jump_cd();
                 return (ExecutorResult::Done, "step_up_done");
             }
             self.step_jumped = false;
@@ -952,8 +1011,8 @@ impl MotionExecutor {
             }
         }
 
-        if self.step_jump_cd > 0 {
-            self.step_jump_cd -= 1;
+        if self.step_jump_on_cooldown() {
+            self.step_jump_cd = self.step_jump_cd_remaining();
             if !ctx.grounded() {
                 set_move(out, dir);
                 self.step_jumped = true;
@@ -968,6 +1027,7 @@ impl MotionExecutor {
             }
             return (ExecutorResult::Running, "step_up_wait");
         }
+        self.clear_step_jump_cd();
 
         if ctx.grounded() {
             if (px - self.step_approach_x).abs() < 2.0 {
@@ -1036,7 +1096,7 @@ impl MotionExecutor {
         out.jump = true;
         set_move(out, dir);
         self.step_jumped = true;
-        self.step_jump_cd = config.step_up_jump_cooldown;
+        self.arm_step_jump_cd(config.step_up_jump_cooldown);
         self.step_approach_stall = 0;
         (ExecutorResult::Running, "step_up_jump")
     }
@@ -1187,6 +1247,64 @@ mod tests {
             !matches!(reason, "climb_align"),
             "climb_align must not persist 50 frames without progress, last={reason}"
         );
+    }
+
+    #[test]
+    fn climb_up_regrab_fails_without_air_resetting_stall() {
+        // 日志死循环根因：空中清 climb_stall → regrab 永不失败。
+        let mut obs = [0.0_f32; OBS_DIM];
+        floor_underfoot(&mut obs);
+        let map = load_default_map().expect("map");
+        let graph = MapGraph::build(&map);
+        let config = NavBotConfig::default();
+        let mut exec = MotionExecutor::default();
+        let mut failed = false;
+        let mut last_reason = "init";
+        for i in 0..80 {
+            let grounded = i % 4 != 1 && i % 4 != 2;
+            let mut ctx =
+                NavCtx::from_vision(&obs, 1.0, grounded, false, 1477.0, 1210.0, 57);
+            ctx.pending_target = Some(123);
+            let (_, r, why) = exec.step(
+                &config,
+                &graph,
+                &ctx,
+                SubGoal::ClimbUp { rope_x: 1477.0 },
+            );
+            last_reason = why;
+            if matches!(r, ExecutorResult::Failed) {
+                failed = true;
+                break;
+            }
+        }
+        assert!(
+            failed,
+            "must fail regrab loop before burning full subgoal, last={last_reason}"
+        );
+        assert_eq!(last_reason, "climb_up_regrab_fail");
+    }
+
+    #[test]
+    fn climb_align_does_not_jump_when_far_from_rope() {
+        let mut obs = [0.0_f32; OBS_DIM];
+        floor_underfoot(&mut obs);
+        let map = load_default_map().expect("map");
+        let graph = MapGraph::build(&map);
+        let config = NavBotConfig::default();
+        let mut exec = MotionExecutor::default();
+        let mut ctx = NavCtx::from_vision(&obs, 1.0, true, false, 1400.0, 1210.0, 57);
+        ctx.pending_target = Some(123);
+        // 多帧卡在远处，仍不得起跳撞高台。
+        for _ in 0..10 {
+            let (out, _, why) = exec.step(
+                &config,
+                &graph,
+                &ctx,
+                SubGoal::ClimbUp { rope_x: 1477.0 },
+            );
+            assert_eq!(why, "climb_align");
+            assert!(!out.jump, "far climb_align must not jump");
+        }
     }
 
     #[test]
@@ -1422,6 +1540,69 @@ mod tests {
             "near step target must jump+right, reason={reason} out={out:?}"
         );
         assert_eq!(reason, "step_up_jump");
+    }
+
+    #[test]
+    fn step_up_done_when_already_on_dest_surface() {
+        // live 日志：短暂上到 node24 后 goal 重挂，origin≈台面 → 旧 dy_up>8 永远不 Done。
+        let mut obs = [0.0_f32; OBS_DIM];
+        floor_underfoot(&mut obs);
+        let map = load_default_map().expect("map");
+        let graph = MapGraph::build(&map);
+        let dest = graph.get(24).expect("node 24");
+        let config = NavBotConfig::default();
+        let mut exec = MotionExecutor::default();
+        let mut ctx = NavCtx::from_vision(
+            &obs,
+            1.0,
+            true,
+            false,
+            (dest.x_min + dest.x_max) * 0.5,
+            dest.y,
+            24,
+        );
+        ctx.pending_target = Some(24);
+        let (_, result, reason) = exec.step(
+            &config,
+            &graph,
+            &ctx,
+            SubGoal::StepUp {
+                target_x: dest.x_min * 0.5 + dest.x_max * 0.5,
+            },
+        );
+        assert!(
+            matches!(result, ExecutorResult::Done),
+            "already on dest must Done, got {reason}"
+        );
+        assert_eq!(reason, "step_up_done");
+    }
+
+    #[test]
+    fn step_up_jump_cooldown_is_wall_clock_not_vision_frames() {
+        let mut obs = [0.0_f32; OBS_DIM];
+        floor_underfoot(&mut obs);
+        let mut ctx = NavCtx::from_vision(&obs, 1.0, true, false, 735.0, 1225.0, 43);
+        ctx.walk_right_ok = Some(true);
+        ctx.walk_left_ok = Some(true);
+        ctx.pending_target = Some(54);
+        let map = load_default_map().expect("map");
+        let graph = MapGraph::build(&map);
+        let mut config = NavBotConfig::default();
+        config.step_up_jump_cooldown = 6; // 100ms @ 60Hz
+        let mut exec = MotionExecutor::default();
+        let (_, _, reason) = exec.step(
+            &config,
+            &graph,
+            &ctx,
+            SubGoal::StepUp { target_x: 764.0 },
+        );
+        assert_eq!(reason, "step_up_jump");
+        assert!(exec.step_jump_on_cooldown());
+        std::thread::sleep(std::time::Duration::from_millis(130));
+        assert!(
+            !exec.step_jump_on_cooldown(),
+            "6 logic ticks (~100ms) must expire by wall clock"
+        );
     }
 
     #[test]

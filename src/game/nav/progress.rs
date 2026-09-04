@@ -30,7 +30,7 @@ impl ProgressMonitor {
         visited_count: usize,
         subgoal_stagnant: bool,
     ) -> bool {
-        // 仅认真实位移；98↔99 接缝 OCR 抖节点不重置，否则永远触发不了脱困。
+        // 仅认真实位移；98↔99 接缝视觉抖节点不重置，否则永远触发不了脱困。
         let moved = (x - self.state.last_x).abs() > 20.0 || (y - self.state.last_y).abs() > 16.0;
         if moved {
             self.state.stagnant_ticks = 0;

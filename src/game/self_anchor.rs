@@ -1,6 +1,6 @@
-//! 训练用：OCR 脚点整局固定抖动（域随机化）。
+//! 训练用：自身脚点整局固定抖动（域随机化）。
 
-use crate::player_name::NamedPlayerHit;
+use crate::game::self_track::SelfPlayerHit;
 
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -17,8 +17,8 @@ pub fn episode_anchor_offset(seed: u64, max_px: f32) -> (f32, f32) {
     )
 }
 
-/// 在 OCR 脚点上叠加整局固定抖动（仅改观测原点，不改 YOLO 框）。
-pub fn apply_anchor_jitter(hit: &mut NamedPlayerHit, episode_seed: u64, max_px: f32) {
+/// 在自身脚点上叠加整局固定抖动（仅改观测原点，不改 YOLO 框）。
+pub fn apply_anchor_jitter(hit: &mut SelfPlayerHit, episode_seed: u64, max_px: f32) {
     if max_px <= 0.0 {
         return;
     }
@@ -40,14 +40,14 @@ mod tests {
 
     #[test]
     fn apply_jitter_mutates_foot_point() {
-        let mut hit = NamedPlayerHit {
+        let mut hit = SelfPlayerHit {
             x: 520.0,
             y: 300.0,
-            ocr_text: "test".into(),
-            match_score: 1.0,
-            partial: false,
-            player_conf: 0.9,
-            roi: (0, 0, 10, 10),
+            conf: 0.9,
+            x1: 500.0,
+            y1: 200.0,
+            x2: 540.0,
+            y2: 300.0,
         };
         let base_y = hit.y;
         apply_anchor_jitter(&mut hit, 42, 10.0);

@@ -1,9 +1,9 @@
 //! 冒险岛怀旧风小游戏（窗口模式）。
 //!
-//! 截图（离屏，供 YOLO / find_player）：
+//! 截图（离屏，供 YOLO / SelfTracker）：
 //!   cargo run --release --bin mini_game_headless -- --screenshot screen_caps/.../out.png
 //!
-//! 实时 YOLO+OCR 预览（手动操作）：
+//! 实时 YOLO+SelfTracker 预览（手动操作）：
 //!   cargo run --release --bin mini_game -- --vision-preview --model onnx/yolo_nangang_e3000_best.onnx
 //!
 //! 规则 Bot 自动玩（另开终端）：

@@ -58,7 +58,7 @@ impl GameSimConfig {
     }
 }
 
-/// 自身锚点配置（YOLO+OCR 模式：OCR 脚点 ± 抖动，模拟定位偏差）。
+/// 自身锚点配置（YOLO 模式：自身脚点 ± 抖动，模拟定位偏差）。
 #[derive(Debug, Clone, Copy)]
 pub struct VisionAnchorConfig {
     /// 脚点 ± 像素随机偏移（按 `episode_seed` 整局固定）；0=关闭。
@@ -74,11 +74,11 @@ impl Default for VisionAnchorConfig {
 }
 
 impl VisionAnchorConfig {
-    pub fn ocr() -> Self {
+    pub fn jitter() -> Self {
         Self::default()
     }
 
-    pub fn ocr_with_jitter(jitter_px: f32) -> Self {
+    pub fn with_jitter(jitter_px: f32) -> Self {
         Self {
             anchor_jitter_px: jitter_px.max(0.0),
         }

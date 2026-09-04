@@ -4,7 +4,7 @@
 //! YOLO 类别名仅用于筛选进哪组槽位（敌人/地板/梯绳等），编码内容一律是位置+大小。
 //! 掉落特例：药水槽的 `w` 取负号（`obs_drop_is_meso`），便于拾取优先金币。
 
-use crate::player_name::NamedPlayerHit;
+use crate::game::self_track::SelfPlayerHit;
 use crate::yolo::Detection;
 
 /// YOLO 检测置信度阈值。
@@ -18,7 +18,7 @@ pub const OBS_DROP_SLOTS: usize = 4;
 pub const OBS_LADDER_SLOTS: usize = 2;
 pub const OBS_ROPE_SLOTS: usize = 3;
 pub const OBS_SLOT_DIM: usize = 4;
-/// 本体反馈：OCR 脚点位移、卡住、上一帧动作（部署端可复现，无 sim 物理通道）。
+/// 本体反馈：自身脚点位移、卡住、上一帧动作（部署端可复现，无 sim 物理通道）。
 /// 布局: last_dx, last_dy, blocked_left, blocked_right, last_left, last_right, last_jump, last_attack
 pub const OBS_PROPRIO: usize = 8;
 pub const OBS_DIM: usize = OBS_SELF
@@ -53,13 +53,13 @@ impl VisionObservation {
         }
     }
 
-    /// 从**同一次** YOLO 推理结果 + OCR 自身位置构建观测（不再二次推理）。
+    /// 从**同一次** YOLO 推理结果 + 自身脚点构建观测（不再二次推理）。
     ///
     /// 坐标系：以自身脚点为原点；每槽 4 维为相对偏移与框宽高（归一化）。
     /// 敌人/地板/梯子/绳子/掉落均只编码位置+大小，供攻击、逃跑、跳跃、攀爬等决策。
     pub fn from_detections(
         detections: &[Detection],
-        self_player: Option<&NamedPlayerHit>,
+        self_player: Option<&SelfPlayerHit>,
         img_w: u32,
         img_h: u32,
     ) -> Self {
@@ -1083,14 +1083,14 @@ mod tests {
             det(0, 0.9, 100.0, 400.0, 200.0, 450.0),
             det(0, 0.9, 500.0, 400.0, 600.0, 450.0),
         ];
-        let self_hit = NamedPlayerHit {
+        let self_hit = SelfPlayerHit {
             x: 120.0,
             y: 450.0,
-            ocr_text: "test".into(),
-            match_score: 1.0,
-            partial: false,
-            player_conf: 0.9,
-            roi: (0, 0, 10, 10),
+            conf: 0.9,
+            x1: 100.0,
+            y1: 350.0,
+            x2: 140.0,
+            y2: 450.0,
         };
         let obs = VisionObservation::from_detections(&dets, Some(&self_hit), 1368, 768);
         let near_dx = obs.values[OBS_SELF];
@@ -1301,14 +1301,14 @@ mod tests {
             det(potion_id, 0.9, 700.0, 380.0, 740.0, 420.0),
             det(meso_id, 0.9, 800.0, 390.0, 830.0, 420.0),
         ];
-        let hit = NamedPlayerHit {
+        let hit = SelfPlayerHit {
             x: 684.0,
             y: 400.0,
-            ocr_text: "test".into(),
-            match_score: 1.0,
-            partial: false,
-            player_conf: 0.9,
-            roi: (0, 0, 10, 10),
+            conf: 0.9,
+            x1: 664.0,
+            y1: 300.0,
+            x2: 704.0,
+            y2: 400.0,
         };
         let obs = VisionObservation::from_detections(&dets, Some(&hit), 1368, 768);
         let w0 = obs.values[OBS_DROP_START + 2];

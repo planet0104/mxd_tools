@@ -222,7 +222,7 @@ impl NavBot {
         true
     }
 
-    /// 当前高度是否已到某条 ClimbUp 落点（允许 x 偏离，OCR 常漂到旁台）。
+    /// 当前高度是否已到某条 ClimbUp 落点（允许 x 偏离，视觉定位常漂到旁台）。
     fn nearest_climb_up_landing(&self, x: f32, y: f32) -> Option<u32> {
         let mut best: Option<(f32, u32)> = None;
         for e in &self.graph.edges {
@@ -442,7 +442,7 @@ impl NavBot {
         self.graph.node_count()
     }
 
-    /// 纯 YOLO+OCR：仅 obs 与视觉里程计，不读游戏内存。
+    /// 纯 YOLO+SelfTracker：仅 obs 与视觉里程计，不读游戏内存。
     pub fn decide(
         &mut self,
         map: &GameMap,
@@ -675,7 +675,7 @@ impl NavBot {
                 if matches!(goal, SubGoal::Idle) {
                     // no-op
                 } else if self.navigator.explore.pending_edge.is_some() {
-                    // Walk 完成时若 OCR 节点滞后，把定位掰到目的节点，否则下一拍仍从 from 重规划。
+                    // Walk 完成时若视觉节点滞后，把定位掰到目的节点，否则下一拍仍从 from 重规划。
                     self.snap_walk_dest_if_needed(nav_node, nav_x);
                     let done_node = self.localizer.state.node_id;
                     let was_walk = self
@@ -853,10 +853,11 @@ impl NavBot {
                             self.navigator.explore.subgoal_ticks = 0;
                             self.navigator.explore.explore_path.clear();
                         } else {
+                            // 侧移重试耗尽：强制封边（低置信度也不放行，否则同一绳死循环）。
                             self.navigator.on_subgoal_failed(
                                 &self.graph,
                                 self.config.climb_block_ticks,
-                                block_edge,
+                                true,
                             );
                             self.navigator.begin_escape(
                                 if matches!(goal, SubGoal::ClimbUp { .. }) {
@@ -899,58 +900,102 @@ impl NavBot {
                     }
                     self.executor.reset();
                 } else if matches!(goal, SubGoal::GoTo { .. } | SubGoal::WalkOff { .. }) {
-                    // 右墙/物理走不动时 YOLO 仍报可走 → goto_stalled。必须立刻封边，
-                    // 低置信度也不能跳过（否则会无限重试同一条 Walk）。
-                    let force_block = matches!(
-                        reason,
-                        "goto_stalled" | "goto_blocked" | "goto_edge_stuck"
-                    );
-                    self.navigator.on_subgoal_failed(
-                        &self.graph,
-                        self.config.edge_block_ticks,
-                        block_edge || force_block,
-                    );
-                    let esc_dir = match goal {
-                        SubGoal::GoTo { x } => {
-                            if nav_x < x {
+                    // climb_retry 侧移站位走不动：换下一档，禁止 force_unstuck 清封边后重挂同一绳。
+                    if let Some(retry) = self.navigator.explore.climb_retry {
+                        let retrying = self.navigator.begin_climb_retry(
+                            retry.from,
+                            retry.to,
+                            retry.kind,
+                            retry.rope_x,
+                            nav_x,
+                            self.config.climb_retry_max,
+                        );
+                        if retrying {
+                            self.navigator.explore.active_subgoal = SubGoal::Idle;
+                            self.navigator.explore.subgoal_ticks = 0;
+                            self.navigator.explore.explore_path.clear();
+                            self.navigator.explore.pending_edge = None;
+                        } else {
+                            let hold = self.config.climb_block_ticks.max(240);
+                            self.navigator
+                                .explore
+                                .blocked_edges
+                                .insert((retry.from, retry.kind, retry.to), hold);
+                            self.navigator.explore.climb_retry = None;
+                            self.navigator.explore.active_subgoal = SubGoal::Idle;
+                            self.navigator.explore.subgoal_ticks = 0;
+                            self.navigator.explore.explore_path.clear();
+                            self.navigator.explore.pending_edge = None;
+                            let esc = if retry.kind == EdgeKind::ClimbUp {
                                 -1.0
                             } else {
                                 1.0
-                            }
+                            };
+                            self.navigator.begin_escape(
+                                super::navigator::Navigator::clamp_escape_dir(
+                                    &self.graph,
+                                    nav_node,
+                                    nav_x,
+                                    esc,
+                                ),
+                                24,
+                            );
                         }
-                        SubGoal::WalkOff { side } => {
-                            if side == Side::Right {
-                                -1.0
-                            } else {
-                                1.0
+                        self.executor.reset();
+                    } else {
+                        // 右墙/物理走不动时 YOLO 仍报可走 → goto_stalled。必须立刻封边，
+                        // 低置信度也不能跳过（否则会无限重试同一条 Walk）。
+                        let force_block = matches!(
+                            reason,
+                            "goto_stalled" | "goto_blocked" | "goto_edge_stuck"
+                        );
+                        self.navigator.on_subgoal_failed(
+                            &self.graph,
+                            self.config.edge_block_ticks,
+                            block_edge || force_block,
+                        );
+                        let esc_dir = match goal {
+                            SubGoal::GoTo { x } => {
+                                if nav_x < x {
+                                    -1.0
+                                } else {
+                                    1.0
+                                }
                             }
-                        }
-                        _ => -self.navigator.explore.patrol_dir,
-                    };
-                    let esc_dir = super::navigator::Navigator::clamp_escape_dir(
-                        &self.graph,
-                        nav_node,
-                        nav_x,
-                        esc_dir,
-                    );
-                    self.navigator.explore.last_walk_hop = None;
-                    // 底层 Walk 卡死：直接 force_unstuck 优先爬绳，禁止顶墙 escape 空转。
-                    let bottom = self
-                        .graph
-                        .get(nav_node)
-                        .is_some_and(|n| n.y >= 1180.0);
-                    if bottom || force_block {
-                        self.navigator.force_unstuck(
+                            SubGoal::WalkOff { side } => {
+                                if side == Side::Right {
+                                    -1.0
+                                } else {
+                                    1.0
+                                }
+                            }
+                            _ => -self.navigator.explore.patrol_dir,
+                        };
+                        let esc_dir = super::navigator::Navigator::clamp_escape_dir(
                             &self.graph,
                             nav_node,
                             nav_x,
-                            self.config.goto_tolerance_px,
                             esc_dir,
                         );
-                    } else {
-                        self.navigator.begin_escape(esc_dir, 24);
+                        self.navigator.explore.last_walk_hop = None;
+                        // 底层 Walk 卡死：直接 force_unstuck 优先爬绳，禁止顶墙 escape 空转。
+                        let bottom = self
+                            .graph
+                            .get(nav_node)
+                            .is_some_and(|n| n.y >= 1180.0);
+                        if bottom || force_block {
+                            self.navigator.force_unstuck(
+                                &self.graph,
+                                nav_node,
+                                nav_x,
+                                self.config.goto_tolerance_px,
+                                esc_dir,
+                            );
+                        } else {
+                            self.navigator.begin_escape(esc_dir, 24);
+                        }
+                        self.executor.reset();
                     }
-                    self.executor.reset();
                 } else {
                     self.navigator.on_subgoal_failed(
                         &self.graph,
@@ -1008,10 +1053,11 @@ impl NavBot {
                             self.navigator.explore.subgoal_ticks = 0;
                             self.navigator.explore.explore_path.clear();
                         } else {
+                            // 超时且侧移重试耗尽：强制封边。
                             self.navigator.on_subgoal_failed(
                                 &self.graph,
                                 self.config.climb_block_ticks,
-                                block_edge,
+                                true,
                             );
                             self.navigator.begin_escape(
                                 if matches!(goal, SubGoal::ClimbUp { .. }) {
@@ -1024,7 +1070,7 @@ impl NavBot {
                         }
                         self.executor.reset();
                     } else if let SubGoal::GoTo { x } = goal {
-                        // 已在目标附近却因 OCR/latch 抖到超时：当完成，勿封边。
+                        // 已在目标附近却因定位/latch 抖到超时：当完成，勿封边。
                         let near = (nav_x - x).abs()
                             <= self.config.goto_tolerance_px.max(20.0) + 28.0;
                         let on_dest = self

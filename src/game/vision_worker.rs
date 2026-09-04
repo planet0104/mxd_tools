@@ -1,4 +1,5 @@
-//! YOLO+OCR 后台线程（主线程只负责 GL 渲染与游戏逻辑，推理按真实 ONNX 耗时在独立线程执行）。
+//! YOLO 后台线程（主线程只负责 GL 渲染与游戏逻辑，推理按真实 ONNX 耗时在独立线程执行）。
+//! 自身定位由主线程 SelfTracker 完成。
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread::{self, JoinHandle};

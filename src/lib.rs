@@ -2,8 +2,6 @@ pub mod game;
 pub mod headless_gl;
 pub mod image_util;
 pub mod map_api;
-pub mod ocr;
 pub mod ort_util;
 pub mod paths;
-pub mod player_name;
 pub mod yolo;

@@ -170,7 +170,7 @@ impl MapGraph {
     }
 
     /// 仅按图节点几何：x 落在台面内且 |y-台面| 最小。
-    /// 供落地时 OCR y 漂移兜底；爬绳/滞空勿用（会误吸到上下层同 x 台）。
+    /// 供落地时视觉 y 漂移兜底；爬绳/滞空勿用（会误吸到上下层同 x 台）。
     pub fn node_at_by_xy(&self, x: f32, y: f32, max_dy: f32) -> Option<PlatformNodeId> {
         let mut best: Option<(f32, PlatformNodeId)> = None;
         for n in self.nodes.values() {
@@ -772,7 +772,7 @@ mod tests {
     }
 
     #[test]
-    fn node_at_by_xy_recovers_when_ocr_y_drifts_below_platform() {
+    fn node_at_by_xy_recovers_when_est_y_drifts_below_platform() {
         let map = load_default_map().expect("map");
         let graph = MapGraph::build(&map);
         let n38 = graph.get(38).expect("node 38");

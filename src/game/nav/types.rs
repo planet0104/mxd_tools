@@ -144,6 +144,7 @@ pub struct NavBotConfig {
     pub goto_tolerance_px: f32,
     pub climb_align_px: f32,
     pub vision_min_conf: u8,
+    /// 起跳冷却，按 60Hz 逻辑帧换算成墙钟（18 ≈ 300ms）；与感知频率无关。
     pub step_up_jump_cooldown: u32,
     pub step_up_stall: u32,
     pub step_up_timeout_ticks: u32,
@@ -170,7 +171,7 @@ impl Default for NavBotConfig {
             step_up_stall: 5,
             step_up_timeout_ticks: 72,
             patrol_seed: 42,
-            climb_block_ticks: 90,
+            climb_block_ticks: 240,
             climb_retry_max: 7,
         }
     }

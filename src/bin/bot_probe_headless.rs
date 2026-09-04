@@ -1,4 +1,4 @@
-//! Headless 规则 bot 多局探针（离屏 GL + 真实 YOLO/OCR，与 game_preview 一致）。
+//! Headless 规则 bot 多局探针（离屏 GL + 真实 YOLO/SelfTracker，与 game_preview 一致）。
 //!
 //! ```powershell
 //! cargo run --release --bin bot_probe_headless

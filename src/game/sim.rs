@@ -152,7 +152,7 @@ pub struct GameSim {
     pub config: GameSimConfig,
     /// 本局 episode 种子（锚点抖动等域随机化）。
     pub episode_seed: u64,
-    /// 训练用装饰玩家（YOLO「玩家」干扰，OCR 排除自身）
+    /// 训练用装饰玩家（YOLO「玩家」干扰，SelfTracker 排除自身）
     pub npc_players: Vec<NpcPlayerState>,
     pub movement_gate: MovementGate,
     /// NavBot 执行 StepUp 时强制允许跳上台阶（不依赖物理 nearest_step 探针）。

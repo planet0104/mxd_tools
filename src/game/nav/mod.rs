@@ -1,4 +1,4 @@
-//! 地图拓扑导航 bot：MapGraph 规划 + YOLO/OCR 执行 + 砍怪/拾取中断。
+//! 地图拓扑导航 bot：MapGraph 规划 + YOLO/SelfTracker 执行 + 砍怪/拾取中断。
 
 mod bot_driver;
 mod combat_fsm;

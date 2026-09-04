@@ -61,7 +61,7 @@ fn run_parallel_coordinator(args: &[String]) -> ! {
     let jobs_n = arg_usize(args, "--jobs", DEFAULT_PARALLEL_JOBS);
     let episode_seeds = parse_parallel_seeds_arg(args, jobs_n);
 
-    eprintln!("阶段1/2: first_platform + spawn（串行，避免 OCR/YOLO 冷启动争抢）");
+    eprintln!("阶段1/2: first_platform + spawn（串行，避免 YOLO 冷启动争抢）");
     for (name, args_vec) in [
         (
             "first_platform",

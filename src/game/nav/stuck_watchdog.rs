@@ -13,7 +13,7 @@ pub const GLOBAL_STUCK_CLIMB_SECS: u64 = 22;
 const GRACE_SECS: u64 = 2;
 /// 判定「位置未动」的像素阈值。
 const MOVE_EPS_PX: f32 = 12.0;
-/// 爬绳单帧：忽略 OCR 微抖（勿用过大，否则慢爬每帧都算不动）。
+/// 爬绳单帧：忽略视觉微抖（勿用过大，否则慢爬每帧都算不动）。
 const CLIMB_MOVE_EPS_PX: f32 = 20.0;
 /// 爬绳相对停滞起点的净垂直进展，超过则清停滞（正常上爬不会被 10s 打断）。
 const CLIMB_NET_PROGRESS_PX: f32 = 36.0;
@@ -379,7 +379,7 @@ mod tests {
         assert!(w
             .observe_at(t0, 488.0, 860.0, "climb_up_active", &inp(true, false))
             .is_none());
-        // 20px OCR 抖：达不到净进展阈值，应继续累计。
+        // 20px 视觉抖：达不到净进展阈值，应继续累计。
         assert!(w
             .observe_at(
                 t0 + Duration::from_secs(5),

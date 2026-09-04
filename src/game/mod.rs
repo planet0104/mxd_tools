@@ -11,6 +11,7 @@ pub mod nav;
 pub mod npc;
 pub mod observation;
 pub mod self_anchor;
+pub mod self_track;
 pub mod sim;
 pub mod sim_observation;
 pub mod types;
@@ -55,6 +56,7 @@ pub use observation::{
 };
 pub use vision_sense::VisionSenseState;
 pub use self_anchor::{apply_anchor_jitter, episode_anchor_offset};
+pub use self_track::{CameraRegime, SelfPlayerHit, SelfTracker, TrackMode};
 pub use sim::{EngageHint, GameModal, GameSim, GameState, GroundTruth, MobState, PlayerState};
 pub use sim_observation::observation_from_sim;
 pub use types::{

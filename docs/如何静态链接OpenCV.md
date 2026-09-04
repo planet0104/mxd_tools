@@ -1,6 +1,6 @@
 # Rust + 静态 OpenCV 对接说明
 
-本仓库 **YOLO 预处理** 与 **PP-OCR det 后处理** 使用 OpenCV（`resize`、`findContours` 等）。安装方式与 YOLO 推理相同，见 `docs/如何在Rust中做YOLO推理.md`。
+本仓库 **YOLO 预处理** 使用 OpenCV（`resize` 等）。安装方式与 YOLO 推理相同，见 `docs/如何在Rust中做YOLO推理.md`。
 
 Rust crate features：`imgproc`、`imgcodecs`。链接库需包含对应模块（见下 `OPENCV_LINK_LIBS`）。
 
@@ -27,16 +27,13 @@ Rust crate features：`imgproc`、`imgcodecs`。链接库需包含对应模块�
    - `OPENCV_LINK_LIBS` 与 `scripts/list_opencv_libs.ps1` 一致（注意 zlib 可能是 `zlib` 而非旧 triplet 的 `zs`）  
    - 无 `+crt-static` rustflags
 
-4. 编译  
+4. 编译验证  
    ```powershell
-   cargo build --release --bin find_player
-   cargo run --release --bin find_player -- `
-     --model models/yolo_nangang_e2000_best.onnx `
-     --source screen_caps/彩虹岛-南港西郊平原 `
-     --name "光头强加强版"
+   cargo build --release --bin game_preview
+   cargo run --release --bin game_preview
    ```
 
-玩家定位见 `find_player`（YOLO 检测玩家框 + PP-OCR det/rec 识别名牌）。YOLO 推理细节见 `docs/如何在Rust中做YOLO推理.md`。
+玩家自身定位见 `SelfTracker`（YOLO「玩家」框 + 运动残差跟踪）。YOLO 推理细节见 `docs/如何在Rust中做YOLO推理.md`。
 
 ## 注意
 

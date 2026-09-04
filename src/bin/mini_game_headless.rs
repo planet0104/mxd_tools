@@ -1,4 +1,4 @@
-//! 无头模式：固定步进逻辑 + 离屏渲染截图（供 YOLO / find_player 测试）。
+//! 无头模式：固定步进逻辑 + 离屏渲染截图（供 YOLO / SelfTracker 测试）。
 //!
 //! ```powershell
 //! cargo run --release --bin mini_game_headless -- --bot-play --screenshot screen_caps/.../out.png
