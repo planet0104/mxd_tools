@@ -136,6 +136,14 @@ UI_ASSET_FILES = {
     "键盘": "键盘_UI.png",
 }
 
+# 贴 UI 后：世界物体被底部面板/键盘挡住过多则丢弃标注（避免「看不见却有框」）
+UI_BOTTOM_COVER_LABELS = frozenset({"面板", "键盘"})
+# 被底部 UI 覆盖面积占比 ≥ 该值 → 整框丢弃
+UI_OCCLUDE_DROP = 0.25
+# 与底部 UI 有水平重叠且重叠宽度占自身宽度 ≥ 该值 → 底边裁到 UI 顶（去掉看不见的部分）
+# 略高以免整条地板只因右侧键盘被裁到键盘顶（617）而丢掉面板上方仍可见的区域
+UI_OCCLUDE_CLIP_WIDTH = 0.30
+
 
 @dataclass
 class Box:
@@ -488,6 +496,119 @@ def paste_window_ui(
     )
 
     return canvas.convert("RGB"), boxes
+
+
+def is_ui_annotation_label(label: str) -> bool:
+    return label in UI_ASSET_FILES or label.startswith("血条")
+
+
+def ui_cover_ratio(box: Box, covers: list[Box]) -> float:
+    """box 被 covers 并集盖住的面积占比（面板与键盘几乎不重叠，用求和再截断即可）。"""
+    area = box.area()
+    if area <= 0:
+        return 1.0
+    if not covers:
+        return 0.0
+    covered = sum(c.intersection_area(box) for c in covers)
+    return min(1.0, covered / area)
+
+
+def clip_box_above_ui_covers(box: Box, covers: list[Box]) -> Box | None:
+    """把框底边裁到与之水平重叠的底部 UI 顶边之上；裁没了则返回 None。"""
+    x1, y1, x2, y2 = box.as_xyxy()
+    new_y2 = y2
+    bw = max(x2 - x1, 1e-6)
+    for c in covers:
+        cx1, cy1, cx2, cy2 = c.as_xyxy()
+        overlap_w = min(x2, cx2) - max(x1, cx1)
+        if overlap_w <= 0:
+            continue
+        if overlap_w / bw < UI_OCCLUDE_CLIP_WIDTH:
+            continue
+        # 框整体已在该 UI 顶边之下 → 这一带看不见
+        if y1 >= cy1:
+            return None
+        if cy1 < new_y2:
+            new_y2 = cy1
+    if new_y2 - y1 < 2:
+        return None
+    new_area = (x2 - x1) * (new_y2 - y1)
+    if box.area() > 0 and new_area / box.area() < 0.25:
+        return None
+
+    pts = None
+    st = "rectangle"
+    if box.points and box.shape_type == "polygon":
+        clipped = []
+        for px, py in box.points:
+            if py <= new_y2:
+                clipped.append([px, min(py, new_y2)])
+            else:
+                # 落在 UI 内的顶点收到裁切线上，避免多边形穿进面板
+                clipped.append([px, new_y2])
+        # 去重过密点
+        cleaned: list[list[float]] = []
+        for p in clipped:
+            if not cleaned or abs(cleaned[-1][0] - p[0]) > 0.5 or abs(cleaned[-1][1] - p[1]) > 0.5:
+                cleaned.append(p)
+        if len(cleaned) >= 3:
+            xs = [p[0] for p in cleaned]
+            ys = [p[1] for p in cleaned]
+            if max(ys) - min(ys) < 2 or max(xs) - min(xs) < 2:
+                return None
+            return Box(
+                box.label,
+                min(xs),
+                min(ys),
+                max(xs),
+                max(ys),
+                "polygon",
+                cleaned,
+                description=box.description,
+            )
+        return None
+
+    return Box(
+        box.label,
+        x1,
+        y1,
+        x2,
+        new_y2,
+        st,
+        pts,
+        description=box.description,
+    )
+
+
+def filter_boxes_occluded_by_bottom_ui(
+    boxes: list[Box],
+    ui_boxes: list[Box],
+    *,
+    drop_ratio: float = UI_OCCLUDE_DROP,
+) -> list[Box]:
+    """去掉被底部面板/键盘挡住的世界标注；轻遮挡则裁掉进入 UI 的部分。
+
+    UI 自身标注（面板/键盘/血条等）原样保留。
+    """
+    covers = [b for b in ui_boxes if b.label in UI_BOTTOM_COVER_LABELS]
+    if not covers:
+        return boxes
+    kept: list[Box] = []
+    for b in boxes:
+        if is_ui_annotation_label(b.label):
+            kept.append(b)
+            continue
+        ratio = ui_cover_ratio(b, covers)
+        if ratio >= drop_ratio:
+            continue
+        if ratio > 0.0:
+            clipped = clip_box_above_ui_covers(b, covers)
+            if clipped is None:
+                continue
+            kept.append(clipped)
+        else:
+            kept.append(b)
+    return kept
 
 
 def place_sprite_box(
@@ -1556,6 +1677,10 @@ def main() -> None:
             use_ui = rng.random() < args.ui_ratio
             if use_ui:
                 crop, ui_boxes = paste_window_ui(crop, ui_sprites, rng)
+                # 先清掉被底部面板/键盘挡住的地板/怪/玩家等，再追加 UI 标注
+                cropped_boxes = filter_boxes_occluded_by_bottom_ui(
+                    cropped_boxes, ui_boxes
+                )
                 cropped_boxes.extend(ui_boxes)
                 crop_name = f"{name}_c{ci:02d}_{ww}x{wh}_ui"
                 n_with_ui += 1
