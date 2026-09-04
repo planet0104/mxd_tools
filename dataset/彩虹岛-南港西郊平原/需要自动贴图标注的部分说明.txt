@@ -9,3 +9,4 @@
 9、默认产量约 80×15=1200 窗。脚本：python scripts/auto_annotate_dataset.py --dataset dataset/彩虹岛-南港西郊平原
    说明见 docs/如何自动贴图标注数据集.md
 10、assets/mobs 中已抽取的怪物才会进训练集（当前：花蘑菇、蓝蜗牛、绿蜗牛、红蜗牛、树怪）。未抽取则不会生成。
+11、贴窗口 UI 时会重绘面板血条（0%～100%），并自动标注血条10%～血条100%（每隔 10% 一类，共 10 类）。绘制逻辑见 scripts/hp_bar_draw.py。

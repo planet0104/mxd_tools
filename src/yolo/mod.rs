@@ -7,7 +7,10 @@ mod postprocess;
 mod preprocess;
 mod session;
 
-pub use labels::CLASS_NAMES;
+pub use labels::{
+    class_name, hp_ratio_from_class_id, hp_ratio_from_label, CLASS_NAMES, HP_BAR_CLASS_FIRST,
+    HP_BAR_CLASS_LAST,
+};
 pub use session::{YoloDetector, EMBEDDED_YOLO_ONNX, EMBEDDED_YOLO_ONNX_NAME};
 
 #[derive(Debug, Clone, Copy)]
@@ -56,4 +59,20 @@ pub struct LetterboxMeta {
     pub pad_y: f32,
     pub orig_w: u32,
     pub orig_h: u32,
+}
+
+/// 在检测列表中取置信度最高的血条框，返回 (比例, conf)。
+pub fn best_hp_from_detections(dets: &[Detection]) -> Option<(f32, f32)> {
+    let mut best: Option<(f32, f32)> = None;
+    for d in dets {
+        let Some(ratio) =
+            hp_ratio_from_class_id(d.class_id).or_else(|| hp_ratio_from_label(d.label))
+        else {
+            continue;
+        };
+        if best.map(|(_, c)| d.conf > c).unwrap_or(true) {
+            best = Some((ratio, d.conf));
+        }
+    }
+    best
 }

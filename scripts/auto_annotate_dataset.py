@@ -23,11 +23,18 @@ import argparse
 import json
 import random
 import shutil
+import sys
 from collections import Counter, defaultdict, deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from PIL import Image
+
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from hp_bar_draw import HP_CLASS_NAMES, apply_hp_to_panel, sample_hp_ratio
 
 CLASS_NAMES = [
     "地板",
@@ -51,6 +58,7 @@ CLASS_NAMES = [
     "浮动按钮",
     "面板",
     "键盘",
+    *HP_CLASS_NAMES,
 ]
 CLASS_TO_ID = {n: i for i, n in enumerate(CLASS_NAMES)}
 
@@ -441,7 +449,7 @@ def paste_window_ui(
         )
     )
 
-    # 面板：底部居中
+    # 面板：底部居中；重绘 0%～100% 血条并自动标注血条10%～100%
     panel = ui["面板"]
     px = max(0, (ww - panel.width) // 2)
     py = wh - panel.height
@@ -455,6 +463,18 @@ def paste_window_ui(
             float(py + panel.height),
         )
     )
+    # 面板相对原始 815×72 的缩放（scale_ui_set 可能缩小）
+    panel_scale = panel.width / 815.0
+    hp_ratio = sample_hp_ratio(rng)
+    (hx1, hy1, hx2, hy2), hp_label, _ = apply_hp_to_panel(
+        canvas,
+        hp_ratio,
+        max_hp=rng.choice((50, 82, 100, 120, 150)),
+        scale=panel_scale,
+        origin_xy=(px, py),
+    )
+    if hx2 > hx1 and hy2 > hy1:
+        boxes.append(Box(hp_label, float(hx1), float(hy1), float(hx2), float(hy2)))
 
     # 键盘：面板上方靠右紧贴，不遮挡面板
     kb = ui["键盘"]

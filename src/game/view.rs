@@ -699,6 +699,131 @@ fn draw_mob(assets: &GameViewAssets, mob: &MobState, cam_x: f32, cam_y: f32) {
     );
 }
 
+/// 与截图一致的红血条：空槽银灰 + 竖直高光渐变 + 分格竖线。
+fn draw_maple_hp_bar(x: f32, y: f32, w: f32, h: f32, ratio: f32) {
+    const FILL: [(u8, u8, u8); 14] = [
+        (255, 0, 0),
+        (255, 119, 119),
+        (252, 48, 48),
+        (255, 0, 0),
+        (238, 0, 0),
+        (238, 0, 0),
+        (238, 0, 0),
+        (221, 0, 0),
+        (204, 0, 0),
+        (170, 0, 0),
+        (102, 0, 0),
+        (102, 0, 0),
+        (102, 0, 0),
+        (170, 0, 0),
+    ];
+    const EMPTY: [(u8, u8, u8); 14] = [
+        (204, 204, 204),
+        (228, 228, 228),
+        (211, 211, 211),
+        (204, 204, 204),
+        (190, 190, 190),
+        (190, 190, 190),
+        (190, 190, 190),
+        (177, 177, 177),
+        (163, 163, 163),
+        (136, 136, 136),
+        (82, 82, 82),
+        (82, 82, 82),
+        (82, 82, 82),
+        (136, 136, 136),
+    ];
+    draw_maple_gauge(x, y, w, h, ratio.clamp(0.0, 1.0), &FILL, &EMPTY, (180, 0, 0));
+}
+
+fn draw_maple_mp_bar(x: f32, y: f32, w: f32, h: f32, ratio: f32) {
+    const FILL: [(u8, u8, u8); 14] = [
+        (0, 170, 255),
+        (64, 190, 255),
+        (0, 150, 240),
+        (0, 140, 230),
+        (0, 127, 238),
+        (0, 120, 220),
+        (0, 110, 210),
+        (0, 100, 200),
+        (0, 90, 190),
+        (0, 80, 170),
+        (0, 60, 140),
+        (0, 60, 140),
+        (0, 60, 140),
+        (0, 80, 170),
+    ];
+    const EMPTY: [(u8, u8, u8); 14] = [
+        (204, 204, 204),
+        (228, 228, 228),
+        (211, 211, 211),
+        (204, 204, 204),
+        (190, 190, 190),
+        (190, 190, 190),
+        (190, 190, 190),
+        (177, 177, 177),
+        (163, 163, 163),
+        (136, 136, 136),
+        (82, 82, 82),
+        (82, 82, 82),
+        (82, 82, 82),
+        (136, 136, 136),
+    ];
+    draw_maple_gauge(x, y, w, h, ratio.clamp(0.0, 1.0), &FILL, &EMPTY, (0, 60, 140));
+}
+
+fn draw_maple_gauge(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    ratio: f32,
+    fill: &[(u8, u8, u8)],
+    empty: &[(u8, u8, u8)],
+    rib: (u8, u8, u8),
+) {
+    let rows = fill.len().min(empty.len()).max(1);
+    let row_h = h / rows as f32;
+    let fill_w = w * ratio;
+    for i in 0..rows {
+        let (er, eg, eb) = empty[i];
+        let yy = y + i as f32 * row_h;
+        draw_rectangle(
+            x,
+            yy,
+            w,
+            row_h.max(1.0),
+            Color::from_rgba(er, eg, eb, 255),
+        );
+        if fill_w > 0.5 {
+            let (fr, fg, fb) = fill[i];
+            draw_rectangle(
+                x,
+                yy,
+                fill_w,
+                row_h.max(1.0),
+                Color::from_rgba(fr, fg, fb, 255),
+            );
+        }
+    }
+    if fill_w > 4.0 {
+        let mut sx = x + 4.0;
+        while sx < x + fill_w {
+            draw_line(
+                sx,
+                y + 1.0,
+                sx,
+                y + h - 1.0,
+                1.0,
+                Color::from_rgba(rib.0, rib.1, rib.2, 90),
+            );
+            sx += 4.0;
+        }
+    }
+    draw_rectangle_lines(x - 1.0, y - 1.0, w + 2.0, h + 2.0, 1.0, BLACK);
+    draw_rectangle_lines(x, y, w, h, 1.0, WHITE);
+}
+
 fn draw_ui_shell(assets: &GameViewAssets, sim: &GameSim) {
     let w = &assets.ui_layout.widgets;
     let mut rects: Vec<&UiRect> = vec![&w.minimap, &w.panel, &w.keyboard];
@@ -724,25 +849,11 @@ fn draw_ui_shell(assets: &GameViewAssets, sim: &GameSim) {
     }
 
     let hp = &assets.ui_layout.dynamic_overlay.hp_bar;
-    draw_rectangle(hp.x, hp.y, hp.w, hp.h, Color::new(0.15, 0.15, 0.15, 0.9));
-    let ratio = sim.state.player.hp as f32 / sim.state.player.max_hp as f32;
-    draw_rectangle(
-        hp.x,
-        hp.y,
-        hp.w * ratio.clamp(0.0, 1.0),
-        hp.h,
-        Color::new(0.85, 0.15, 0.15, 1.0),
-    );
+    let ratio = (sim.state.player.hp as f32 / sim.state.player.max_hp as f32).clamp(0.0, 1.0);
+    draw_maple_hp_bar(hp.x, hp.y, hp.w, hp.h, ratio);
 
     let mp = &assets.ui_layout.dynamic_overlay.mp_bar;
-    draw_rectangle(mp.x, mp.y, mp.w, mp.h, Color::new(0.15, 0.15, 0.2, 0.9));
-    draw_rectangle(
-        mp.x,
-        mp.y,
-        mp.w * 0.8,
-        mp.h,
-        Color::new(0.2, 0.35, 0.9, 1.0),
-    );
+    draw_maple_mp_bar(mp.x, mp.y, mp.w, mp.h, 0.8);
 
     let text = format!(
         "HP {}/{}  药:{}  币:{}  击杀:{}  [I]背包 [1]喝药 [Z]拾取",

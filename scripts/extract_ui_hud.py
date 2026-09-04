@@ -298,8 +298,8 @@ def extract(game_root: Path, out_dir: Path, minimap_size: tuple[int, int]) -> No
             },
         },
         "dynamic_overlay": {
-            "hp_bar": {"x": panel_x + 42, "y": panel_y + 12, "w": 120, "h": 12},
-            "mp_bar": {"x": panel_x + 42, "y": panel_y + 28, "w": 120, "h": 12},
+            "hp_bar": {"x": panel_x + 228, "y": panel_y + 53, "w": 104, "h": 14},
+            "mp_bar": {"x": panel_x + 336, "y": panel_y + 53, "w": 104, "h": 14},
             "player_name": {"x": panel_x - 77, "y": panel_y + 10, "w": 100, "h": 14},
             "hotbar_slots": [
                 {"slot": i + 1, "x": panel_x + 204 + i * 36, "y": panel_y + 14, "w": 32, "h": 32}

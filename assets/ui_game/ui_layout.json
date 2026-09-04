@@ -9,8 +9,8 @@
     "keyboard": { "file": "keyboard_frame.png", "x": 940, "y": 617, "w": 151, "h": 80 }
   },
   "dynamic_overlay": {
-    "hp_bar": { "x": 319, "y": 709, "w": 120, "h": 12 },
-    "mp_bar": { "x": 319, "y": 725, "w": 120, "h": 12 },
+    "hp_bar": { "x": 505, "y": 750, "w": 104, "h": 14 },
+    "mp_bar": { "x": 613, "y": 750, "w": 104, "h": 14 },
     "player_name": { "x": 200, "y": 707, "w": 100, "h": 14 },
     "hotbar_slots": [
       { "slot": 1, "x": 481, "y": 711, "w": 32, "h": 32 },

@@ -13,7 +13,7 @@ use mxd_tools::game::{
     VisionWorker, WINDOW_H, WINDOW_W, LOGIC_HZ, OBS_DIM, VISION_CONF_THRESH,
 };
 use mxd_tools::game::{load_default_map, GameMap};
-use mxd_tools::yolo::YoloDevice;
+use mxd_tools::yolo::{best_hp_from_detections, YoloDevice};
 
 use crate::keyboard_input::{HeldKeys, KeyboardConfig};
 use crate::live_nav_diag::NavDiagLogger;
@@ -538,6 +538,19 @@ fn run_live_nav_inner(
             );
             let obs = obs_from_step(&step);
             driver.apply_observation(result.tick, obs);
+            if let Some((hp_ratio, hp_conf)) = best_hp_from_detections(&step.detections) {
+                if result.tick % 30 == 0 {
+                    send(LiveNavEvent::Log(format!(
+                        "检测到血量 ≈{:.0}%（conf={hp_conf:.2}）{}",
+                        hp_ratio * 100.0,
+                        if hp_ratio <= 0.3 {
+                            " → 偏低，宜找安全点喝药/静默回血"
+                        } else {
+                            ""
+                        }
+                    )));
+                }
+            }
             for line in diag_log.on_vision(
                 result.tick,
                 &step,
