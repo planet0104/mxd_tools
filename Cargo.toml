@@ -33,12 +33,15 @@ macroquad = "0.4.14"
 rand = "0.8.5"
 ctrlc = "3.4"
 pollster = "0.4"
+rfd = "0.15"
 
 [target.'cfg(windows)'.dependencies]
 raw-window-handle = "0.6"
+serialport = "4.6"
 windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    "Win32_Storage_FileSystem",
     "Win32_Storage_Xps",
     "Win32_System_Console",
     "Win32_System_LibraryLoader",
@@ -48,6 +51,9 @@ windows = { version = "0.61", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[build-dependencies]
+winresource = "0.1"
 
 [[test]]
 name = "bot_yolo_probe"

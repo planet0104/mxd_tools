@@ -179,4 +179,15 @@ usb-device/
 
 - Pico 请用 **USB 口**（GPIO 复用 USB），不要用 3-pin UART 口当 HID 设备。
 - 首次枚举若串口驱动异常，可尝试重新插拔。
-- `type` / `kp` / `mc` 等命令执行期间 Embassy 异步栈持续运行，避免 USB 超时。
+- 安全：CDC 断开或 2.5s 无命令且仍有按键时，自动松开键盘/鼠标，避免宿主关窗卡键。
+- 宿主在按住期间应约每 0.8s `ping` 一次（`mxd_tools` 已实现）。
+
+## 给 mxd_tools 宿主嵌入 UF2
+
+在仓库根目录生成并覆盖嵌入固件：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/build_rp2040_uf2.ps1
+```
+
+产物：`firmware/mxd-usb-hid.uf2`（由 `mxd_tools` 编译期 `include_bytes!` 嵌入）。宿主 UI 提供「自动烧写到 RPI-RP2」与「固件另存为」。

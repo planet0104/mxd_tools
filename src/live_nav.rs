@@ -1,5 +1,5 @@
-//! 外挂式 Live Nav：截取 mini_game 窗口 → YOLO + SelfTracker → NavBot → SendInput。
-//! 与 GameSim / mini_game 源码无编译期耦合，仅按窗口标题/进程附着。
+//! 外挂式 Live Nav：截取 mini_game 窗口 → YOLO + SelfTracker → NavBot → 键盘注入。
+//! 键盘默认走 RP2040 USB HID；也可选 SendInput。
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
@@ -15,7 +15,7 @@ use mxd_tools::game::{
 use mxd_tools::game::{load_default_map, GameMap};
 use mxd_tools::yolo::YoloDevice;
 
-use crate::keyboard_input::HeldKeys;
+use crate::keyboard_input::{HeldKeys, KeyboardConfig};
 use crate::live_nav_diag::NavDiagLogger;
 use crate::win_capture::{
     capture_client_rgb, find_mini_game_window, focus_window, window_alive, GameWindow,
@@ -441,12 +441,12 @@ YOLO完成={yolo_n} 均感知={avg_yolo:.1}ms 峰={:.1}ms 排队={avg_queue:.1}m
 }
 
 /// 后台寻路线程入口。
-pub fn run_live_nav(stop: Arc<AtomicBool>, tx: Sender<LiveNavEvent>) {
+pub fn run_live_nav(stop: Arc<AtomicBool>, tx: Sender<LiveNavEvent>, kb: KeyboardConfig) {
     let send = |ev: LiveNavEvent| {
         let _ = tx.send(ev);
     };
 
-    if let Err(e) = run_live_nav_inner(stop, &send) {
+    if let Err(e) = run_live_nav_inner(stop, &send, kb) {
         send(LiveNavEvent::Stopped {
             reason: format!("异常退出：{e:#}"),
         });
@@ -456,6 +456,7 @@ pub fn run_live_nav(stop: Arc<AtomicBool>, tx: Sender<LiveNavEvent>) {
 fn run_live_nav_inner(
     stop: Arc<AtomicBool>,
     send: &dyn Fn(LiveNavEvent),
+    kb: KeyboardConfig,
 ) -> Result<()> {
     send(LiveNavEvent::Log(
         "正在加载地图与 YOLO 模型…".into(),
@@ -465,7 +466,8 @@ fn run_live_nav_inner(
         .context("加载嵌入 YOLO")?;
     let mut worker = VisionWorker::spawn(pipeline);
     let mut driver = LiveNavDriver::new(map, 42);
-    let mut keys = HeldKeys::new();
+    let mut keys = HeldKeys::open(&kb).map_err(|e| anyhow::anyhow!("打开键盘后端失败：{e}"))?;
+    send(LiveNavEvent::Log(format!("键盘后端：{}", keys.describe())));
     let mut tracker = SelfTracker::new();
     let mut last_commanded_dx = 0.0_f32;
     let mut pending_commanded_dx: Option<f32> = None;
@@ -602,7 +604,7 @@ fn run_live_nav_inner(
 
         let ti = Instant::now();
         if let Err(e) = keys.sync_frame(&paced) {
-            send(LiveNavEvent::Log(format!("SendInput 失败：{e}")));
+            send(LiveNavEvent::Log(format!("按键注入失败：{e}")));
         }
         let input_ms = ms(ti.elapsed());
 

@@ -31,6 +31,11 @@ impl KeyboardState {
         }
     }
 
+    /// 是否仍有修饰键或普通键处于按下。
+    pub fn is_held(&self) -> bool {
+        self.modifier != 0 || self.keycodes.iter().any(|&c| c != 0)
+    }
+
     /// 松开全部按键并清除修饰键。
     pub fn clear(&mut self) {
         self.modifier = 0;
@@ -125,6 +130,10 @@ impl MouseState {
 
     pub fn clear_buttons(&mut self) {
         self.buttons = 0;
+    }
+
+    pub fn buttons_held(&self) -> bool {
+        self.buttons != 0
     }
 
     pub fn button_down(&mut self, mask: u8) {

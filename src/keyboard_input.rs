@@ -1,10 +1,9 @@
-//! 通过 Win32 SendInput 向当前前台窗口注入键盘事件（非虚拟 HID 设备）。
+//! 键盘注入：Win32 SendInput（可选）或 RP2040 USB HID（CDC 命令）。
 //!
-//! 支持点按（tap）与按住差分同步（HeldKeys），供 live NavBot 驱动 mini_game。
+//! 支持点按（tap）与按住差分同步（HeldKeys），供 live NavBot / UI 测试。
 
-use std::mem::size_of;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use mxd_tools::game::InputFrame;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -13,6 +12,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT, VK_S, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
     VK_W,
 };
+
+use crate::usb_hid::UsbHidClient;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Key {
@@ -83,6 +84,29 @@ impl Key {
     fn is_extended(self) -> bool {
         matches!(self, Key::Left | Key::Right | Key::Up | Key::Down)
     }
+
+    /// USB HID Keyboard Usage ID（Boot 协议）。
+    pub fn hid_usage(self) -> u8 {
+        match self {
+            Key::A => 0x04,
+            Key::W => 0x1A,
+            Key::S => 0x16,
+            Key::D => 0x07,
+            Key::C => 0x06,
+            Key::Z => 0x1D,
+            Key::J => 0x0D,
+            Key::Digit1 => 0x1E,
+            Key::Space => 0x2C,
+            Key::Enter => 0x28,
+            Key::Esc => 0x29,
+            Key::Tab => 0x2B,
+            Key::Left => 0x50,
+            Key::Right => 0x4F,
+            Key::Up => 0x52,
+            Key::Down => 0x51,
+            Key::LeftCtrl => 0xE0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,6 +120,46 @@ impl Modifier {
         match self {
             Modifier::LeftCtrl => VK_CONTROL,
             Modifier::LeftShift => VK_SHIFT,
+        }
+    }
+
+    fn hid_mask(self) -> u8 {
+        match self {
+            Modifier::LeftCtrl => 0x01,
+            Modifier::LeftShift => 0x02,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyboardBackend {
+    /// 默认：RP2040 USB 虚拟键盘（CDC）
+    UsbHid,
+    /// 可选：Win32 SendInput
+    SendInput,
+}
+
+impl KeyboardBackend {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::UsbHid => "USB 虚拟键盘 (RP2040)",
+            Self::SendInput => "SendInput（软件注入）",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct KeyboardConfig {
+    pub backend: KeyboardBackend,
+    /// 空 = 自动检测 VID/PID；否则为串口名如 `COM5`
+    pub usb_port: String,
+}
+
+impl Default for KeyboardConfig {
+    fn default() -> Self {
+        Self {
+            backend: KeyboardBackend::UsbHid,
+            usb_port: String::new(),
         }
     }
 }
@@ -124,11 +188,11 @@ fn key_input(vk: VIRTUAL_KEY, up: bool, extended: bool) -> INPUT {
     }
 }
 
-fn send(inputs: &[INPUT]) -> Result<(), String> {
+fn send_inputs(inputs: &[INPUT]) -> Result<(), String> {
     if inputs.is_empty() {
         return Ok(());
     }
-    let sent = unsafe { SendInput(inputs, size_of::<INPUT>() as i32) };
+    let sent = unsafe { SendInput(inputs, std::mem::size_of::<INPUT>() as i32) };
     if sent as usize == inputs.len() {
         Ok(())
     } else {
@@ -136,46 +200,140 @@ fn send(inputs: &[INPUT]) -> Result<(), String> {
     }
 }
 
-fn send_key_edge(key: Key, down: bool) -> Result<(), String> {
-    send(&[key_input(key.vk(), !down, key.is_extended())])
+fn modifiers_mask(modifiers: &[Modifier]) -> u8 {
+    modifiers.iter().fold(0u8, |acc, m| acc | m.hid_mask())
 }
 
-pub fn tap(modifiers: &[Modifier], key: Key) -> Result<(), String> {
-    let mut down = Vec::new();
-    for m in modifiers {
-        down.push(key_input(m.vk(), false, false));
-    }
-    down.push(key_input(key.vk(), false, key.is_extended()));
-    send(&down)?;
-    thread::sleep(Duration::from_millis(30));
-
-    let mut up = Vec::new();
-    up.push(key_input(key.vk(), true, key.is_extended()));
-    for m in modifiers.iter().rev() {
-        up.push(key_input(m.vk(), true, false));
-    }
-    send(&up)
+enum Sink {
+    SendInput,
+    Usb(UsbHidClient),
 }
 
-pub fn tap_keys(modifiers: &[Modifier], keys: &[Key]) -> Result<(), String> {
-    let mut down = Vec::new();
-    for m in modifiers {
-        down.push(key_input(m.vk(), false, false));
+impl Sink {
+    fn open(cfg: &KeyboardConfig) -> Result<Self, String> {
+        match cfg.backend {
+            KeyboardBackend::SendInput => Ok(Self::SendInput),
+            KeyboardBackend::UsbHid => {
+                let client = if cfg.usb_port.trim().is_empty() {
+                    UsbHidClient::open_auto()?
+                } else {
+                    UsbHidClient::open_named(cfg.usb_port.trim())?
+                };
+                Ok(Self::Usb(client))
+            }
+        }
     }
-    for k in keys {
-        down.push(key_input(k.vk(), false, k.is_extended()));
-    }
-    send(&down)?;
-    thread::sleep(Duration::from_millis(30));
 
-    let mut up = Vec::new();
-    for k in keys.iter().rev() {
-        up.push(key_input(k.vk(), true, k.is_extended()));
+    fn backend_name(&self) -> &'static str {
+        match self {
+            Self::SendInput => "SendInput",
+            Self::Usb(_) => "USB-HID",
+        }
     }
-    for m in modifiers.iter().rev() {
-        up.push(key_input(m.vk(), true, false));
+
+    fn port_label(&self) -> Option<String> {
+        match self {
+            Self::Usb(c) => Some(c.port_name()),
+            Self::SendInput => None,
+        }
     }
-    send(&up)
+
+    fn key_down(&mut self, key: Key) -> Result<(), String> {
+        match self {
+            Self::SendInput => send_inputs(&[key_input(key.vk(), false, key.is_extended())]),
+            Self::Usb(c) => c.key_down(key.hid_usage()),
+        }
+    }
+
+    fn key_up(&mut self, key: Key) -> Result<(), String> {
+        match self {
+            Self::SendInput => send_inputs(&[key_input(key.vk(), true, key.is_extended())]),
+            Self::Usb(c) => c.key_up(key.hid_usage()),
+        }
+    }
+
+    fn set_modifiers(&mut self, modifiers: &[Modifier]) -> Result<(), String> {
+        match self {
+            Self::SendInput => {
+                let mut down = Vec::new();
+                for m in modifiers {
+                    down.push(key_input(m.vk(), false, false));
+                }
+                send_inputs(&down)
+            }
+            Self::Usb(c) => c.set_modifier_mask(modifiers_mask(modifiers)),
+        }
+    }
+
+    fn clear_modifiers(&mut self) -> Result<(), String> {
+        match self {
+            Self::SendInput => Ok(()),
+            Self::Usb(c) => c.set_modifier_mask(0),
+        }
+    }
+
+    fn clear_all_keys(&mut self) -> Result<(), String> {
+        match self {
+            Self::SendInput => Ok(()),
+            Self::Usb(c) => c.clear_keys(),
+        }
+    }
+
+    fn keepalive(&mut self) -> Result<(), String> {
+        match self {
+            Self::SendInput => Ok(()),
+            Self::Usb(c) => c.keepalive(),
+        }
+    }
+}
+
+fn tap_on(sink: &mut Sink, modifiers: &[Modifier], keys: &[Key]) -> Result<(), String> {
+    if keys.is_empty() {
+        return Ok(());
+    }
+    match sink {
+        Sink::SendInput => {
+            let mut down = Vec::new();
+            for m in modifiers {
+                down.push(key_input(m.vk(), false, false));
+            }
+            for k in keys {
+                down.push(key_input(k.vk(), false, k.is_extended()));
+            }
+            send_inputs(&down)?;
+            thread::sleep(Duration::from_millis(30));
+            let mut up = Vec::new();
+            for k in keys.iter().rev() {
+                up.push(key_input(k.vk(), true, k.is_extended()));
+            }
+            for m in modifiers.iter().rev() {
+                up.push(key_input(m.vk(), true, false));
+            }
+            send_inputs(&up)
+        }
+        Sink::Usb(_) => {
+            sink.set_modifiers(modifiers)?;
+            for k in keys {
+                sink.key_down(*k)?;
+            }
+            thread::sleep(Duration::from_millis(30));
+            for k in keys.iter().rev() {
+                sink.key_up(*k)?;
+            }
+            sink.clear_modifiers()
+        }
+    }
+}
+
+/// UI 测试用：临时打开后端，发一次点按后关闭（USB 口立即释放）。
+pub fn tap(cfg: &KeyboardConfig, modifiers: &[Modifier], key: Key) -> Result<(), String> {
+    let mut sink = Sink::open(cfg)?;
+    tap_on(&mut sink, modifiers, &[key])
+}
+
+pub fn tap_keys(cfg: &KeyboardConfig, modifiers: &[Modifier], keys: &[Key]) -> Result<(), String> {
+    let mut sink = Sink::open(cfg)?;
+    tap_on(&mut sink, modifiers, keys)
 }
 
 /// 与 `mini_game::poll_input` 对齐的键位映射。
@@ -191,46 +349,120 @@ const NAV_KEYS: &[(Key, fn(&InputFrame) -> bool)] = &[
 ];
 
 /// 差分同步：只发送相对上一帧变化的 keydown/keyup。
-#[derive(Debug, Default)]
 pub struct HeldKeys {
+    sink: Sink,
     down: [bool; NAV_KEYS.len()],
+    last_keepalive: Instant,
 }
 
 impl HeldKeys {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn open(cfg: &KeyboardConfig) -> Result<Self, String> {
+        let sink = Sink::open(cfg)?;
+        Ok(Self {
+            sink,
+            down: [false; NAV_KEYS.len()],
+            last_keepalive: Instant::now(),
+        })
+    }
+
+    pub fn describe(&self) -> String {
+        match self.sink.port_label() {
+            Some(p) => format!("{} @ {p}", self.sink.backend_name()),
+            None => self.sink.backend_name().to_string(),
+        }
     }
 
     pub fn sync_frame(&mut self, frame: &InputFrame) -> Result<(), String> {
-        let mut edges = Vec::new();
         for (i, (key, getter)) in NAV_KEYS.iter().enumerate() {
             let want = getter(frame);
-            if want != self.down[i] {
-                edges.push(key_input(key.vk(), !want, key.is_extended()));
-                self.down[i] = want;
+            if want == self.down[i] {
+                continue;
             }
+            if want {
+                self.sink.key_down(*key)?;
+            } else {
+                self.sink.key_up(*key)?;
+            }
+            self.down[i] = want;
         }
-        send(&edges)
+        // 按住期间定期 ping，喂固件 HOLD_WATCHDOG（边沿同步本身不会持续发包）
+        if self.down.iter().any(|&d| d)
+            && self.last_keepalive.elapsed() >= Duration::from_millis(800)
+        {
+            let _ = self.sink.keepalive();
+            self.last_keepalive = Instant::now();
+        }
+        Ok(())
     }
 
     pub fn release_all(&mut self) -> Result<(), String> {
-        let mut ups = Vec::new();
-        for (i, (key, _)) in NAV_KEYS.iter().enumerate() {
-            if self.down[i] {
-                ups.push(key_input(key.vk(), true, key.is_extended()));
-                self.down[i] = false;
+        match &mut self.sink {
+            Sink::Usb(c) => {
+                c.clear_keys()?;
+                self.down = [false; NAV_KEYS.len()];
+                Ok(())
+            }
+            Sink::SendInput => {
+                let mut ups = Vec::new();
+                for (i, (key, _)) in NAV_KEYS.iter().enumerate() {
+                    if self.down[i] {
+                        ups.push(key_input(key.vk(), true, key.is_extended()));
+                        self.down[i] = false;
+                    }
+                }
+                send_inputs(&ups)
             }
         }
-        send(&ups)
     }
 }
 
-#[allow(dead_code)]
-pub fn press(key: Key) -> Result<(), String> {
-    send_key_edge(key, true)
+impl Drop for HeldKeys {
+    fn drop(&mut self) {
+        let _ = self.release_all();
+    }
 }
 
-#[allow(dead_code)]
-pub fn release(key: Key) -> Result<(), String> {
-    send_key_edge(key, false)
+/// 保持 USB 连接的会话（UI 连续测试，避免每次重开串口）。
+pub struct KeyboardSession {
+    sink: Sink,
+}
+
+impl KeyboardSession {
+    pub fn open(cfg: &KeyboardConfig) -> Result<Self, String> {
+        Ok(Self {
+            sink: Sink::open(cfg)?,
+        })
+    }
+
+    pub fn describe(&self) -> String {
+        match self.sink.port_label() {
+            Some(p) => format!("{} @ {p}", self.sink.backend_name()),
+            None => self.sink.backend_name().to_string(),
+        }
+    }
+
+    pub fn tap(&mut self, modifiers: &[Modifier], key: Key) -> Result<(), String> {
+        tap_on(&mut self.sink, modifiers, &[key])
+    }
+
+    pub fn tap_keys(&mut self, modifiers: &[Modifier], keys: &[Key]) -> Result<(), String> {
+        tap_on(&mut self.sink, modifiers, keys)
+    }
+
+    pub fn ping(&mut self) -> Result<(), String> {
+        match &mut self.sink {
+            Sink::Usb(c) => c.ping(),
+            Sink::SendInput => Ok(()),
+        }
+    }
+
+    pub fn clear_all(&mut self) -> Result<(), String> {
+        self.sink.clear_all_keys()
+    }
+}
+
+impl Drop for KeyboardSession {
+    fn drop(&mut self) {
+        let _ = self.clear_all();
+    }
 }

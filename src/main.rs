@@ -1,4 +1,6 @@
 #[cfg(windows)]
+mod firmware_flash;
+#[cfg(windows)]
 mod keyboard_input;
 #[cfg(windows)]
 mod live_nav;
@@ -6,6 +8,8 @@ mod live_nav;
 mod live_nav_diag;
 #[cfg(windows)]
 mod no_activate;
+#[cfg(windows)]
+mod usb_hid;
 #[cfg(windows)]
 mod win_capture;
 
@@ -90,6 +94,14 @@ struct App {
     nav_stop: Option<Arc<AtomicBool>>,
     #[cfg(windows)]
     nav_status: String,
+    #[cfg(windows)]
+    kb_backend: keyboard_input::KeyboardBackend,
+    #[cfg(windows)]
+    usb_port: String,
+    #[cfg(windows)]
+    kb_session: Option<keyboard_input::KeyboardSession>,
+    #[cfg(windows)]
+    kb_status: String,
 }
 
 impl App {
@@ -100,7 +112,8 @@ impl App {
             map_name: "彩虹岛-南港西郊平原".into(),
             log: "就绪。地图名可填中文或数字 ID。\n\
 · 提取小地图与完整图：从网络下载资源\n\
-· 寻路：请先另开终端运行 cargo run --bin mini_game，再点「开始寻路」\n"
+· 寻路：请先另开终端运行 cargo run --bin mini_game，再点「开始寻路」\n\
+· 键盘默认走 RP2040 USB 虚拟键盘（可在下方切换为 SendInput）\n"
                 .into(),
             busy: false,
             tx: Some(tx),
@@ -111,6 +124,14 @@ impl App {
             nav_stop: None,
             #[cfg(windows)]
             nav_status: "寻路未运行".into(),
+            #[cfg(windows)]
+            kb_backend: keyboard_input::KeyboardBackend::UsbHid,
+            #[cfg(windows)]
+            usb_port: String::new(),
+            #[cfg(windows)]
+            kb_session: None,
+            #[cfg(windows)]
+            kb_status: "未连接".into(),
         }
     }
 
@@ -181,8 +202,55 @@ impl App {
                         let line = format!("[寻路] {reason}");
                         eprintln!("{line}");
                         self.append_log(line);
+                        // 寻路释放串口后，若仍选 USB 可重新连接供测试
+                        if self.kb_backend == keyboard_input::KeyboardBackend::UsbHid {
+                            self.ensure_kb_session();
+                        }
                     }
                 },
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    fn kb_config(&self) -> keyboard_input::KeyboardConfig {
+        keyboard_input::KeyboardConfig {
+            backend: self.kb_backend,
+            usb_port: self.usb_port.clone(),
+        }
+    }
+
+    #[cfg(windows)]
+    fn drop_kb_session(&mut self) {
+        if let Some(mut s) = self.kb_session.take() {
+            let _ = s.clear_all();
+        }
+        if self.kb_backend == keyboard_input::KeyboardBackend::UsbHid {
+            self.kb_status = "未连接（串口已释放）".into();
+        }
+    }
+
+    #[cfg(windows)]
+    fn ensure_kb_session(&mut self) {
+        if self.nav_running {
+            self.kb_status = "寻路占用中".into();
+            return;
+        }
+        if self.kb_backend == keyboard_input::KeyboardBackend::SendInput {
+            self.kb_session = None;
+            self.kb_status = "SendInput（无需连接）".into();
+            return;
+        }
+        match keyboard_input::KeyboardSession::open(&self.kb_config()) {
+            Ok(s) => {
+                self.kb_status = format!("已连接 {}", s.describe());
+                self.append_log(format!("键盘：{}", self.kb_status));
+                self.kb_session = Some(s);
+            }
+            Err(e) => {
+                self.kb_session = None;
+                self.kb_status = format!("连接失败：{e}");
+                self.append_log(format!("键盘连接失败：{e}"));
             }
         }
     }
@@ -193,15 +261,21 @@ impl App {
             self.append_log("寻路已在运行");
             return;
         }
-        let Some(tx0) = &self.tx else {
+        let Some(tx0) = self.tx.clone() else {
             return;
         };
-        let tx = tx0.clone();
+        // USB 串口同一时间只能被一方占用
+        self.drop_kb_session();
+        let kb = self.kb_config();
+        let tx = tx0;
         let stop = Arc::new(AtomicBool::new(false));
         self.nav_stop = Some(stop.clone());
         self.nav_running = true;
         self.nav_status = "启动中…".into();
-        self.append_log("[寻路] 启动后台线程…");
+        self.append_log(format!(
+            "[寻路] 启动后台线程…（键盘：{}）",
+            kb.backend.label()
+        ));
         thread::Builder::new()
             .name("live-nav".into())
             .spawn(move || {
@@ -216,7 +290,7 @@ impl App {
                         }
                     }
                 });
-                live_nav::run_live_nav(stop, nav_tx);
+                live_nav::run_live_nav(stop, nav_tx, kb);
                 let _ = bridge_thread.join();
             })
             .expect("spawn live-nav");
@@ -235,8 +309,24 @@ impl App {
 
     #[cfg(windows)]
     fn send_key(&mut self, modifiers: &[keyboard_input::Modifier], key: keyboard_input::Key) {
-        match keyboard_input::tap(modifiers, key) {
-            Ok(()) => self.append_log(format!("已发送按键：{}", key.label())),
+        if self.nav_running {
+            self.append_log("寻路运行中，请先结束寻路再测键");
+            return;
+        }
+        if self.kb_backend == keyboard_input::KeyboardBackend::UsbHid && self.kb_session.is_none() {
+            self.ensure_kb_session();
+        }
+        let result = if let Some(session) = self.kb_session.as_mut() {
+            session.tap(modifiers, key)
+        } else {
+            keyboard_input::tap(&self.kb_config(), modifiers, key)
+        };
+        match result {
+            Ok(()) => self.append_log(format!(
+                "已发送按键：{}（{}）",
+                key.label(),
+                self.kb_backend.label()
+            )),
             Err(e) => self.append_log(format!("发送按键失败：{e}")),
         }
     }
@@ -248,8 +338,23 @@ impl App {
         modifiers: &[keyboard_input::Modifier],
         keys: &[keyboard_input::Key],
     ) {
-        match keyboard_input::tap_keys(modifiers, keys) {
-            Ok(()) => self.append_log(format!("已发送组合键：{label}")),
+        if self.nav_running {
+            self.append_log("寻路运行中，请先结束寻路再测键");
+            return;
+        }
+        if self.kb_backend == keyboard_input::KeyboardBackend::UsbHid && self.kb_session.is_none() {
+            self.ensure_kb_session();
+        }
+        let result = if let Some(session) = self.kb_session.as_mut() {
+            session.tap_keys(modifiers, keys)
+        } else {
+            keyboard_input::tap_keys(&self.kb_config(), modifiers, keys)
+        };
+        match result {
+            Ok(()) => self.append_log(format!(
+                "已发送组合键：{label}（{}）",
+                self.kb_backend.label()
+            )),
             Err(e) => self.append_log(format!("发送组合键失败：{e}")),
         }
     }
@@ -318,7 +423,7 @@ impl eframe::App for App {
                 ui.separator();
                 ui.heading("NavBot 实时寻路");
                 ui.label(
-                    "附着独立进程 mini_game 窗口：实时截图 → YOLO+SelfTracker → NavBot → SendInput。",
+                    "附着独立进程 mini_game 窗口：实时截图 → YOLO+SelfTracker → NavBot → 键盘注入。",
                 );
                 ui.label(format!("状态：{}", self.nav_status));
                 ui.horizontal(|ui| {
@@ -342,8 +447,100 @@ impl eframe::App for App {
             #[cfg(windows)]
             {
                 ui.separator();
+                ui.heading("键盘注入方式");
+                ui.horizontal(|ui| {
+                    let mut changed = false;
+                    changed |= ui
+                        .radio_value(
+                            &mut self.kb_backend,
+                            keyboard_input::KeyboardBackend::UsbHid,
+                            keyboard_input::KeyboardBackend::UsbHid.label(),
+                        )
+                        .changed();
+                    changed |= ui
+                        .radio_value(
+                            &mut self.kb_backend,
+                            keyboard_input::KeyboardBackend::SendInput,
+                            keyboard_input::KeyboardBackend::SendInput.label(),
+                        )
+                        .changed();
+                    if changed {
+                        self.kb_session = None;
+                        if self.kb_backend == keyboard_input::KeyboardBackend::UsbHid {
+                            self.ensure_kb_session();
+                        } else {
+                            self.kb_status = "SendInput（无需连接）".into();
+                        }
+                    }
+                });
+
+                if self.kb_backend == keyboard_input::KeyboardBackend::UsbHid {
+                    ui.horizontal(|ui| {
+                        ui.label("串口");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.usb_port)
+                                .desired_width(120.0)
+                                .hint_text("空=自动 VID/PID"),
+                        );
+                        if ui.button("刷新口").clicked() {
+                            let ports = usb_hid::list_ports_for_ui();
+                            if ports.is_empty() {
+                                self.append_log("未枚举到串口");
+                            } else {
+                                let line = ports
+                                    .iter()
+                                    .map(|(n, hit)| {
+                                        if *hit {
+                                            format!("{n}*")
+                                        } else {
+                                            n.clone()
+                                        }
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join(", ");
+                                self.append_log(format!("串口列表（* = RP2040）：{line}"));
+                                if self.usb_port.is_empty() {
+                                    if let Some((name, _)) = ports.iter().find(|(_, hit)| *hit) {
+                                        self.usb_port = name.clone();
+                                    }
+                                }
+                            }
+                        }
+                        if ui
+                            .add_enabled(!self.nav_running, egui::Button::new("连接/重连"))
+                            .clicked()
+                        {
+                            self.kb_session = None;
+                            self.ensure_kb_session();
+                        }
+                        if ui
+                            .add_enabled(
+                                !self.nav_running && self.kb_session.is_some(),
+                                egui::Button::new("Ping"),
+                            )
+                            .clicked()
+                        {
+                            if let Some(s) = self.kb_session.as_mut() {
+                                match s.ping() {
+                                    Ok(()) => self.append_log("USB Ping OK (pong)"),
+                                    Err(e) => self.append_log(format!("USB Ping 失败：{e}")),
+                                }
+                            }
+                        }
+                    });
+                    ui.label(format!("USB 状态：{}", self.kb_status));
+                }
+
+                ui.separator();
                 ui.heading("键盘输入测试");
-                ui.label("SendInput 注入到当前前台窗口。");
+                ui.label(match self.kb_backend {
+                    keyboard_input::KeyboardBackend::UsbHid => {
+                        "通过 RP2040 USB HID 注入到当前前台窗口（请先连接设备，并把焦点放在小游戏上）。"
+                    }
+                    keyboard_input::KeyboardBackend::SendInput => {
+                        "SendInput 注入到当前前台窗口。"
+                    }
+                });
                 ui.horizontal_wrapped(|ui| {
                     use keyboard_input::Key;
                     for key in [
@@ -381,6 +578,92 @@ impl eframe::App for App {
                     if ui.button("W+A 同按").clicked() {
                         self.send_combo("W+A", &[], &[Key::W, Key::A]);
                     }
+                    if ui.button("J 攻击").clicked() {
+                        self.send_key(&[], Key::J);
+                    }
+                    if ui.button("Z 拾取").clicked() {
+                        self.send_key(&[], Key::Z);
+                    }
+                });
+            }
+
+            #[cfg(windows)]
+            {
+                ui.separator();
+                ui.heading("RP2040 固件（USB 虚拟键盘）");
+                ui.label(format!(
+                    "已嵌入 UF2：{}（约 {:.1} KB）。烧写前请按住 BOOTSEL 插入 Pico，直到出现 RPI-RP2 盘。",
+                    firmware_flash::EMBEDDED_UF2_NAME,
+                    firmware_flash::embedded_size_kb()
+                ));
+                let bootsel = firmware_flash::find_bootsel_drives();
+                if bootsel.is_empty() {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(180, 120, 40),
+                        "当前未检测到 RPI-RP2 烧录盘",
+                    );
+                } else {
+                    let list = bootsel
+                        .iter()
+                        .map(|p| p.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    ui.colored_label(
+                        egui::Color32::from_rgb(40, 140, 70),
+                        format!("已检测到烧录盘：{list}"),
+                    );
+                }
+                ui.horizontal_wrapped(|ui| {
+                    if ui
+                        .button("刷新检测")
+                        .on_hover_text("重新扫描 RPI-RP2 / INFO_UF2.TXT")
+                        .clicked()
+                    {
+                        let drives = firmware_flash::find_bootsel_drives();
+                        if drives.is_empty() {
+                            self.append_log("固件：未检测到 RPI-RP2（请 BOOTSEL 模式插入）");
+                        } else {
+                            self.append_log(format!(
+                                "固件：检测到 {}",
+                                drives
+                                    .iter()
+                                    .map(|p| p.display().to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ));
+                        }
+                    }
+                    if ui
+                        .button("自动烧写到 RPI-RP2")
+                        .on_hover_text("将嵌入的 UF2 拷到 BOOTSEL 盘；写入后设备会重启")
+                        .clicked()
+                    {
+                        self.drop_kb_session();
+                        match firmware_flash::flash_embedded_to_bootsel() {
+                            Ok(msg) => self.append_log(format!("固件：{msg}")),
+                            Err(e) => self.append_log(format!("固件烧写失败：{e}")),
+                        }
+                    }
+                    if ui
+                        .button("固件另存为…")
+                        .on_hover_text("导出 UF2 到本地，可手动拖进 RPI-RP2 盘")
+                        .clicked()
+                    {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .set_title("保存 RP2040 UF2 固件")
+                            .set_file_name(firmware_flash::EMBEDDED_UF2_NAME)
+                            .add_filter("UF2", &["uf2"])
+                            .save_file()
+                        {
+                            match firmware_flash::save_uf2_to(&path) {
+                                Ok(()) => self.append_log(format!(
+                                    "固件已另存为：{}\n可手动拷贝到 RPI-RP2 盘完成烧写。",
+                                    path.display()
+                                )),
+                                Err(e) => self.append_log(format!("固件另存为失败：{e}")),
+                            }
+                        }
+                    }
                 });
             }
 
@@ -405,6 +688,21 @@ impl eframe::App for App {
         if let Some(stop) = &self.nav_stop {
             stop.store(true, Ordering::SeqCst);
         }
+        // 先松开 USB/SendInput 按键，再关串口（固件侧仍有断开清键兜底）
+        self.drop_kb_session();
+    }
+}
+
+fn load_app_icon() -> egui::IconData {
+    let bytes = include_bytes!("../assets/app_icon.png");
+    let image = image::load_from_memory(bytes)
+        .expect("加载 app_icon.png")
+        .into_rgba8();
+    let (width, height) = image.dimensions();
+    egui::IconData {
+        rgba: image.into_raw(),
+        width,
+        height,
     }
 }
 
@@ -412,7 +710,8 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([820.0, 820.0])
-            .with_title("冒险岛经典版工具"),
+            .with_title("冒险岛经典版工具")
+            .with_icon(load_app_icon()),
         ..Default::default()
     };
     eframe::run_native(
