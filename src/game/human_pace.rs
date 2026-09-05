@@ -125,15 +125,16 @@ impl HumanPace {
         let resting = tick < self.idle_until;
         let reacting = tick < self.reaction_until;
 
-        // 休息/反应：只屏蔽左右走，砍怪与垂直机动始终放行。
-        if resting || reacting {
+        // 休息/反应：只屏蔽左右走；出刀帧保留朝向（真机转身靠方向键）。
+        if (resting || reacting) && !out.attack {
             out.left = false;
             out.right = false;
         }
 
         if out.left || out.right {
             self.move_tick = self.move_tick.wrapping_add(1);
-            if self.move_tick % MOVE_CYCLE >= MOVE_ON {
+            // 出刀朝向脉冲不被走位占空比掐掉。
+            if self.move_tick % MOVE_CYCLE >= MOVE_ON && !out.attack {
                 out.left = false;
                 out.right = false;
             }
@@ -225,20 +226,28 @@ impl HumanPace {
 
     /// 输出端硬闸：限制左右/上下/跳组合的切换频率（约 ≤4Hz）。
     /// 攻击/吃药走各自 refractory，不被此闸推迟；同组合连续按住不受影响。
+    /// 出刀且带朝向时：朝向优先于上一拍走位锁（真机必须先转身再砍）。
     pub fn finalize_output(&mut self, mut out: InputFrame, tick: u32) -> InputFrame {
         let want_sig = control_sig(out);
         let prev_sig = control_sig(self.last_emit);
         if want_sig != prev_sig {
             let dt = tick.saturating_sub(self.last_control_change_tick);
             if dt < MIN_CONTROL_CHANGE_TICKS && tick > 0 {
-                // 锁住上一拍的移动/跳/垂直；攻击与吃药仍用本帧结果。
                 let attack = out.attack;
                 let potion = out.use_potion;
                 let pick = out.pick_up;
+                let face_l = out.left;
+                let face_r = out.right;
                 out = self.last_emit;
                 out.attack = attack;
                 out.use_potion = potion;
                 out.pick_up = pick;
+                if attack && (face_l || face_r) {
+                    out.left = face_l;
+                    out.right = face_r;
+                    // 朝向已变：记为控制变更，避免连续出刀仍锁旧向。
+                    self.last_control_change_tick = tick;
+                }
             } else {
                 self.last_control_change_tick = tick;
             }
@@ -475,7 +484,7 @@ mod tests {
     }
 
     #[test]
-    fn finalize_allows_attack_during_locomotion_hold() {
+    fn finalize_allows_attack_face_override_during_locomotion_hold() {
         let mut pace = HumanPace::new(8);
         let walk = InputFrame {
             right: true,
@@ -489,6 +498,9 @@ mod tests {
         };
         let out = pace.finalize_output(swing, 2);
         assert!(out.attack, "attack must pass");
-        assert!(out.right && !out.left, "locomotion still held");
+        assert!(
+            out.left && !out.right,
+            "出刀朝向优先于走位锁 out={out:?}"
+        );
     }
 }

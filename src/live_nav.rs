@@ -215,8 +215,11 @@ impl LiveNavDriver {
                 .pace
                 .apply_locomotion_hold(paced, tick, climbing, intent);
         } else if climbing {
-            paced.left = false;
-            paced.right = false;
+            // 真挂绳：禁跳；出刀帧保留朝向键。
+            if !paced.attack {
+                paced.left = false;
+                paced.right = false;
+            }
             paced.jump = false;
         }
         paced = self.pace.finalize_output(paced, tick);

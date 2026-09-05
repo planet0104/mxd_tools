@@ -1334,9 +1334,9 @@ impl NavBot {
         let climb_escape = self.is_bottom_right_climb_approach(goal, nav_node, nav_x);
 
         if goal.is_transit() || climb_escape {
-            // 换层 / 最右底层去爬绳：只补 attack，保留导航左右。
+            // 换层 / 最右底层去爬绳：补 attack+朝怪；非出刀帧保留导航左右。
             self.nav_intent = InterruptArbiter::refresh_melee_hold(obs, facing, nav, goal);
-            if climb_escape {
+            if climb_escape && !self.nav_intent.attack {
                 let mut out = self.nav_intent;
                 out.left = nav.left || out.left;
                 out.right = false;
@@ -1348,9 +1348,9 @@ impl NavBot {
             return self.nav_intent;
         }
 
-        // 可砍带：站砍，清移动（避免顶进怪）。
+        // 可砍带：站砍并朝怪（方向由 refresh_melee_hold 填）。
         let melee = InterruptArbiter::refresh_melee_hold(obs, facing, nav, goal);
-        if melee.attack && !melee.left && !melee.right {
+        if melee.attack && !self.combat.is_active() {
             self.nav_intent = melee;
             return self.nav_intent;
         }
@@ -1361,24 +1361,18 @@ impl NavBot {
                 // Approach，或 Strike 出刀瞬间带朝向。
                 let mut out = combat;
                 out.jump = false;
-                if combat.attack {
-                    // 站砍转身：保留左右+攻击，不交给导航顶进怪。
-                    self.nav_intent = out;
-                    return self.nav_intent;
-                }
                 self.nav_intent = out;
                 return self.nav_intent;
             }
-            // Strike CD / Hold：清左右站桩。
+            // Strike CD / Hold：无方向时用 melee 的朝怪脉冲补刀。
             let mut out = combat;
             out.left = false;
             out.right = false;
             out.jump = false;
-            if !out.attack {
-                // CD 间隙：若可砍带仍见怪，补 attack；否则保持站桩。
-                if melee.attack {
-                    out.attack = true;
-                }
+            if !out.attack && melee.attack {
+                out.attack = true;
+                out.left = melee.left;
+                out.right = melee.right;
             }
             self.nav_intent = out;
             return self.nav_intent;

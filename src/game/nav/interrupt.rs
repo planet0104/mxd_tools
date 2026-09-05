@@ -76,6 +76,11 @@ impl InterruptArbiter {
             let mut out = navigate;
             if combat.attack {
                 out.attack = true;
+                // 绳上补刀也要朝怪，否则只剩 UA 反方向空挥。
+                if combat.left || combat.right {
+                    out.left = combat.left;
+                    out.right = combat.right;
+                }
             }
             return out;
         }
@@ -118,16 +123,11 @@ impl InterruptArbiter {
         };
         let mut out = navigate;
         out.attack = true;
+        // 每次出刀都点朝怪方向（真机无 auto_face；sense.facing 不可靠）。
+        out.left = hit_face < 0.0;
+        out.right = hit_face > 0.0;
         if !goal.is_transit() {
             out.jump = false;
-            // 朝向与怪不一致时点方向转身；已对准则清左右站砍。
-            if (hit_face >= 0.0) != (facing >= 0.0) {
-                out.left = hit_face < 0.0;
-                out.right = hit_face > 0.0;
-            } else {
-                out.left = false;
-                out.right = false;
-            }
         }
         out
     }

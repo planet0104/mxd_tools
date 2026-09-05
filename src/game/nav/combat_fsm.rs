@@ -211,7 +211,7 @@ mod tests {
     }
 
     #[test]
-    fn strikes_close_enemy_without_walking() {
+    fn strikes_close_enemy_with_face_pulse() {
         let mut obs = [0.0_f32; OBS_DIM];
         floor_under(&mut obs);
         enemy(&mut obs, 0, -60.0, 0.0);
@@ -220,7 +220,7 @@ mod tests {
         assert!(fsm.is_active());
         let f = fsm.next_frame();
         assert!(f.attack);
-        assert!(!f.left && !f.right, "站砍不得推位移");
+        assert!(f.left && !f.right, "出刀应点朝左");
         assert!(fsm.facing < 0.0, "内部朝向应对准左侧怪");
     }
 
@@ -233,7 +233,7 @@ mod tests {
         fsm.observe(&obs);
         for _ in 0..SWING_PRESS_TICKS {
             let f = fsm.next_frame();
-            assert!(f.attack && !f.left && !f.right);
+            assert!(f.attack && f.right && !f.left);
         }
         for _ in SWING_PRESS_TICKS..SWING_PERIOD_TICKS {
             let f = fsm.next_frame();
@@ -285,7 +285,7 @@ mod tests {
         fsm.facing = 1.0;
         fsm.observe(&obs);
         let f = fsm.next_frame();
-        assert!(f.attack && !f.left && !f.right);
+        assert!(f.attack && f.left && !f.right);
         assert!(fsm.facing < 0.0);
     }
 
