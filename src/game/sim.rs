@@ -757,6 +757,10 @@ impl GameSim {
         if self.state.player.hp <= 0 {
             return;
         }
+        // 正在挥砍：不计时、不回血（持续砍杀时无法自然恢复）
+        if self.state.player.attack_t > 0.0 {
+            return;
+        }
         self.hp_regen_cd -= dt;
         if self.hp_regen_cd > 0.0 {
             return;
@@ -768,6 +772,12 @@ impl GameSim {
         if p.hp < p.max_hp {
             p.hp = (p.hp + HP_REGEN_AMOUNT).min(p.max_hp);
         }
+    }
+
+    fn reset_hp_regen_timer(&mut self) {
+        self.hp_regen_cd = self
+            .rng
+            .gen_range(HP_REGEN_INTERVAL_MIN..=HP_REGEN_INTERVAL_MAX);
     }
 
     fn use_potion(&mut self) {
@@ -822,11 +832,15 @@ impl GameSim {
                     }
                 }
             }
-            let p = &mut self.state.player;
-            p.attack_t = ATTACK_DURATION;
-            p.attack_cd = ATTACK_COOLDOWN;
-            p.anim = PlayerAnim::Attack;
-            p.anim_t = 0.0;
+            {
+                let p = &mut self.state.player;
+                p.attack_t = ATTACK_DURATION;
+                p.attack_cd = ATTACK_COOLDOWN;
+                p.anim = PlayerAnim::Attack;
+                p.anim_t = 0.0;
+            }
+            // 每次出手重置回血倒计时：停手后需再等 7~8 秒才回血
+            self.reset_hp_regen_timer();
         }
 
         if self.state.player.climbing {
