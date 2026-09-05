@@ -13,7 +13,7 @@ use mxd_tools::game::{
     VisionWorker, WINDOW_H, WINDOW_W, LOGIC_HZ, OBS_DIM, VISION_CONF_THRESH,
 };
 use mxd_tools::game::{load_default_map, GameMap};
-use mxd_tools::yolo::{best_hp_from_detections, YoloDevice};
+use mxd_tools::yolo::{best_hp_from_detections, list_hp_detections, YoloDevice};
 
 use crate::keyboard_input::{HeldKeys, KeyboardConfig};
 use crate::live_nav_diag::NavDiagLogger;
@@ -202,7 +202,9 @@ impl LiveNavDriver {
             .bot
             .refresh_melee_hold(&self.last_obs, self.sense.facing);
         let intent = self.input;
-        let climbing = self.sense.climbing;
+        let under = mxd_tools::game::observation::obs_floor_underfoot(&self.last_obs);
+        // 脚下有地板时不要当攀爬：否则禁跳/禁左右，永远挂不上梯。
+        let climbing = self.sense.climbing && !under;
         let mut paced = self.pace.apply(intent, tick);
         let climb_goal = matches!(
             self.bot.active_goal(),
@@ -545,20 +547,41 @@ fn run_live_nav_inner(
                 WINDOW_H as u32,
             );
             let obs = obs_from_step(&step);
-            if let Some((hp_ratio, hp_conf)) = best_hp_from_detections(&step.detections) {
-                driver.set_hp_ratio(hp_ratio);
-                if result.tick % 30 == 0 {
+            if let Some(hp) = best_hp_from_detections(&step.detections) {
+                driver.set_hp_ratio(hp.ratio);
+                // 每 15 视觉帧打一次血条明细（ASCII 友好，避免日志编码吃掉数字）
+                if result.tick % 15 == 0 {
+                    let mode = driver.survival_mode();
+                    let all = list_hp_detections(&step.detections);
+                    let alts: String = all
+                        .iter()
+                        .take(4)
+                        .map(|h| {
+                            format!(
+                                "{}#{}@{:.0}%c={:.2}",
+                                h.label,
+                                h.class_id,
+                                h.ratio * 100.0,
+                                h.conf
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",");
                     send(LiveNavEvent::Log(format!(
-                        "检测到血量 ≈{:.0}%（conf={hp_conf:.2}）[{:?}]{}",
-                        hp_ratio * 100.0,
-                        driver.survival_mode(),
-                        if hp_ratio <= 0.5 {
-                            " → 撤离回血"
-                        } else {
-                            " → 优先砍怪"
-                        }
+                        "hp_pct={:.0} cls={} id={} conf={:.2} mode={:?} flee={} alts=[{alts}]",
+                        hp.ratio * 100.0,
+                        hp.label,
+                        hp.class_id,
+                        hp.conf,
+                        mode,
+                        (hp.ratio <= 0.5) as u8,
                     )));
                 }
+            } else if result.tick % 30 == 0 {
+                send(LiveNavEvent::Log(format!(
+                    "hp_pct=MISS mode={:?} (no HP bar det)",
+                    driver.survival_mode()
+                )));
             }
             driver.apply_observation(result.tick, obs);
             for line in diag_log.on_vision(
@@ -568,6 +591,8 @@ fn run_live_nav_inner(
                 &driver.bot,
                 &driver.sense,
                 &driver.input,
+                driver.bot.hp_ratio,
+                driver.survival_mode(),
             ) {
                 send(LiveNavEvent::Log(line));
             }

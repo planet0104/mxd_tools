@@ -1,8 +1,8 @@
 //! 砍怪状态机：纯 YOLO 槽位驱动，代码主动激活，本台怪清完自动交还寻路。
 //!
 //! 逻辑取自 rule_bot::try_combat 的核心分支（接触必砍 / 进距站砍 / 中距接近 / 悬崖不追），
-//! 去掉了与 explore_mode、perch 耦合的部分。不读任何 sim 状态；朝向记在 FSM 内，
-//! 站砍不出方向键（预览/自动玩靠 attack_auto_face；避免 CD 期间顶进怪）。
+//! 去掉了与 explore_mode、perch 耦合的部分。不读任何 sim 状态；朝向记在 FSM 内。
+//! 站砍出刀瞬间带朝向（真机无 attack_auto_face）；CD 间隙不按左右，避免顶进怪。
 
 use super::super::input::InputFrame;
 use super::super::observation::{
@@ -145,9 +145,10 @@ impl CombatFsm {
         match self.step {
             Step::Strike(toward) => {
                 self.facing = toward;
-                // 只攻击不推位移：CD 未好时若带方向会真的走进怪。
+                // 出刀瞬间带朝向（真机转身）；CD 间隙不按左右，避免走进怪。
                 if self.swing_ticks % SWING_PERIOD_TICKS < SWING_PRESS_TICKS {
                     f.attack = true;
+                    set_dir(&mut f, toward);
                 }
                 self.swing_ticks += 1;
             }

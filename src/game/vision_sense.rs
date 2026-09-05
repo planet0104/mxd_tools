@@ -40,11 +40,11 @@ impl VisionSenseState {
         let near_climb = obs_vertical_nav_allowed(obs, false);
         let under = obs_floor_underfoot(obs);
         if self.climbing {
-            // 绳底仍有脚下地板 + 近绳信号：不能当落地，否则永远粘不上攀爬态。
-            let can_land = under && !near_climb;
-            if can_land {
+            // 脚下有地板即累计落地：近绳时也要释放。
+            // 旧逻辑 under&&near_climb 永不落地 → climb_orphan 只按 U，HumanPace 禁跳，真机挂不上梯。
+            if under {
                 self.climb_ground_release = self.climb_ground_release.saturating_add(1);
-                if self.climb_ground_release >= 2 {
+                if self.climb_ground_release >= 3 {
                     self.climbing = false;
                     self.climb_ground_release = 0;
                 }

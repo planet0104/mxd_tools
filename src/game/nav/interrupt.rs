@@ -105,24 +105,49 @@ impl InterruptArbiter {
     }
 
     /// 可砍带站砍；换层时只补 attack，保留移动/跳跃。
+    /// `facing`：当前朝向；若怪在背后会改按朝怪方向并出刀。
     pub fn refresh_melee_hold(
         obs: &[f32],
         facing: f32,
         navigate: InputFrame,
         goal: SubGoal,
     ) -> InputFrame {
-        if !obs_enemy_in_attack_range_platform(obs, facing) {
+        let face_to_hit = melee_face_toward_enemy(obs, facing);
+        let Some(hit_face) = face_to_hit else {
             return navigate;
-        }
+        };
         let mut out = navigate;
         out.attack = true;
         if !goal.is_transit() {
-            out.left = false;
-            out.right = false;
             out.jump = false;
+            // 朝向与怪不一致时点方向转身；已对准则清左右站砍。
+            if (hit_face >= 0.0) != (facing >= 0.0) {
+                out.left = hit_face < 0.0;
+                out.right = hit_face > 0.0;
+            } else {
+                out.left = false;
+                out.right = false;
+            }
         }
         out
     }
+}
+
+/// 本台可砍距离内朝怪的方向；当前朝向能砍则沿用，否则翻面再试。
+fn melee_face_toward_enemy(obs: &[f32], facing: f32) -> Option<f32> {
+    if obs_enemy_in_attack_range_platform(obs, facing) {
+        return Some(if facing >= 0.0 { 1.0 } else { -1.0 });
+    }
+    let other = -facing.signum();
+    let other = if other.abs() < f32::EPSILON {
+        1.0
+    } else {
+        other
+    };
+    if obs_enemy_in_attack_range_platform(obs, other) {
+        return Some(other);
+    }
+    None
 }
 
 pub struct CombatAdapter {

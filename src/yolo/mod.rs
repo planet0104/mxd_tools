@@ -61,18 +61,56 @@ pub struct LetterboxMeta {
     pub orig_h: u32,
 }
 
-/// 在检测列表中取置信度最高的血条框，返回 (比例, conf)。
-pub fn best_hp_from_detections(dets: &[Detection]) -> Option<(f32, f32)> {
-    let mut best: Option<(f32, f32)> = None;
+/// 血条检测结果（含类别，便于对照 YOLO 是否认错档）。
+#[derive(Debug, Clone)]
+pub struct HpBarHit {
+    pub ratio: f32,
+    pub conf: f32,
+    pub class_id: usize,
+    pub label: String,
+}
+
+/// 在检测列表中取置信度最高的血条框。
+pub fn best_hp_from_detections(dets: &[Detection]) -> Option<HpBarHit> {
+    let mut best: Option<HpBarHit> = None;
     for d in dets {
         let Some(ratio) =
             hp_ratio_from_class_id(d.class_id).or_else(|| hp_ratio_from_label(d.label))
         else {
             continue;
         };
-        if best.map(|(_, c)| d.conf > c).unwrap_or(true) {
-            best = Some((ratio, d.conf));
+        if best.as_ref().map(|b| d.conf > b.conf).unwrap_or(true) {
+            best = Some(HpBarHit {
+                ratio,
+                conf: d.conf,
+                class_id: d.class_id,
+                label: d.label.to_string(),
+            });
         }
     }
     best
+}
+
+/// 列出全部血条检测（按 conf 降序），用于调试日志。
+pub fn list_hp_detections(dets: &[Detection]) -> Vec<HpBarHit> {
+    let mut out = Vec::new();
+    for d in dets {
+        let Some(ratio) =
+            hp_ratio_from_class_id(d.class_id).or_else(|| hp_ratio_from_label(d.label))
+        else {
+            continue;
+        };
+        out.push(HpBarHit {
+            ratio,
+            conf: d.conf,
+            class_id: d.class_id,
+            label: d.label.to_string(),
+        });
+    }
+    out.sort_by(|a, b| {
+        b.conf
+            .partial_cmp(&a.conf)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    out
 }

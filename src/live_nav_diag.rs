@@ -1,6 +1,6 @@
 //! Live Nav 诊断日志：区分 YOLO 偏差 vs 导航/执行问题（跳台、边缘空砍、有梯不爬）。
 
-use mxd_tools::game::nav::{NavBot, SubGoal};
+use mxd_tools::game::nav::{NavBot, SubGoal, SurvivalMode};
 use mxd_tools::game::observation::{obs_climb_hint, obs_platform_edge};
 use mxd_tools::game::{
     obs_enemy_in_attack_range, obs_floor_ahead, obs_floor_ahead_connected, obs_floor_underfoot,
@@ -55,6 +55,8 @@ impl NavDiagLogger {
         bot: &NavBot,
         sense: &VisionSenseState,
         intent: &InputFrame,
+        hp_ratio: f32,
+        survival: SurvivalMode,
     ) -> Vec<String> {
         let goal = bot.active_goal();
         let goal_s = goal.label();
@@ -88,6 +90,10 @@ impl NavDiagLogger {
         let goal_changed = goal_s != self.last_goal;
         let jump_now = intent.jump;
         let has_climb_exit = exits.contains("climb_");
+        let survive_hot = matches!(
+            survival,
+            SurvivalMode::FleeClimb | SurvivalMode::HealWait
+        );
         let interesting = reason_changed
             || goal_changed
             || is_step
@@ -97,6 +103,7 @@ impl NavDiagLogger {
             || edge_r
             || step.self_player.is_none()
             || diag.visual_conf < 3
+            || survive_hot
             || (has_climb_exit
                 && !matches!(goal, SubGoal::ClimbUp { .. } | SubGoal::ClimbDown { .. }));
 
@@ -147,14 +154,22 @@ impl NavDiagLogger {
             None => "-".into(),
         };
 
+        let face_mismatch = nearest_e.map(|(edx, _)| {
+            let enemy_r = edx > 8.0;
+            let enemy_l = edx < -8.0;
+            (enemy_r && face < 0.0) || (enemy_l && face > 0.0)
+        });
+        let atk_wrong = intent.attack && face_mismatch == Some(true);
+
         self.emit(
             &mut out,
             format!(
                 "[诊断] t={vtick} reason={reason} goal={goal_s} exec={} | \
 loc=node{} ({:.0},{:.0}) conf={} climb={} face={} | \
+hp_pct={:.0} mode={:?} | \
 yolo: {} | \
 obs: under={} floorL/R={}/{} connL/R={}/{} edgeL/R={}/{} step_dx={} jump_ok={} jump_tgt={} \
-enemy={} atk_rng={} climb_hint={climb_s} | \
+enemy={} atk_rng={} face_mis={} atk_wrong={} climb_hint={climb_s} | \
 keys={} | \
 step: stall={} jumped={} jdir={:.0} cd={} walkL/R={:?}/{:?} dropL/R={:?}/{:?} graph_ledge={} | \
 exits=[{exits}] | hyp={hyp}",
@@ -165,6 +180,8 @@ exits=[{exits}] | hyp={hyp}",
                 diag.visual_conf,
                 sense.climbing as u8,
                 if face > 0.0 { "R" } else { "L" },
+                hp_ratio * 100.0,
+                survival,
                 summarize_yolo(step),
                 under as u8,
                 floor_l as u8,
@@ -182,6 +199,8 @@ exits=[{exits}] | hyp={hyp}",
                     .map(|(dx, dy)| format!("({dx:.0},{dy:.0})"))
                     .unwrap_or_else(|| "-".into()),
                 atk_range as u8,
+                face_mismatch.map(|m| m as u8).unwrap_or(0),
+                atk_wrong as u8,
                 keys_tag(intent),
                 diag.step_stall,
                 diag.step_jumped as u8,
@@ -194,6 +213,34 @@ exits=[{exits}] | hyp={hyp}",
                 at_graph_ledge as u8,
             ),
         );
+
+        if atk_wrong {
+            self.emit(
+                &mut out,
+                format!(
+                    "[诊断] 反方向攻击: face={} enemy={} keys={} hp_pct={:.0} mode={:?}",
+                    if face > 0.0 { "R" } else { "L" },
+                    nearest_e
+                        .map(|(dx, dy)| format!("({dx:.0},{dy:.0})"))
+                        .unwrap_or_else(|| "-".into()),
+                    keys_tag(intent),
+                    hp_ratio * 100.0,
+                    survival,
+                ),
+            );
+        }
+
+        if survive_hot && matches!(goal, SubGoal::ClimbUp { .. }) && under && sense.climbing {
+            self.emit(
+                &mut out,
+                format!(
+                    "[诊断] 假攀爬卡死风险: mode={:?} under=1 climb_sticky=1 keys={} \
+(应跳+对准挂梯，不应只按U)",
+                    survival,
+                    keys_tag(intent),
+                ),
+            );
+        }
 
         if edge_whiff {
             self.emit(

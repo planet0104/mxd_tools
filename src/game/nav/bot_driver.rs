@@ -468,9 +468,9 @@ impl NavBot {
         sense: &VisionSenseState,
     ) -> InputFrame {
         let under = obs_floor_underfoot(obs);
-        // 绳底脚下常有地板；攀爬态以 vision 粘性为准，勿被 under 一票否决。
-        let climbing = sense.climbing;
-        let on_ground = under && !climbing;
+        // 脚下有地板时不以攀爬论：否则 on_ground 永假、执行器走 climb_orphan 只按上不跳。
+        let climbing = sense.climbing && !under;
+        let on_ground = under;
 
         let visual_conf = sense.visual_confidence();
         let low_confidence = visual_conf < self.config.vision_min_conf;
@@ -1358,11 +1358,18 @@ impl NavBot {
         if self.combat.is_active() {
             let combat = self.combat.intent_frame();
             if combat.left || combat.right {
-                // Approach：暂替导航追怪。
-                self.nav_intent = combat;
+                // Approach，或 Strike 出刀瞬间带朝向。
+                let mut out = combat;
+                out.jump = false;
+                if combat.attack {
+                    // 站砍转身：保留左右+攻击，不交给导航顶进怪。
+                    self.nav_intent = out;
+                    return self.nav_intent;
+                }
+                self.nav_intent = out;
                 return self.nav_intent;
             }
-            // Strike / 站桩（含出刀与 CD、YOLO 闪断续砍）：清左右，避免导航顶进怪。
+            // Strike CD / Hold：清左右站桩。
             let mut out = combat;
             out.left = false;
             out.right = false;
