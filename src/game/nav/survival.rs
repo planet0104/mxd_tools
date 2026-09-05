@@ -8,10 +8,10 @@ use super::super::observation::{
 use super::super::types::{WINDOW_H, WINDOW_W};
 use super::types::SubGoal;
 
-/// 血量 ≤ 此比例 → 强制撤离找安全台回血。
-pub const HEAL_ENTER_RATIO: f32 = 0.50;
-/// 回血超过此比例才恢复砍怪（避免 51% 就下场又被刷怪压残）。
-pub const HEAL_EXIT_RATIO: f32 = 0.85;
+/// 血量 ≤ 此比例 → 强制撤离找安全台回血（提早跑，避免磨到 50% 才逃）。
+pub const HEAL_ENTER_RATIO: f32 = 0.70;
+/// 回血超过此比例才恢复砍怪（避免刚回一点就下场又被刷怪压残）。
+pub const HEAL_EXIT_RATIO: f32 = 0.90;
 /// 相对撤离起点升高超过该像素，视为已到安全高度。
 const SAFE_CLIMB_DY: f32 = 50.0;
 /// 或绝对高度高于该 y（地图 y 越小越高）也视为中高台。
@@ -105,8 +105,13 @@ impl SurvivalFsm {
         climbed || nav_y < SAFE_ABS_Y
     }
 
-    pub fn suppress_chase(&self) -> bool {
+    /// 撤离/回血期间禁止追怪（含贴身补刀）。
+    pub fn suppress_combat(&self) -> bool {
         matches!(self.mode, SurvivalMode::FleeClimb | SurvivalMode::HealWait)
+    }
+
+    pub fn suppress_chase(&self) -> bool {
+        self.suppress_combat()
     }
 
     /// 必须主动换台/上楼（不可 Idle）。

@@ -591,8 +591,9 @@ impl NavBot {
         }
 
         self.pickup.tick_memory(obs);
-        if self.survival.suppress_chase() {
-            self.combat.observe_strike_only(obs);
+        if self.survival.suppress_combat() {
+            // 撤离时绝不砍怪：补刀会站桩挨打，且方向键冲突导致上不了台。
+            self.combat.reset();
         } else {
             self.combat.observe(obs);
         }
@@ -621,6 +622,29 @@ impl NavBot {
         };
         // 保命覆盖在 plan 之后：低血必须换台，禁止被 Idle/假 step_up 吃掉。
         if self.survival.force_seek_safe_platform() {
+            let ticks = self.navigator.explore.subgoal_ticks;
+            let step_stuck = matches!(goal, SubGoal::StepUp { .. })
+                && (matches!(
+                    self.last_reason,
+                    "step_up_unreachable"
+                        | "step_up_stalled"
+                        | "step_up_fell"
+                        | "step_up_wait"
+                ) || (self.last_reason == "step_up_approach" && ticks > 20)
+                    || ticks > 40);
+            if step_stuck {
+                // 卡在「右侧略高台」来回接近：封边并改爬绳/别的路。
+                if let Some(key) = self.navigator.explore.pending_edge.take() {
+                    self.navigator
+                        .explore
+                        .blocked_edges
+                        .insert(key, 240);
+                }
+                self.navigator.explore.active_subgoal = SubGoal::Idle;
+                self.navigator.explore.subgoal_ticks = 0;
+                self.executor.reset();
+                goal = SubGoal::Idle;
+            }
             let keep_escape = matches!(
                 goal,
                 SubGoal::ClimbUp { .. }
@@ -629,9 +653,11 @@ impl NavBot {
                     | SubGoal::GoTo { .. }
                     | SubGoal::WalkOff { .. }
             ) && self.navigator.explore.pending_edge.is_some()
+                && !step_stuck
                 && self.last_reason != "step_up_done"
                 && self.last_reason != "idle"
-                && self.last_reason != "post_clear_patrol";
+                && self.last_reason != "post_clear_patrol"
+                && self.last_reason != "step_up_unreachable";
             if !keep_escape {
                 let esc = self.plan_heal_escape(nav_node, nav_x);
                 goal = esc;
@@ -722,10 +748,28 @@ impl NavBot {
             }
         }
 
-        let (nav_out, exec_result, reason) =
+        let (mut nav_out, exec_result, reason) =
             self.executor
                 .step(&self.config, &self.graph, &ctx, goal);
         self.last_reason = reason;
+        // 撤离时逼近高台/绳：接近阶段也起跳，避免只走路永远进不了起跳窗。
+        if self.survival.force_seek_safe_platform()
+            && matches!(
+                goal,
+                SubGoal::StepUp { .. } | SubGoal::ClimbUp { .. }
+            )
+            && matches!(
+                reason,
+                "step_up_approach"
+                    | "step_up_wait"
+                    | "climb_align"
+                    | "climb_up_nudge"
+                    | "climb_up_wait"
+                    | "climb_up"
+            )
+        {
+            nav_out.jump = true;
+        }
 
         let block_edge = !low_confidence;
 
@@ -1175,7 +1219,7 @@ impl NavBot {
             }
         }
 
-        let combat_active = if self.survival.prefer_idle_heal(obs, nav_y) {
+        let combat_active = if self.survival.suppress_combat() {
             false
         } else {
             self.combat.is_active()
@@ -1375,6 +1419,10 @@ impl NavBot {
     }
 
     pub fn refresh_melee_hold(&mut self, obs: &[f32; OBS_DIM], facing: f32) -> InputFrame {
+        // 撤离/回血：禁止叠攻击，专心跑路。
+        if self.survival.suppress_combat() {
+            return self.nav_intent;
+        }
         let goal = self.navigator.explore.active_subgoal;
         let nav = self.nav_intent;
         let nav_node = self.localizer.state.node_id;
