@@ -934,17 +934,14 @@ impl MotionExecutor {
             }
         }
 
-        // 已在落点台面：完成（要 y 贴近落点，避免节点误判；不必强求 dy_up，
-        // 否则短暂上台后 goal 重挂会把 origin 设成台面高度导致永远 Done 不了）。
+        // 已在落点节点台面：完成。必须 nav_node==目标（禁止仅靠 AABB 重叠在起点假完成）。
         if let Some(t) = ctx.pending_target {
             if let Some(dest) = graph.get(t) {
-                let on_dest_surface = px >= dest.x_min - 32.0
+                let on_dest_node = ctx.nav_node_id() == t
+                    && px >= dest.x_min - 32.0
                     && px <= dest.x_max + 32.0
                     && (py - dest.y).abs() <= 48.0;
-                let on_dest_node = ctx.nav_node_id() == t && on_dest_surface;
-                let climbed = dy_up > 4.0
-                    || (self.step_origin_y > 0.0 && dest.y + 20.0 < self.step_origin_y);
-                if ctx.grounded() && on_dest_surface && (climbed || on_dest_node) {
+                if ctx.grounded() && on_dest_node {
                     self.step_jumped = false;
                     self.step_jump_dir = 0.0;
                     self.step_stall = 0;

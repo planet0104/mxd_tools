@@ -523,23 +523,6 @@ impl NavBot {
         let nav_y = loc.world_y;
 
         self.survival.observe(obs, self.hp_ratio, nav_y);
-        if self.survival.force_climb_escape() {
-            if let Some(rx) = self.nearest_climb_up_rope(nav_node, nav_x) {
-                self.navigator.set_subgoal(SubGoal::ClimbUp { rope_x: rx });
-                self.last_reason = "survive_flee_climb";
-            } else if let Some(g) = self.navigator.plan_path_to_climb_pub(
-                &self.graph,
-                nav_node,
-                nav_x,
-                self.config.goto_tolerance_px,
-            ) {
-                self.navigator.set_subgoal(g);
-                self.last_reason = "survive_flee_path";
-            }
-        } else if self.survival.prefer_idle_heal(obs) {
-            self.navigator.set_subgoal(SubGoal::Idle);
-            self.last_reason = "survive_heal_wait";
-        }
 
         if nav_node != self.prev_node {
             self.navigator
@@ -636,8 +619,44 @@ impl NavBot {
         } else {
             planned
         };
-        // 台阶已起跳/已升高：强制保持 StepUp，禁止 plan 改成反向 goto/patrol。
-        if self.executor.step_up_committed(on_ground, nav_y) {
+        // 保命覆盖在 plan 之后：低血必须换台，禁止被 Idle/假 step_up 吃掉。
+        if self.survival.force_seek_safe_platform() {
+            let keep_escape = matches!(
+                goal,
+                SubGoal::ClimbUp { .. }
+                    | SubGoal::ClimbDown { .. }
+                    | SubGoal::StepUp { .. }
+                    | SubGoal::GoTo { .. }
+                    | SubGoal::WalkOff { .. }
+            ) && self.navigator.explore.pending_edge.is_some()
+                && self.last_reason != "step_up_done"
+                && self.last_reason != "idle"
+                && self.last_reason != "post_clear_patrol";
+            if !keep_escape {
+                let esc = self.plan_heal_escape(nav_node, nav_x);
+                goal = esc;
+                self.navigator.set_subgoal(esc);
+                self.last_reason = "survive_flee_safe";
+            }
+        } else if self.survival.prefer_idle_heal(obs, nav_y) {
+            goal = SubGoal::Idle;
+            self.navigator.set_subgoal(SubGoal::Idle);
+            self.last_reason = "survive_heal_wait";
+        } else if matches!(goal, SubGoal::Idle) {
+            // 杀完怪后禁止干站：强制巡逻。
+            let dir = if self.navigator.explore.patrol_dir.abs() > 0.1 {
+                self.navigator.explore.patrol_dir.signum()
+            } else {
+                1.0
+            };
+            goal = SubGoal::Patrol { dir };
+            self.navigator.set_subgoal(goal);
+            self.last_reason = "post_clear_patrol";
+        }
+        // 台阶已起跳/已升高：强制保持 StepUp（保命逃离中若未起跳则可改挂）。
+        if self.executor.step_up_committed(on_ground, nav_y)
+            && !(self.survival.force_seek_safe_platform() && on_ground && !climbing)
+        {
             if let SubGoal::StepUp { .. } = self.executor.active_goal() {
                 goal = self.executor.active_goal();
                 self.navigator.explore.active_subgoal = goal;
@@ -712,9 +731,18 @@ impl NavBot {
 
         match exec_result {
             ExecutorResult::Done => {
-                // Idle 每帧 Done，不能当成边完成。
+                // Idle 每帧 Done：安全回血才站桩，否则立刻重规划。
                 if matches!(goal, SubGoal::Idle) {
-                    // no-op
+                    if !self.survival.prefer_idle_heal(obs, nav_y) {
+                        let dir = if self.navigator.explore.patrol_dir.abs() > 0.1 {
+                            self.navigator.explore.patrol_dir.signum()
+                        } else {
+                            1.0
+                        };
+                        self.navigator
+                            .set_subgoal(SubGoal::Patrol { dir });
+                        self.last_reason = "idle_replan_patrol";
+                    }
                 } else if self.navigator.explore.pending_edge.is_some() {
                     // Walk 完成时若视觉节点滞后，把定位掰到目的节点，否则下一拍仍从 from 重规划。
                     self.snap_walk_dest_if_needed(nav_node, nav_x);
@@ -1147,7 +1175,7 @@ impl NavBot {
             }
         }
 
-        let combat_active = if self.survival.prefer_idle_heal(obs) {
+        let combat_active = if self.survival.prefer_idle_heal(obs, nav_y) {
             false
         } else {
             self.combat.is_active()
@@ -1275,19 +1303,39 @@ impl NavBot {
         self.nav_intent
     }
 
-    fn nearest_climb_up_rope(&self, node: u32, x: f32) -> Option<f32> {
-        let mut best: Option<(f32, f32)> = None;
-        for e in &self.graph.edges {
-            if e.from != node || e.kind != EdgeKind::ClimbUp {
-                continue;
-            }
-            let rx = e.rope_x.unwrap_or(e.target_x);
-            let d = (rx - x).abs();
-            if best.map(|(bd, _)| d < bd).unwrap_or(true) {
-                best = Some((d, rx));
-            }
+    /// 低血撤离：爬绳 → 寻路上楼 → 上台阶 → 离台 → 巡逻。永不返回 Idle。
+    fn plan_heal_escape(&mut self, nav_node: u32, nav_x: f32) -> SubGoal {
+        self.navigator.clear_climb_blocks();
+        let tol = self.config.goto_tolerance_px;
+        if let Some(edge) = self.graph.edges.iter().find(|e| {
+            e.from == nav_node
+                && e.kind == EdgeKind::ClimbUp
+                && !self
+                    .navigator
+                    .explore
+                    .blocked_edges
+                    .contains_key(&(e.from, e.kind, e.to))
+        }) {
+            return self.navigator.commit_edge(&self.graph, edge);
         }
-        best.map(|(_, rx)| rx)
+        if let Some(g) = self
+            .navigator
+            .plan_path_to_climb_pub(&self.graph, nav_node, nav_x, tol)
+        {
+            return g;
+        }
+        if let Some(g) = self.navigator.plan_continue_ascent(&self.graph, nav_node) {
+            return g;
+        }
+        if let Some(g) = self.navigator.plan_leave_segment(&self.graph, nav_node) {
+            return g;
+        }
+        let dir = if self.navigator.explore.patrol_dir.abs() > 0.1 {
+            self.navigator.explore.patrol_dir.signum()
+        } else {
+            1.0
+        };
+        SubGoal::Patrol { dir }
     }
 
     fn is_bottom_right_climb_approach(
