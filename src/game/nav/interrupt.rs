@@ -85,17 +85,12 @@ impl InterruptArbiter {
             return out;
         }
         if transit {
+            // 换层/撤离：保留导航位移与跳跃，只叠 attack（旧逻辑用 combat 替换会丢掉跑路键）。
+            let mut out = navigate;
             if combat.attack {
-                let mut out = combat;
-                out.left = false;
-                out.right = false;
-                out.jump = false;
-                out.up = false;
-                out.down = false;
-                out.pick_up = false;
-                return out;
+                out.attack = true;
             }
-            return navigate;
+            return out;
         }
         if !has_combat_move {
             let mut out = navigate;

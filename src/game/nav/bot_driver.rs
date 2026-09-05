@@ -592,8 +592,10 @@ impl NavBot {
 
         self.pickup.tick_memory(obs);
         if self.survival.suppress_combat() {
-            // 撤离时绝不砍怪：补刀会站桩挨打，且方向键冲突导致上不了台。
             self.combat.reset();
+        } else if self.survival.suppress_chase() {
+            // 撤离：只贴身挥刀，不追怪，导航继续跑高台/绳。
+            self.combat.observe_strike_only(obs);
         } else {
             self.combat.observe(obs);
         }
@@ -657,7 +659,12 @@ impl NavBot {
                 && self.last_reason != "step_up_done"
                 && self.last_reason != "idle"
                 && self.last_reason != "post_clear_patrol"
-                && self.last_reason != "step_up_unreachable";
+                && self.last_reason != "step_up_unreachable"
+                && self.escape_progress_ok(
+                    nav_node,
+                    self.graph.get(nav_node).map(|n| n.y).unwrap_or(nav_y),
+                    &goal,
+                );
             if !keep_escape {
                 let esc = self.plan_heal_escape(nav_node, nav_x);
                 goal = esc;
@@ -1347,20 +1354,14 @@ impl NavBot {
         self.nav_intent
     }
 
-    /// 低血撤离：爬绳 → 寻路上楼 → 上台阶 → 离台 → 巡逻。永不返回 Idle。
+    /// 低血撤离：强优先爬绳/上更高台，禁止同层 step_up 转圈挨打。
     fn plan_heal_escape(&mut self, nav_node: u32, nav_x: f32) -> SubGoal {
-        self.navigator.clear_climb_blocks();
         let tol = self.config.goto_tolerance_px;
-        if let Some(edge) = self.graph.edges.iter().find(|e| {
-            e.from == nav_node
-                && e.kind == EdgeKind::ClimbUp
-                && !self
-                    .navigator
-                    .explore
-                    .blocked_edges
-                    .contains_key(&(e.from, e.kind, e.to))
-        }) {
-            return self.navigator.commit_edge(&self.graph, edge);
+        let from_y = self.graph.get(nav_node).map(|n| n.y).unwrap_or(1200.0);
+
+        if let Some(idx) = self.best_local_climb_up_idx(nav_node) {
+            let edge = self.graph.edges[idx].clone();
+            return self.navigator.commit_edge(&self.graph, &edge);
         }
         if let Some(g) = self
             .navigator
@@ -1368,11 +1369,26 @@ impl NavBot {
         {
             return g;
         }
-        if let Some(g) = self.navigator.plan_continue_ascent(&self.graph, nav_node) {
+        if let Some(g) = self
+            .navigator
+            .plan_path_to_unvisited_upward_pub(&self.graph, nav_node, nav_x, tol)
+        {
             return g;
         }
-        if let Some(g) = self.navigator.plan_leave_segment(&self.graph, nav_node) {
+        if let Some(g) = self.navigator.plan_continue_ascent(&self.graph, nav_node) {
+            if self.escape_goal_goes_up(nav_node, from_y, &g) {
+                return g;
+            }
+        }
+        self.navigator.clear_climb_blocks();
+        if let Some(g) = self
+            .navigator
+            .plan_path_to_climb_pub(&self.graph, nav_node, nav_x, tol)
+        {
             return g;
+        }
+        if let Some(dir) = self.dir_toward_nearest_climb(nav_node, nav_x) {
+            return SubGoal::Patrol { dir };
         }
         let dir = if self.navigator.explore.patrol_dir.abs() > 0.1 {
             self.navigator.explore.patrol_dir.signum()
@@ -1380,6 +1396,83 @@ impl NavBot {
             1.0
         };
         SubGoal::Patrol { dir }
+    }
+
+    fn best_local_climb_up_idx(&self, nav_node: u32) -> Option<usize> {
+        let from_y = self.graph.get(nav_node)?.y;
+        let mut best: Option<(f32, usize)> = None;
+        for (idx, e) in self.graph.edges.iter().enumerate() {
+            if e.from != nav_node || e.kind != EdgeKind::ClimbUp {
+                continue;
+            }
+            if self
+                .navigator
+                .explore
+                .blocked_edges
+                .contains_key(&(e.from, e.kind, e.to))
+            {
+                continue;
+            }
+            let to_y = self.graph.get(e.to).map(|n| n.y).unwrap_or(from_y);
+            let rise = from_y - to_y;
+            if rise < 40.0 {
+                continue;
+            }
+            if best.map(|(br, _)| rise > br).unwrap_or(true) {
+                best = Some((rise, idx));
+            }
+        }
+        best.map(|(_, idx)| idx)
+    }
+
+    fn escape_goal_goes_up(&self, from_node: u32, from_y: f32, goal: &SubGoal) -> bool {
+        if let Some((_, _, t)) = self.navigator.explore.pending_edge {
+            return self.graph.get(t).is_some_and(|n| n.y + 40.0 < from_y);
+        }
+        match goal {
+            SubGoal::ClimbUp { .. } => true,
+            SubGoal::StepUp { target_x } => self.graph.edges.iter().any(|e| {
+                e.from == from_node
+                    && e.kind == EdgeKind::StepUp
+                    && (e.target_x - *target_x).abs() < 8.0
+                    && self
+                        .graph
+                        .get(e.to)
+                        .is_some_and(|n| n.y + 40.0 < from_y)
+            }),
+            _ => false,
+        }
+    }
+
+    /// 撤离中是否值得继续当前目标（同层 step_up 转圈返回 false）。
+    fn escape_progress_ok(&self, from_node: u32, from_y: f32, goal: &SubGoal) -> bool {
+        match goal {
+            SubGoal::ClimbUp { .. } | SubGoal::ClimbDown { .. } => true,
+            SubGoal::GoTo { .. } | SubGoal::WalkOff { .. } => true,
+            SubGoal::StepUp { .. } => self.escape_goal_goes_up(from_node, from_y, goal),
+            _ => false,
+        }
+    }
+
+    fn dir_toward_nearest_climb(&self, nav_node: u32, nav_x: f32) -> Option<f32> {
+        let node_y = self.graph.get(nav_node)?.y;
+        let mut best: Option<(f32, f32)> = None;
+        for e in &self.graph.edges {
+            if e.kind != EdgeKind::ClimbUp {
+                continue;
+            }
+            let rx = e.rope_x.unwrap_or(e.target_x);
+            let from_y = self.graph.get(e.from).map(|n| n.y).unwrap_or(node_y);
+            let d = (rx - nav_x).abs() + (from_y - node_y).abs() * 0.5;
+            let dir = (rx - nav_x).signum();
+            if dir.abs() < 0.1 {
+                continue;
+            }
+            if best.map(|(bd, _)| d < bd).unwrap_or(true) {
+                best = Some((d, dir));
+            }
+        }
+        best.map(|(_, dir)| dir)
     }
 
     fn is_bottom_right_climb_approach(
@@ -1419,8 +1512,8 @@ impl NavBot {
     }
 
     pub fn refresh_melee_hold(&mut self, obs: &[f32; OBS_DIM], facing: f32) -> InputFrame {
-        // 撤离/回血：禁止叠攻击，专心跑路。
-        if self.survival.suppress_combat() {
+        // 撤离/回血：不叠站砍（贴身刀由 combat strike_only + merge 处理，避免抢跑路键）。
+        if self.survival.suppress_chase() {
             return self.nav_intent;
         }
         let goal = self.navigator.explore.active_subgoal;

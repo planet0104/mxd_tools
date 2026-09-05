@@ -253,11 +253,28 @@ pub fn obs_enemy_touching_player(values: &[f32]) -> bool {
 
 /// 统计与玩家接触盒重叠的敌人（左右侧各几只）。
 pub fn obs_assess_enemy_contact(values: &[f32]) -> EnemyContactAssessment {
+    assess_enemy_contact(values, false)
+}
+
+/// 仅本台贴身接触（排除下层/上层框重叠）。
+pub fn obs_assess_platform_enemy_contact(values: &[f32]) -> EnemyContactAssessment {
+    assess_enemy_contact(values, true)
+}
+
+fn assess_enemy_contact(values: &[f32], platform_only: bool) -> EnemyContactAssessment {
     let mut out = EnemyContactAssessment::default();
     for i in 0..OBS_ENEMY_SLOTS {
         let base = OBS_ENEMY_START + i * OBS_SLOT_DIM;
         if !enemy_slot_overlaps_player_contact(values, base) {
             continue;
+        }
+        if platform_only {
+            let Some((_, dy, _, _)) = read_slot(values, base) else {
+                continue;
+            };
+            if dy.abs() > ENEMY_PLATFORM_DY {
+                continue;
+            }
         }
         out.total += 1;
         let dx = values[base];

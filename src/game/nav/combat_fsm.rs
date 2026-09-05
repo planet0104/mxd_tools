@@ -6,8 +6,8 @@
 
 use super::super::input::InputFrame;
 use super::super::observation::{
-    obs_assess_enemy_contact, obs_nearest_same_level_enemy_px, obs_platform_edge,
-    ENEMY_NEAR_PLATFORM_DX, ENEMY_PLATFORM_DY,
+    obs_assess_platform_enemy_contact, obs_has_platform_enemy, obs_nearest_same_level_enemy_px,
+    obs_platform_edge, ENEMY_NEAR_PLATFORM_DX, ENEMY_PLATFORM_DY,
 };
 use super::super::types::{WINDOW_H, WINDOW_W};
 
@@ -60,8 +60,9 @@ impl CombatFsm {
     }
 
     /// 每个感知帧调用：判定激活/退出并选定本帧动作。
+    /// 只接战本台怪（紧同层）；禁止高台砍下层。
     pub fn observe(&mut self, obs: &[f32]) {
-        let contact = obs_assess_enemy_contact(obs);
+        let contact = obs_assess_platform_enemy_contact(obs);
         let target = obs_nearest_same_level_enemy_px(obs, WINDOW_W, WINDOW_H)
             .filter(|(_, dy)| dy.abs() <= ENEMY_PLATFORM_DY * WINDOW_H);
         let engage_dx = ENEMY_NEAR_PLATFORM_DX * WINDOW_W;
@@ -85,7 +86,6 @@ impl CombatFsm {
         }
 
         self.step = if contact.total > 0 {
-            // 夹击：只站砍，绝不追任意一侧（追必穿进怪堆）
             if contact.left > 0 && contact.right > 0 {
                 Step::Strike(self.facing)
             } else {
@@ -105,20 +105,21 @@ impl CombatFsm {
             if dx.abs() <= STRIKE_DX_PX {
                 Step::Strike(toward)
             } else if dx.abs() <= engage_dx && !obs_platform_edge(obs, toward) {
-                // 只追到挥砍外缘；过近交给 Strike 站砍，避免贴怪推进。
                 Step::Approach(toward)
             } else {
                 Step::Hold
             }
-        } else {
-            // YOLO 闪断：仍 active 时续砍，避免导航接手穿过怪。
+        } else if obs_has_platform_enemy(obs) {
+            // YOLO 闪断：本台仍有怪才续砍，禁止对着下层空挥。
             Step::Strike(self.facing)
+        } else {
+            Step::Hold
         };
     }
 
-    /// 逃跑/回血：只对贴身怪挥刀，不接近。
+    /// 逃跑/回血：只对本台贴身怪挥刀，不接近。
     pub fn observe_strike_only(&mut self, obs: &[f32]) {
-        let contact = obs_assess_enemy_contact(obs);
+        let contact = obs_assess_platform_enemy_contact(obs);
         if contact.total > 0 {
             self.active = true;
             self.clear_frames = 0;

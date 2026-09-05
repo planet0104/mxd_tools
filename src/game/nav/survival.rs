@@ -1,4 +1,4 @@
-//! 保命状态机：血量≤50%强制换安全台回血；回血到较高比例再战。
+//! 保命状态机：有怪时血量>50%优先砍怪，≤50%优先爬高台/绳回血。
 
 use super::super::input::InputFrame;
 use super::super::observation::{
@@ -8,14 +8,14 @@ use super::super::observation::{
 use super::super::types::{WINDOW_H, WINDOW_W};
 use super::types::SubGoal;
 
-/// 血量 ≤ 此比例 → 强制撤离找安全台回血（提早跑，避免磨到 50% 才逃）。
-pub const HEAL_ENTER_RATIO: f32 = 0.70;
-/// 回血超过此比例才恢复砍怪（避免刚回一点就下场又被刷怪压残）。
-pub const HEAL_EXIT_RATIO: f32 = 0.90;
+/// 血量 ≤ 此比例 → 强制撤离找更高台/绳回血。
+pub const HEAL_ENTER_RATIO: f32 = 0.50;
+/// 回血超过此比例才恢复砍怪。
+pub const HEAL_EXIT_RATIO: f32 = 0.80;
 /// 相对撤离起点升高超过该像素，视为已到安全高度。
-const SAFE_CLIMB_DY: f32 = 50.0;
-/// 或绝对高度高于该 y（地图 y 越小越高）也视为中高台。
-const SAFE_ABS_Y: f32 = 1120.0;
+const SAFE_CLIMB_DY: f32 = 80.0;
+/// 绝对高度（y 越小越高）：中高台才算安全回血点。
+const SAFE_ABS_Y: f32 = 1050.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SurvivalMode {
@@ -52,7 +52,6 @@ impl SurvivalFsm {
         self.heal_band_y
     }
 
-    /// `hp_ratio`：YOLO 血条或 sim 真值，0~1。
     pub fn observe(&mut self, obs: &[f32], hp_ratio: f32, nav_y: f32) {
         let platform_mobs = obs_has_platform_enemy(obs);
         let low_hp = hp_ratio <= HEAL_ENTER_RATIO;
@@ -61,7 +60,6 @@ impl SurvivalFsm {
         match self.mode {
             SurvivalMode::Fight => {
                 if low_hp {
-                    // 低血一律撤离：当前台暂时无怪也会刷回来，禁止原地站桩等死。
                     self.mode = SurvivalMode::FleeClimb;
                     self.heal_band_y = Some(nav_y);
                 }
@@ -73,7 +71,6 @@ impl SurvivalFsm {
                     return;
                 }
                 if platform_mobs {
-                    // 仍被贴身：继续逃，刷新起点高度
                     self.heal_band_y = Some(
                         self.heal_band_y
                             .map(|y0| y0.min(nav_y))
@@ -105,16 +102,16 @@ impl SurvivalFsm {
         climbed || nav_y < SAFE_ABS_Y
     }
 
-    /// 撤离/回血期间禁止追怪（含贴身补刀）。
-    pub fn suppress_combat(&self) -> bool {
+    /// 撤离时禁止追怪/接近，但仍允许贴身挥刀。
+    pub fn suppress_chase(&self) -> bool {
         matches!(self.mode, SurvivalMode::FleeClimb | SurvivalMode::HealWait)
     }
 
-    pub fn suppress_chase(&self) -> bool {
-        self.suppress_combat()
+    /// 仅安全站桩回血时完全不砍。
+    pub fn suppress_combat(&self) -> bool {
+        self.mode == SurvivalMode::HealWait
     }
 
-    /// 必须主动换台/上楼（不可 Idle）。
     pub fn force_seek_safe_platform(&self) -> bool {
         self.mode == SurvivalMode::FleeClimb
     }
@@ -123,7 +120,6 @@ impl SurvivalFsm {
         self.force_seek_safe_platform()
     }
 
-    /// 仅在已到安全台且无贴身怪时允许原地回血。
     pub fn prefer_idle_heal(&self, obs: &[f32], nav_y: f32) -> bool {
         self.mode == SurvivalMode::HealWait
             && !obs_has_platform_enemy(obs)

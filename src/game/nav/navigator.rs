@@ -1247,6 +1247,16 @@ impl Navigator {
         self.plan_path_to_climb(graph, node_id, world_x, goto_tol)
     }
 
+    pub(crate) fn plan_path_to_unvisited_upward_pub(
+        &mut self,
+        graph: &MapGraph,
+        node_id: PlatformNodeId,
+        world_x: f32,
+        goto_tol: f32,
+    ) -> Option<SubGoal> {
+        self.plan_path_to_unvisited_upward(graph, node_id, world_x, goto_tol)
+    }
+
     /// 只寻找明显高于当前台的未访问节点（上高层），找不到则 None。
     fn plan_path_to_unvisited_upward(
         &mut self,
