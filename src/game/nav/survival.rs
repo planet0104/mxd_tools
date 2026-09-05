@@ -1,18 +1,17 @@
-//! 保命状态机：防夹击、低血爬梯回血、侧面接战。
-
-use std::time::Instant;
+//! 保命状态机：有怪时血量>50%优先砍怪，≤50%优先逃跑回血。
 
 use super::super::input::InputFrame;
 use super::super::observation::{
-    obs_assess_enemy_contact, obs_has_platform_enemy, obs_platform_edge, obs_slot_active,
-    ENEMY_PLATFORM_DY, OBS_ENEMY_START, OBS_SLOT_DIM,
+    obs_has_platform_enemy, obs_platform_edge, obs_slot_active, ENEMY_PLATFORM_DY, OBS_ENEMY_START,
+    OBS_SLOT_DIM,
 };
 use super::super::types::{WINDOW_H, WINDOW_W};
 use super::types::SubGoal;
 
+/// 有怪且血量 ≤ 此比例 → 撤离回血；> 此比例 → 优先砍怪。
 pub const HEAL_ENTER_RATIO: f32 = 0.50;
-pub const HEAL_EXIT_RATIO: f32 = 1.0;
-pub const COMBAT_RETREAT_SECS: f32 = 14.0;
+/// 与 HEAL_ENTER_RATIO 相同：血量超过 50% 即恢复砍怪。
+pub const HEAL_EXIT_RATIO: f32 = 0.50;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SurvivalMode {
@@ -24,7 +23,6 @@ pub enum SurvivalMode {
 #[derive(Debug)]
 pub struct SurvivalFsm {
     pub mode: SurvivalMode,
-    combat_started: Option<Instant>,
     heal_band_y: Option<f32>,
 }
 
@@ -32,7 +30,6 @@ impl Default for SurvivalFsm {
     fn default() -> Self {
         Self {
             mode: SurvivalMode::Fight,
-            combat_started: None,
             heal_band_y: None,
         }
     }
@@ -47,55 +44,52 @@ impl SurvivalFsm {
         self.mode
     }
 
+    /// `hp_ratio`：YOLO 血条或 sim 真值，0~1。
+    /// 有怪时：>50% 优先砍怪；≤50% 优先逃跑，回血到 >50% 再战。
     pub fn observe(&mut self, obs: &[f32], hp_ratio: f32, nav_y: f32) {
-        let contact = obs_assess_enemy_contact(obs);
-        let sandwiched = contact.left > 0 && contact.right > 0;
         let platform_mobs = obs_has_platform_enemy(obs);
+        let low_hp = hp_ratio <= HEAL_ENTER_RATIO;
+        let can_fight = hp_ratio > HEAL_ENTER_RATIO;
 
         match self.mode {
             SurvivalMode::Fight => {
-                if platform_mobs || contact.total > 0 {
-                    if self.combat_started.is_none() {
-                        self.combat_started = Some(Instant::now());
-                    }
-                } else {
-                    self.combat_started = None;
+                if !low_hp {
+                    // 血量 >50%：优先砍怪，不撤离
+                    return;
                 }
-                let combat_secs = self
-                    .combat_started
-                    .map(|t| t.elapsed().as_secs_f32())
-                    .unwrap_or(0.0);
-                if sandwiched || hp_ratio <= HEAL_ENTER_RATIO {
+                // 血量 ≤50%：优先逃跑回血
+                if platform_mobs {
                     self.mode = SurvivalMode::FleeClimb;
                     self.heal_band_y = Some(nav_y);
-                    self.combat_started = None;
-                } else if combat_secs >= COMBAT_RETREAT_SECS && platform_mobs {
-                    self.mode = SurvivalMode::FleeClimb;
+                } else {
+                    // 低血但当前台无怪：原地等回血
+                    self.mode = SurvivalMode::HealWait;
                     self.heal_band_y = Some(nav_y);
-                    self.combat_started = None;
                 }
             }
             SurvivalMode::FleeClimb => {
+                if can_fight {
+                    // 已回到可战血量：立刻恢复砍怪
+                    self.mode = SurvivalMode::Fight;
+                    self.heal_band_y = None;
+                    return;
+                }
                 let climbed = self
                     .heal_band_y
                     .map(|y0| nav_y < y0 - 50.0)
                     .unwrap_or(false);
-                if climbed && !sandwiched {
+                if climbed {
                     self.mode = SurvivalMode::HealWait;
-                }
-                if hp_ratio >= HEAL_EXIT_RATIO && !sandwiched && !platform_mobs {
-                    self.mode = SurvivalMode::Fight;
-                    self.heal_band_y = None;
                 }
             }
             SurvivalMode::HealWait => {
-                if sandwiched {
-                    self.mode = SurvivalMode::FleeClimb;
-                    self.heal_band_y = Some(nav_y);
-                } else if hp_ratio >= HEAL_EXIT_RATIO {
+                if can_fight {
                     self.mode = SurvivalMode::Fight;
                     self.heal_band_y = None;
-                    self.combat_started = None;
+                } else if platform_mobs {
+                    // 仍低血且台又有怪：继续换台
+                    self.mode = SurvivalMode::FleeClimb;
+                    self.heal_band_y = Some(nav_y);
                 }
             }
         }

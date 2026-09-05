@@ -555,7 +555,7 @@ fn run_live_nav_inner(
                         if hp_ratio <= 0.5 {
                             " → 撤离回血"
                         } else {
-                            ""
+                            " → 优先砍怪"
                         }
                     )));
                 }
