@@ -269,6 +269,12 @@ impl ProbeDriver {
         self.last_obs = obs;
         sim.movement_gate.set_last_observation(&obs);
         self.sense.prepare(&obs);
+        let hp = if sim.state.player.max_hp > 0 {
+            sim.state.player.hp as f32 / sim.state.player.max_hp as f32
+        } else {
+            1.0
+        };
+        self.bot.set_hp_ratio(hp);
         self.input = self.bot.decide(&sim.map, &obs, &self.sense);
         self.sense.after_decide(&self.input, &obs);
 

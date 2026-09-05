@@ -163,7 +163,32 @@ pub struct GameSim {
     jump_prev: bool,
     spawn_x: f32,
     spawn_y: f32,
+    /// 自然回血倒计时。
+    hp_regen_cd: f32,
+    /// 按平台高度带持续刷怪（树怪台 / 蜗牛台上限不同）。
+    spawn_pools: Vec<SpawnPool>,
     rng: StdRng,
+}
+
+/// 某一高度带的刷怪池：树怪台最多 2 树怪+1 蜗牛；纯蜗牛台最多 4 蜗牛。
+#[derive(Debug, Clone)]
+struct SpawnPool {
+    band_y: f32,
+    walk_x1: f32,
+    walk_x2: f32,
+    max_stump: u32,
+    max_snail: u32,
+    max_mushroom: u32,
+    cd: f32,
+    candidates: Vec<(u32, f32)>,
+}
+
+const SPAWN_BAND_Y_TOL: f32 = 40.0;
+const STUMP_ID: u32 = 130100;
+const MUSHROOM_ID: u32 = 1210102;
+
+fn is_snail_id(id: u32) -> bool {
+    matches!(id, 100100 | 100101 | 130101)
 }
 
 impl GameSim {
@@ -236,6 +261,8 @@ impl GameSim {
             jump_prev: false,
             spawn_x,
             spawn_y,
+            hp_regen_cd: rng.gen_range(HP_REGEN_INTERVAL_MIN..=HP_REGEN_INTERVAL_MAX),
+            spawn_pools: Vec::new(),
             rng,
         };
         sim.spawn_mobs();
@@ -354,27 +381,195 @@ impl GameSim {
     }
 
     fn spawn_mobs(&mut self) {
-        for sp in &self.map.spawns.clone() {
-            let stats = mob_stats(sp.mob_id);
-            // 以刷怪点所在连续平台为准，避免 JSON 里误写成全图宽度
-            let (walk_x1, walk_x2) = self.map.walk_range_at(sp.x, sp.y);
-            self.state.mobs.push(MobState {
-                mob_id: sp.mob_id,
-                x: sp.x.clamp(walk_x1, walk_x2),
-                y: sp.y,
-                hp: stats.hp,
-                max_hp: stats.hp,
-                vx: stats.walk_speed() * if self.rng.gen_bool(0.5) { 1.0 } else { -1.0 },
+        self.spawn_pools = Self::build_spawn_pools(&self.map, &mut self.rng);
+        for pool in &self.spawn_pools.clone() {
+            self.fill_pool_initial(pool);
+        }
+    }
+
+    fn build_spawn_pools(map: &GameMap, rng: &mut StdRng) -> Vec<SpawnPool> {
+        let mut by_band: Vec<(f32, Vec<(u32, f32)>)> = Vec::new();
+        for sp in &map.spawns {
+            let y = sp.y;
+            if let Some(slot) = by_band
+                .iter_mut()
+                .find(|(by, _)| (y - *by).abs() <= SPAWN_BAND_Y_TOL)
+            {
+                slot.1.push((sp.mob_id, sp.x));
+            } else {
+                by_band.push((y, vec![(sp.mob_id, sp.x)]));
+            }
+        }
+        let mut pools = Vec::new();
+        for (band_y, candidates) in by_band {
+            let has_stump = candidates.iter().any(|(id, _)| *id == STUMP_ID);
+            let has_snail = candidates.iter().any(|(id, _)| is_snail_id(*id));
+            let has_mush = candidates.iter().any(|(id, _)| *id == MUSHROOM_ID);
+            let (max_stump, max_snail, max_mushroom) = if has_stump {
+                // 树怪台：一般 2 树怪 + 1 蜗牛
+                (2, 1, 0)
+            } else if has_snail && !has_mush {
+                // 纯蜗牛台：最多 4 只
+                (0, 4, 0)
+            } else if has_mush {
+                (0, 0, 2)
+            } else {
+                (0, 2, 0)
+            };
+            let mut walk_x1 = f32::MAX;
+            let mut walk_x2 = f32::MIN;
+            for &(_, x) in &candidates {
+                let (lo, hi) = map.walk_range_at(x, band_y);
+                walk_x1 = walk_x1.min(lo);
+                walk_x2 = walk_x2.max(hi);
+            }
+            if !walk_x1.is_finite() {
+                walk_x1 = 0.0;
+                walk_x2 = map.width as f32;
+            }
+            pools.push(SpawnPool {
+                band_y,
                 walk_x1,
                 walk_x2,
-                alive: true,
-                hit_t: 0.0,
-                die_t: 0.0,
-                anim: MobAnim::Move,
-                anim_t: 0.0,
-                touch_damage: stats.touch_damage,
+                max_stump,
+                max_snail,
+                max_mushroom,
+                cd: rng.gen_range(2.0..6.0),
+                candidates,
             });
         }
+        pools
+    }
+
+    fn fill_pool_initial(&mut self, pool: &SpawnPool) {
+        let mut stump_n = 0u32;
+        let mut snail_n = 0u32;
+        let mut mush_n = 0u32;
+        let mut order = pool.candidates.clone();
+        // 打乱，再按上限塞入
+        for i in (1..order.len()).rev() {
+            let j = self.rng.gen_range(0..=i);
+            order.swap(i, j);
+        }
+        for (mob_id, x) in order {
+            let ok = if mob_id == STUMP_ID {
+                if stump_n >= pool.max_stump {
+                    continue;
+                }
+                stump_n += 1;
+                true
+            } else if mob_id == MUSHROOM_ID {
+                if mush_n >= pool.max_mushroom {
+                    continue;
+                }
+                mush_n += 1;
+                true
+            } else if is_snail_id(mob_id) {
+                if snail_n >= pool.max_snail {
+                    continue;
+                }
+                snail_n += 1;
+                true
+            } else if pool.max_snail > 0 {
+                if snail_n >= pool.max_snail {
+                    continue;
+                }
+                snail_n += 1;
+                true
+            } else {
+                false
+            };
+            if ok {
+                self.push_mob(mob_id, x, pool.band_y, pool.walk_x1, pool.walk_x2);
+            }
+        }
+    }
+
+    fn push_mob(&mut self, mob_id: u32, x: f32, y: f32, walk_x1: f32, walk_x2: f32) {
+        let stats = mob_stats(mob_id);
+        let (lo, hi) = self.map.walk_range_at(x, y);
+        let w1 = lo.max(walk_x1);
+        let w2 = hi.min(walk_x2).max(w1 + 40.0);
+        self.state.mobs.push(MobState {
+            mob_id,
+            x: x.clamp(w1, w2),
+            y,
+            hp: stats.hp,
+            max_hp: stats.hp,
+            vx: stats.walk_speed() * if self.rng.gen_bool(0.5) { 1.0 } else { -1.0 },
+            walk_x1: w1,
+            walk_x2: w2,
+            alive: true,
+            hit_t: 0.0,
+            die_t: 0.0,
+            anim: MobAnim::Move,
+            anim_t: 0.0,
+            touch_damage: stats.touch_damage,
+        });
+    }
+
+    fn count_pool_alive(&self, pool: &SpawnPool) -> (u32, u32, u32) {
+        let mut stump = 0u32;
+        let mut snail = 0u32;
+        let mut mush = 0u32;
+        for m in &self.state.mobs {
+            if !m.alive {
+                continue;
+            }
+            if (m.y - pool.band_y).abs() > SPAWN_BAND_Y_TOL {
+                continue;
+            }
+            if m.mob_id == STUMP_ID {
+                stump += 1;
+            } else if m.mob_id == MUSHROOM_ID {
+                mush += 1;
+            } else if is_snail_id(m.mob_id) {
+                snail += 1;
+            }
+        }
+        (stump, snail, mush)
+    }
+
+    fn try_respawn_one(&mut self, pool_idx: usize) {
+        let pool = self.spawn_pools[pool_idx].clone();
+        let (stump_n, snail_n, mush_n) = self.count_pool_alive(&pool);
+        let mut choices: Vec<u32> = Vec::new();
+        if stump_n < pool.max_stump {
+            choices.push(STUMP_ID);
+        }
+        if snail_n < pool.max_snail {
+            let snail_id = pool
+                .candidates
+                .iter()
+                .find(|(id, _)| is_snail_id(*id))
+                .map(|(id, _)| *id)
+                .unwrap_or(100101);
+            choices.push(snail_id);
+        }
+        if mush_n < pool.max_mushroom {
+            choices.push(MUSHROOM_ID);
+        }
+        if choices.is_empty() {
+            return;
+        }
+        let mob_id = choices[self.rng.gen_range(0..choices.len())];
+        let xs: Vec<f32> = pool
+            .candidates
+            .iter()
+            .filter(|(id, _)| *id == mob_id)
+            .map(|(_, x)| *x)
+            .collect();
+        let x = if xs.is_empty() {
+            self.rng.gen_range(pool.walk_x1..=pool.walk_x2)
+        } else {
+            xs[self.rng.gen_range(0..xs.len())]
+        };
+        let px = self.state.player.x;
+        let py = self.state.player.y;
+        if (py - pool.band_y).abs() < 60.0 && (px - x).abs() < 80.0 {
+            return;
+        }
+        self.push_mob(mob_id, x, pool.band_y, pool.walk_x1, pool.walk_x2);
     }
 
     pub fn ground_truth(&self) -> GroundTruth {
@@ -552,9 +747,27 @@ impl GameSim {
                 &mut self.rng,
             );
         }
+        self.tick_hp_regen(dt);
         self.tick_mobs(dt);
         self.tick_drops(input, dt);
         self.update_camera();
+    }
+
+    fn tick_hp_regen(&mut self, dt: f32) {
+        if self.state.player.hp <= 0 {
+            return;
+        }
+        self.hp_regen_cd -= dt;
+        if self.hp_regen_cd > 0.0 {
+            return;
+        }
+        self.hp_regen_cd = self
+            .rng
+            .gen_range(HP_REGEN_INTERVAL_MIN..=HP_REGEN_INTERVAL_MAX);
+        let p = &mut self.state.player;
+        if p.hp < p.max_hp {
+            p.hp = (p.hp + HP_REGEN_AMOUNT).min(p.max_hp);
+        }
     }
 
     fn use_potion(&mut self) {
@@ -1064,27 +1277,42 @@ impl GameSim {
     fn try_attack_mobs(&mut self) {
         let p = &self.state.player;
         let (x1, x2, y1, y2) = Self::player_melee_aabb(p);
-        let mut loot: Vec<(f32, f32)> = Vec::new();
-        for mob in &mut self.state.mobs {
+        let px = p.x;
+        // 正式服：一刀最多打中一只（取框内最近）
+        let mut best: Option<usize> = None;
+        let mut best_d = f32::MAX;
+        for (i, mob) in self.state.mobs.iter().enumerate() {
             if !mob.alive {
                 continue;
             }
             if mob.x >= x1 && mob.x <= x2 && mob.y >= y1 && mob.y <= y2 {
-                mob.hp -= PLAYER_ATTACK_DAMAGE;
-                mob.hit_t = 0.15;
-                mob.anim = MobAnim::Hit;
-                let kb = 28.0 * p.facing;
-                mob.x += kb;
-                if mob.hp <= 0 {
-                    mob.alive = false;
-                    mob.die_t = 0.5;
-                    mob.anim = MobAnim::Die;
-                    self.state.kills += 1;
-                    loot.push((mob.x, mob.y));
+                let d = (mob.x - px).abs();
+                if d < best_d {
+                    best_d = d;
+                    best = Some(i);
                 }
             }
         }
-        for (x, y) in loot {
+        let Some(i) = best else {
+            return;
+        };
+        let facing = self.state.player.facing;
+        let mut loot: Option<(f32, f32)> = None;
+        {
+            let mob = &mut self.state.mobs[i];
+            mob.hp -= PLAYER_ATTACK_DAMAGE;
+            mob.hit_t = 0.15;
+            mob.anim = MobAnim::Hit;
+            mob.x += 28.0 * facing;
+            if mob.hp <= 0 {
+                mob.alive = false;
+                mob.die_t = 0.5;
+                mob.anim = MobAnim::Die;
+                self.state.kills += 1;
+                loot = Some((mob.x, mob.y));
+            }
+        }
+        if let Some((x, y)) = loot {
             self.spawn_loot(x, y);
         }
     }
@@ -1168,14 +1396,22 @@ impl GameSim {
         p.anim = PlayerAnim::Hurt;
         let feet_y = p.y;
         let old_x = p.x;
+        let on_ground = p.on_ground;
+        // 地面倒退约一步；跳跃落地碰到怪则只挪半步
+        let knock_dist = if on_ground {
+            HURT_KNOCK_DIST
+        } else {
+            HURT_KNOCK_DIST_AIR
+        };
 
         self.state.touch_hits = self.state.touch_hits.saturating_add(1);
         let tick = self.state.tick;
-        self.state.player.x = Self::safe_hurt_knockback_x(&self.map, old_x, feet_y, knock_dir);
+        self.state.player.x =
+            Self::safe_hurt_knockback_x(&self.map, old_x, feet_y, knock_dir, knock_dist);
 
         if self.config.preview || self.config.bot_play {
             eprintln!(
-                "DMG tick={} touch -{} hp {}→{} hits={} player=({:.0},{:.0}) mob_dx={:.0} facing={}",
+                "DMG tick={} touch -{} hp {}→{} hits={} player=({:.0},{:.0}) mob_dx={:.0} facing={} kb={:.0}",
                 tick,
                 damage,
                 hp_before,
@@ -1184,19 +1420,25 @@ impl GameSim {
                 px,
                 py,
                 mob_dx,
-                if facing >= 0.0 { "R" } else { "L" }
+                if facing >= 0.0 { "R" } else { "L" },
+                knock_dist
             );
         }
     }
 
     /// 受击水平击退：仅当落点仍在脚下平台时才位移，避免角落被顶出平台坠亡。
-    fn safe_hurt_knockback_x(map: &GameMap, x: f32, feet_y: f32, knock_dir: f32) -> f32 {
-        const KNOCK_DIST: f32 = 40.0;
+    fn safe_hurt_knockback_x(
+        map: &GameMap,
+        x: f32,
+        feet_y: f32,
+        knock_dir: f32,
+        knock_dist: f32,
+    ) -> f32 {
         const GROUND_PROBE: f32 = 64.0;
         if knock_dir.abs() < 0.01 {
             return x;
         }
-        let proposed = x + knock_dir * KNOCK_DIST;
+        let proposed = x + knock_dir * knock_dist;
         if map
             .stand_at(proposed, feet_y + 40.0, GROUND_PROBE)
             .is_some()
@@ -1234,15 +1476,24 @@ impl GameSim {
             }
         }
         self.state.mobs.retain(|m| m.alive || m.die_t > 0.0);
-        // 训练/预览：整图杀光后才波次重生。预览须等角色离开出生高度带，
-        // 否则首台清完立刻刷回，永远 SeekVertical 不出去。
-        if self.config.bot_play && self.state.mobs.is_empty() && !self.map.spawns.is_empty() {
-            let (spawn_x, spawn_y) = self.map.default_spawn();
-            let _ = spawn_x;
-            let left_spawn_band = (self.state.player.y - spawn_y).abs() > 80.0;
-            if !self.config.preview || left_spawn_band {
-                self.spawn_mobs();
+        // 持续刷怪：各平台带按上限补怪（打得快会出现空台时间）
+        if self.spawn_pools.is_empty() && !self.map.spawns.is_empty() {
+            self.spawn_pools = Self::build_spawn_pools(&self.map, &mut self.rng);
+        }
+        for i in 0..self.spawn_pools.len() {
+            self.spawn_pools[i].cd -= dt;
+            if self.spawn_pools[i].cd > 0.0 {
+                continue;
             }
+            let (stump_n, snail_n, mush_n) = self.count_pool_alive(&self.spawn_pools[i]);
+            let pool = &self.spawn_pools[i];
+            let under = stump_n < pool.max_stump
+                || snail_n < pool.max_snail
+                || mush_n < pool.max_mushroom;
+            if under {
+                self.try_respawn_one(i);
+            }
+            self.spawn_pools[i].cd = self.rng.gen_range(3.5..9.0);
         }
     }
 
@@ -1754,7 +2005,7 @@ mod control_tests {
         let y = s.state.player.y;
         for dir in [-1.0_f32, 1.0] {
             let proposed = x + dir * 40.0;
-            let result = GameSim::safe_hurt_knockback_x(&map, x, y, dir);
+            let result = GameSim::safe_hurt_knockback_x(&map, x, y, dir, 40.0);
             if map.stand_at(proposed, y + 40.0, 64.0).is_none() {
                 assert_eq!(result, x, "knockback off platform should not move player");
             } else {
@@ -1764,21 +2015,24 @@ mod control_tests {
     }
 
     #[test]
-    fn bot_play_wave_respawns_after_all_mobs_cleared() {
+    fn continuous_spawn_refills_after_clear() {
         let map = load_default_map().expect("default map");
         let mut s = GameSim::new_bot_play(map, 3);
-        let n0 = s.state.mobs.len();
+        let n0 = s.state.mobs.iter().filter(|m| m.alive).count();
         assert!(n0 > 0);
         for m in &mut s.state.mobs {
             m.alive = false;
             m.die_t = 0.0;
         }
-        s.tick(&InputFrame::default());
-        assert_eq!(
-            s.state.mobs.iter().filter(|m| m.alive).count(),
-            n0,
-            "all mobs dead should wave respawn"
-        );
+        for pool in &mut s.spawn_pools {
+            pool.cd = 0.0;
+        }
+        // 多 tick：每池每帧最多补一只，且可能因贴玩家跳过
+        for _ in 0..40 {
+            s.tick(&InputFrame::default());
+        }
+        let n1 = s.state.mobs.iter().filter(|m| m.alive).count();
+        assert!(n1 > 0, "cleared platforms should gradually respawn, got {n1}");
     }
 
     #[test]

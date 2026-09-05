@@ -15,8 +15,8 @@ use super::super::types::{WINDOW_H, WINDOW_W};
 const STRIKE_DX_PX: f32 = 110.0;
 /// 连续多少个感知帧无本台怪才退出（≈48 tick，与清层判定一致）。
 const CLEAR_FRAMES: u32 = 8;
-/// 一刀的节奏：攻击冷却 0.35s≈21 tick，按键只给前 3 tick。
-const SWING_PERIOD_TICKS: u32 = 21;
+/// 一刀的节奏：攻击冷却 0.5s≈30 tick（正式服每秒两刀），按键只给前 3 tick。
+const SWING_PERIOD_TICKS: u32 = 30;
 const SWING_PRESS_TICKS: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -85,15 +85,20 @@ impl CombatFsm {
         }
 
         self.step = if contact.total > 0 {
-            let toward = if contact.right > contact.left {
-                1.0
-            } else if contact.left > contact.right {
-                -1.0
+            // 夹击：只站砍，绝不追任意一侧（追必穿进怪堆）
+            if contact.left > 0 && contact.right > 0 {
+                Step::Strike(self.facing)
             } else {
-                self.facing
-            };
-            self.facing = toward;
-            Step::Strike(toward)
+                let toward = if contact.right > contact.left {
+                    1.0
+                } else if contact.left > contact.right {
+                    -1.0
+                } else {
+                    self.facing
+                };
+                self.facing = toward;
+                Step::Strike(toward)
+            }
         } else if let Some((dx, _)) = target {
             let toward = if dx >= 0.0 { 1.0 } else { -1.0 };
             self.facing = toward;
@@ -109,6 +114,27 @@ impl CombatFsm {
             // YOLO 闪断：仍 active 时续砍，避免导航接手穿过怪。
             Step::Strike(self.facing)
         };
+    }
+
+    /// 逃跑/回血：只对贴身怪挥刀，不接近。
+    pub fn observe_strike_only(&mut self, obs: &[f32]) {
+        let contact = obs_assess_enemy_contact(obs);
+        if contact.total > 0 {
+            self.active = true;
+            self.clear_frames = 0;
+            if contact.left > 0 && contact.right == 0 {
+                self.facing = -1.0;
+            } else if contact.right > 0 && contact.left == 0 {
+                self.facing = 1.0;
+            }
+            self.step = Step::Strike(self.facing);
+        } else {
+            self.clear_frames = self.clear_frames.saturating_add(1);
+            if self.clear_frames >= CLEAR_FRAMES {
+                self.active = false;
+            }
+            self.step = Step::Hold;
+        }
     }
 
     /// 每个 sim tick 调用；仅在 `is_active()` 时使用其输出。

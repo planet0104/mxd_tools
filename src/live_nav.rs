@@ -40,6 +40,14 @@ struct LiveNavDriver {
 }
 
 impl LiveNavDriver {
+    fn set_hp_ratio(&mut self, ratio: f32) {
+        self.bot.set_hp_ratio(ratio);
+    }
+
+    fn survival_mode(&self) -> mxd_tools::game::SurvivalMode {
+        self.bot.survival_mode()
+    }
+
     fn new(map: GameMap, seed: u64) -> Self {
         let (sx, sy) = map.default_spawn();
         let bot = NavBot::new(&map, NavBotConfig::default());
@@ -537,20 +545,22 @@ fn run_live_nav_inner(
                 WINDOW_H as u32,
             );
             let obs = obs_from_step(&step);
-            driver.apply_observation(result.tick, obs);
             if let Some((hp_ratio, hp_conf)) = best_hp_from_detections(&step.detections) {
+                driver.set_hp_ratio(hp_ratio);
                 if result.tick % 30 == 0 {
                     send(LiveNavEvent::Log(format!(
-                        "检测到血量 ≈{:.0}%（conf={hp_conf:.2}）{}",
+                        "检测到血量 ≈{:.0}%（conf={hp_conf:.2}）[{:?}]{}",
                         hp_ratio * 100.0,
-                        if hp_ratio <= 0.3 {
-                            " → 偏低，宜找安全点喝药/静默回血"
+                        driver.survival_mode(),
+                        if hp_ratio <= 0.5 {
+                            " → 撤离回血"
                         } else {
                             ""
                         }
                     )));
                 }
             }
+            driver.apply_observation(result.tick, obs);
             for line in diag_log.on_vision(
                 result.tick,
                 &step,

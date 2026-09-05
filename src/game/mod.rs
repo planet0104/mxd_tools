@@ -42,7 +42,9 @@ pub use human_pace::HumanPace;
 pub use input::InputFrame;
 pub use map::{ClimbDir, ClimbHint, GameMap, Portal};
 pub use movement_gate::{MovementGate, MovementGateCtx};
-pub use nav::{CombatFsm, MapGraph, NavBot, NavBotConfig, NavCtx, SubGoal};
+pub use nav::{
+    CombatFsm, MapGraph, NavBot, NavBotConfig, NavCtx, SubGoal, SurvivalMode, HEAL_ENTER_RATIO,
+};
 pub use npc::NpcPlayerState;
 pub use observation::{
     inject_proprioception, obs_climb_grab_ready, obs_climb_hint, obs_enemy_in_attack_range,

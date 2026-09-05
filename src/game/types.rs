@@ -65,13 +65,28 @@ pub fn mob_walk_speed_from_wz(wz_speed: i32) -> f32 {
 pub const COYOTE_TIME: f32 = 0.10;
 /// 落地前提前按跳仍生效的缓冲
 pub const JUMP_BUFFER: f32 = 0.14;
-pub const PLAYER_MAX_HP: i32 = 100;
+pub const PLAYER_MAX_HP: i32 = 114;
+/// 4 刀击杀：怪 HP = 4 × 本值。
 pub const PLAYER_ATTACK_DAMAGE: i32 = 15;
-pub const ATTACK_COOLDOWN: f32 = 0.35;
+/// 正式服实测：每秒最多两刀。
+pub const ATTACK_COOLDOWN: f32 = 0.5;
 pub const ATTACK_DURATION: f32 = 0.25;
-pub const HURT_DURATION: f32 = 0.3;
-pub const INVULN_DURATION: f32 = 1.5;
+pub const HURT_DURATION: f32 = 0.35;
+/// 受击后约 2 秒闪烁无敌。
+pub const INVULN_DURATION: f32 = 2.0;
 pub const POTION_HEAL: i32 = 30;
+/// 自然回血：每隔约 7～8 秒 +10。
+pub const HP_REGEN_AMOUNT: i32 = 10;
+pub const HP_REGEN_INTERVAL_MIN: f32 = 7.0;
+pub const HP_REGEN_INTERVAL_MAX: f32 = 8.0;
+/// 地面受击击退（约一步）。
+pub const HURT_KNOCK_DIST: f32 = 48.0;
+/// 跳跃落地碰到怪时的轻微位移（约半步）。
+pub const HURT_KNOCK_DIST_AIR: f32 = 24.0;
+/// 怪接触伤害（正式服实测）。
+pub const MOB_TOUCH_DAMAGE: i32 = 6;
+/// 蜗牛/树怪等统一 4 刀死。
+pub const MOB_HITS_TO_KILL: i32 = 4;
 pub const ROPE_GRAB_X: f32 = 18.0;
 /// 碰撞用近似身高（脚底向上）
 pub const PLAYER_BODY_H: f32 = 56.0;
@@ -120,36 +135,39 @@ impl MobStats {
 }
 
 pub fn mob_stats(mob_id: u32) -> MobStats {
+    // 怀旧服对齐：接触伤 6；蜗牛/树怪/蘑菇均 4 刀死（HP = 4×普攻）。
+    let hp = PLAYER_ATTACK_DAMAGE * MOB_HITS_TO_KILL;
+    let touch = MOB_TOUCH_DAMAGE;
     // wz_speed 来自 maplestory.io GMS/83 mob meta.speed
     match mob_id {
         100101 => MobStats {
-            hp: 30,
-            touch_damage: 8,
+            hp,
+            touch_damage: touch,
             wz_speed: -50, // 蓝蜗牛 → 62.5 px/s
         },
         100100 => MobStats {
-            hp: 25,
-            touch_damage: 6,
+            hp,
+            touch_damage: touch,
             wz_speed: -65, // 绿蜗牛 → 43.75 px/s
         },
         130101 => MobStats {
-            hp: 40,
-            touch_damage: 10,
+            hp,
+            touch_damage: touch,
             wz_speed: -50, // 红蜗牛 → 62.5 px/s
         },
         1210102 => MobStats {
-            hp: 50,
-            touch_damage: 12,
+            hp,
+            touch_damage: touch,
             wz_speed: 0, // 花蘑菇 → 125 px/s
         },
         130100 => MobStats {
-            hp: 60,
-            touch_damage: 15,
+            hp,
+            touch_damage: touch,
             wz_speed: -70, // 树怪 → 37.5 px/s
         },
         _ => MobStats {
-            hp: 30,
-            touch_damage: 8,
+            hp,
+            touch_damage: touch,
             wz_speed: -50,
         },
     }

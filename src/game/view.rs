@@ -851,9 +851,20 @@ fn draw_ui_shell(assets: &GameViewAssets, sim: &GameSim) {
     let hp = &assets.ui_layout.dynamic_overlay.hp_bar;
     let ratio = (sim.state.player.hp as f32 / sim.state.player.max_hp as f32).clamp(0.0, 1.0);
     draw_maple_hp_bar(hp.x, hp.y, hp.w, hp.h, ratio);
+    // 数值叠在血条上方（对齐正式服 [cur/max]）
+    let hp_label = format!("[{}/{}]", sim.state.player.hp, sim.state.player.max_hp);
+    draw_text(
+        &hp_label,
+        hp.x + 2.0,
+        hp.y - 2.0,
+        14.0,
+        Color::from_rgba(220, 255, 180, 255),
+    );
+    draw_text("HP", hp.x - 22.0, hp.y + hp.h - 1.0, 14.0, WHITE);
 
     let mp = &assets.ui_layout.dynamic_overlay.mp_bar;
     draw_maple_mp_bar(mp.x, mp.y, mp.w, mp.h, 0.8);
+    draw_text("MP", mp.x - 22.0, mp.y + mp.h - 1.0, 14.0, WHITE);
 
     let text = format!(
         "HP {}/{}  药:{}  币:{}  击杀:{}  [I]背包 [1]喝药 [Z]拾取",

@@ -10,6 +10,7 @@ mod navigator;
 mod pickup;
 mod progress;
 mod stuck_watchdog;
+mod survival;
 mod types;
 
 pub use bot_driver::NavBot;
@@ -17,5 +18,6 @@ pub use combat_fsm::CombatFsm;
 pub use executor::NavCtx;
 pub use map_graph::MapGraph;
 pub use stuck_watchdog::{GlobalStuckWatchdog, GLOBAL_STUCK_SECS, ROPE_BLOCK_TICKS};
+pub use survival::{SurvivalFsm, SurvivalMode, HEAL_ENTER_RATIO, HEAL_EXIT_RATIO};
 pub use types::{ExecutorResult, NavBotConfig, NavDiagSnapshot, PlatformNodeId, SubGoal};
 

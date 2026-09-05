@@ -12,6 +12,8 @@ use super::map_graph::MapGraph;
 use super::navigator::Navigator;
 use super::pickup::PickupController;
 use super::progress::ProgressMonitor;
+use super::survival::SurvivalFsm;
+use super::survival::SurvivalMode;
 use super::types::{
     EdgeKind, ExecutorResult, NavBotConfig, NavDiagSnapshot, PlatformNodeId, Side, SubGoal,
 };
@@ -33,6 +35,9 @@ pub struct NavBot {
     pickup: PickupController,
     combat: CombatAdapter,
     progress: ProgressMonitor,
+    survival: SurvivalFsm,
+    /// 0~1：YOLO 血条或 sim 真值，供保命决策。
+    pub hp_ratio: f32,
     pub last_reason: &'static str,
     pub last_diag: NavDiagSnapshot,
     nav_intent: InputFrame,
@@ -70,6 +75,8 @@ impl NavBot {
             pickup: PickupController::default(),
             combat: CombatAdapter::default(),
             progress,
+            survival: SurvivalFsm::default(),
+            hp_ratio: 1.0,
             last_reason: "init",
             last_diag: NavDiagSnapshot::default(),
             nav_intent: InputFrame::default(),
@@ -81,6 +88,14 @@ impl NavBot {
         }
     }
 
+    pub fn set_hp_ratio(&mut self, ratio: f32) {
+        self.hp_ratio = ratio.clamp(0.0, 1.0);
+    }
+
+    pub fn survival_mode(&self) -> SurvivalMode {
+        self.survival.mode()
+    }
+
     pub fn reset(&mut self, map: &GameMap, spawn_x: f32, spawn_y: f32) {
         let spawn_node = self.graph.node_at(map, spawn_x, spawn_y).unwrap_or(0);
         self.localizer.reset(spawn_x, spawn_y, spawn_node);
@@ -88,6 +103,8 @@ impl NavBot {
         self.executor.reset();
         self.pickup.reset();
         self.combat.reset();
+        self.survival.reset();
+        self.hp_ratio = 1.0;
         self.progress.reset(spawn_x, spawn_y, spawn_node);
         self.nav_intent = InputFrame::default();
         self.prev_node = spawn_node;
@@ -126,6 +143,7 @@ impl NavBot {
         self.executor.reset();
         self.pickup.reset();
         self.combat.reset();
+        self.survival.reset();
         self.progress.reset(x, y, node);
         self.nav_intent = InputFrame::default();
         self.prev_node = node;
@@ -504,6 +522,25 @@ impl NavBot {
         let nav_x = loc.world_x;
         let nav_y = loc.world_y;
 
+        self.survival.observe(obs, self.hp_ratio, nav_y);
+        if self.survival.force_climb_escape() {
+            if let Some(rx) = self.nearest_climb_up_rope(nav_node, nav_x) {
+                self.navigator.set_subgoal(SubGoal::ClimbUp { rope_x: rx });
+                self.last_reason = "survive_flee_climb";
+            } else if let Some(g) = self.navigator.plan_path_to_climb_pub(
+                &self.graph,
+                nav_node,
+                nav_x,
+                self.config.goto_tolerance_px,
+            ) {
+                self.navigator.set_subgoal(g);
+                self.last_reason = "survive_flee_path";
+            }
+        } else if self.survival.prefer_idle_heal(obs) {
+            self.navigator.set_subgoal(SubGoal::Idle);
+            self.last_reason = "survive_heal_wait";
+        }
+
         if nav_node != self.prev_node {
             self.navigator
                 .on_node_changed(&self.graph, self.prev_node, nav_node);
@@ -571,7 +608,11 @@ impl NavBot {
         }
 
         self.pickup.tick_memory(obs);
-        self.combat.observe(obs);
+        if self.survival.suppress_chase() {
+            self.combat.observe_strike_only(obs);
+        } else {
+            self.combat.observe(obs);
+        }
 
         let mut ctx = NavCtx::from_vision(
             obs,
@@ -1106,7 +1147,11 @@ impl NavBot {
             }
         }
 
-        let combat_active = self.combat.is_active();
+        let combat_active = if self.survival.prefer_idle_heal(obs) {
+            false
+        } else {
+            self.combat.is_active()
+        };
         // 脚边掉落：战斗中也按拾取键，不改位移（由 arbiter 叠 pick_up）。
         let pickup_near = if obs_drop_in_pickup_range(obs) {
             self.pickup.try_pickup(
@@ -1179,7 +1224,8 @@ impl NavBot {
             self.combat.reset();
         }
 
-        let force_transit = self.is_bottom_right_climb_approach(goal, nav_node, nav_x);
+        let force_transit = self.is_bottom_right_climb_approach(goal, nav_node, nav_x)
+            || self.survival.force_climb_escape();
         self.nav_intent = InterruptArbiter::merge(
             nav_out,
             pickup_near,
@@ -1227,6 +1273,21 @@ impl NavBot {
         };
 
         self.nav_intent
+    }
+
+    fn nearest_climb_up_rope(&self, node: u32, x: f32) -> Option<f32> {
+        let mut best: Option<(f32, f32)> = None;
+        for e in &self.graph.edges {
+            if e.from != node || e.kind != EdgeKind::ClimbUp {
+                continue;
+            }
+            let rx = e.rope_x.unwrap_or(e.target_x);
+            let d = (rx - x).abs();
+            if best.map(|(bd, _)| d < bd).unwrap_or(true) {
+                best = Some((d, rx));
+            }
+        }
+        best.map(|(_, rx)| rx)
     }
 
     fn is_bottom_right_climb_approach(

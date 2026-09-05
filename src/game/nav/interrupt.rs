@@ -146,6 +146,10 @@ impl CombatAdapter {
         self.fsm.observe(obs);
     }
 
+    pub fn observe_strike_only(&mut self, obs: &[f32]) {
+        self.fsm.observe_strike_only(obs);
+    }
+
     pub fn intent_frame(&mut self) -> InputFrame {
         let mut f = self.fsm.next_frame();
         f.pick_up = false;
