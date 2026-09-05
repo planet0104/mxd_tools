@@ -12,10 +12,10 @@ use crate::yolo::{Detection, LetterboxMeta, YoloDevice};
 /// 默认 YOLO 权重（编译期嵌入，发布 exe 无需旁路 `.onnx`）。
 pub const EMBEDDED_YOLO_ONNX: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/onnx/yolo_nangang_e3000_best.onnx"
+    "/onnx/best.onnx"
 ));
 
-pub const EMBEDDED_YOLO_ONNX_NAME: &str = "yolo_nangang_e3000_best.onnx (embedded)";
+pub const EMBEDDED_YOLO_ONNX_NAME: &str = "best.onnx (embedded)";
 
 fn yolo_to_ort(device: YoloDevice) -> OrtDevice {
     match device {

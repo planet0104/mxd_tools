@@ -38,8 +38,7 @@ python -c "import torch; print(torch.__version__, torch.cuda.is_available(), tor
 ## 训练
 
 ```powershell
-python .\scripts\train_yolo.py `
-  --data dataset/nangang_50001/generated/yolo/data.yaml
+python .\scripts\train_yolo.py --data dataset/nangang_50001/generated/yolo/data.yaml --epochs 4000 --cache ram --workers 8
 ```
 
 常用参数：

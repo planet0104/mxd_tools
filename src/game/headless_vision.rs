@@ -254,7 +254,7 @@ impl DeferredCaptureVision {
 }
 
 pub fn default_yolo_model_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("onnx/yolo_nangang_e3000_best.onnx")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("onnx/best.onnx")
 }
 
 /// 离屏 GL 渲染 + 非阻塞 YOLO 管线（macroquad 已初始化后使用）。

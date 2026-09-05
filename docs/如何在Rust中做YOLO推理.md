@@ -16,7 +16,7 @@ CPU 推理路径下，**ONNX Runtime、默认 YOLO 权重、默认地图 50001 p
 
 **不需要**再带 `onnxruntime.dll` / `.onnx` 模型文件。
 
-换模型时：重新导出 ONNX 覆盖 `onnx/yolo_nangang_e3000_best.onnx` 后重新 `cargo build --release`；或运行时传 `--model path/to.onnx`（工具 bin）覆盖嵌入权重。
+换模型时：重新导出 ONNX 覆盖 `onnx/best.onnx` 后重新 `cargo build --release`；或运行时传 `--model path/to.onnx`（工具 bin）覆盖嵌入权重。
 
 技术要点：
 
@@ -75,7 +75,7 @@ let mut det = YoloDetector::load_embedded(YoloDevice::Cpu)?;
 let boxes = det.detect_rgb8(w, h, &rgb)?;
 ```
 
-模块：`src/yolo/`（letterbox → ORT → 解码 + NMS）。默认嵌入 `onnx/yolo_nangang_e3000_best.onnx`。
+模块：`src/yolo/`（letterbox → ORT → 解码 + NMS）。默认嵌入 `onnx/best.onnx`。
 
 ## 5. Cargo 依赖
 
